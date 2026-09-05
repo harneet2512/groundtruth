@@ -39,21 +39,23 @@ type inspectionDeclaration struct {
 }
 
 type inspectionResponse struct {
-	Schema         string                  `json:"schema"`
-	RequestID      string                  `json:"request_id"`
-	Language       string                  `json:"language,omitempty"`
-	Path           string                  `json:"path,omitempty"`
-	ContentSHA256  string                  `json:"content_sha256,omitempty"`
-	ParserIdentity string                  `json:"parser_identity"`
-	Complete       bool                    `json:"complete"`
-	Declarations   []inspectionDeclaration `json:"declarations"`
-	Diagnostics    []string                `json:"diagnostics"`
+	Schema                 string                  `json:"schema"`
+	RequestID              string                  `json:"request_id"`
+	Language               string                  `json:"language,omitempty"`
+	Path                   string                  `json:"path,omitempty"`
+	ContentSHA256          string                  `json:"content_sha256,omitempty"`
+	ParserIdentity         string                  `json:"parser_identity"`
+	ParserIdentityComplete bool                    `json:"parser_identity_complete"`
+	Complete               bool                    `json:"complete"`
+	Declarations           []inspectionDeclaration `json:"declarations"`
+	Diagnostics            []string                `json:"diagnostics"`
 }
 
 func inspectionFailure(request inspectionRequest, reason string) inspectionResponse {
+	identity := declaredBuildIdentity()
 	return inspectionResponse{Schema: inspectionSchema, RequestID: request.RequestID,
 		Language: request.Language, Path: request.Path, ContentSHA256: request.ContentSHA256,
-		ParserIdentity: "gt-index/" + schemaVersion, Complete: false,
+		ParserIdentity: "gt-index/" + identity.BuildID, ParserIdentityComplete: identity.Complete, Complete: false,
 		Declarations: []inspectionDeclaration{}, Diagnostics: []string{reason}}
 }
 
@@ -96,9 +98,10 @@ func inspectSource(request inspectionRequest) inspectionResponse {
 	if result.ParserIncomplete {
 		diagnostics = append(diagnostics, "syntax_tree_incomplete")
 	}
+	identity := declaredBuildIdentity()
 	return inspectionResponse{Schema: inspectionSchema, RequestID: request.RequestID,
 		Language: strings.ToLower(spec.Name), Path: clean, ContentSHA256: actual,
-		ParserIdentity: "gt-index/" + schemaVersion, Complete: !result.ParserIncomplete,
+		ParserIdentity: "gt-index/" + identity.BuildID, ParserIdentityComplete: identity.Complete, Complete: !result.ParserIncomplete,
 		Declarations: declarations, Diagnostics: diagnostics}
 }
 

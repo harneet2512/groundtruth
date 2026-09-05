@@ -28,6 +28,24 @@ type buildIdentity struct {
 	Capabilities      []string `json:"capabilities"`
 }
 
+func declaredBuildIdentity() buildIdentity {
+	toolchain := goToolchain
+	if toolchain == "" || toolchain == "unknown" {
+		toolchain = runtime.Version()
+	}
+	capabilities := []string{"atomic_graph_publication", "call_resolution_v2", "framework_surface_resolution_v1", "incremental_stale_suppression", "parse_failure_accounting", "parser_inspection_v1", "retained_call_candidates", "versioned_query_policy"}
+	sort.Strings(capabilities)
+	identityMaterial := strings.Join([]string{commitSHA, buildTimeUTC, sourceFingerprint, toolchain, compiledBuildTags, schemaVersion, strings.Join(capabilities, ",")}, "\x00")
+	buildSum := sha256.Sum256([]byte(identityMaterial))
+	return buildIdentity{
+		Schema: buildInfoSchema, Complete: commitSHA != "" && commitSHA != "unknown" && buildTimeUTC != "" && buildTimeUTC != "unknown" && sourceFingerprint != "" && sourceFingerprint != "unknown" && compiledBuildTags != "" && compiledBuildTags != "unknown",
+		GitCommit: commitSHA, BuildTimeUTC: buildTimeUTC, SourceFingerprint: sourceFingerprint, GoToolchain: toolchain,
+		BuildTags: compiledBuildTags, BuildID: hex.EncodeToString(buildSum[:]),
+		SchemaVersion: schemaVersion, Capabilities: capabilities,
+	}
+
+}
+
 func currentBuildIdentity() (buildIdentity, error) {
 	executable, err := os.Executable()
 	if err != nil {
@@ -38,20 +56,9 @@ func currentBuildIdentity() (buildIdentity, error) {
 		return buildIdentity{}, fmt.Errorf("hash executable: %w", err)
 	}
 	executableSum := sha256.Sum256(bytes)
-	toolchain := goToolchain
-	if toolchain == "" || toolchain == "unknown" {
-		toolchain = runtime.Version()
-	}
-	capabilities := []string{"atomic_graph_publication", "call_resolution_v2", "framework_surface_resolution_v1", "incremental_stale_suppression", "parse_failure_accounting", "retained_call_candidates", "versioned_query_policy"}
-	sort.Strings(capabilities)
-	identityMaterial := strings.Join([]string{commitSHA, buildTimeUTC, sourceFingerprint, toolchain, compiledBuildTags, schemaVersion, strings.Join(capabilities, ",")}, "\x00")
-	buildSum := sha256.Sum256([]byte(identityMaterial))
-	return buildIdentity{
-		Schema: buildInfoSchema, Complete: commitSHA != "" && commitSHA != "unknown" && buildTimeUTC != "" && buildTimeUTC != "unknown" && sourceFingerprint != "" && sourceFingerprint != "unknown" && compiledBuildTags != "" && compiledBuildTags != "unknown",
-		GitCommit: commitSHA, BuildTimeUTC: buildTimeUTC, SourceFingerprint: sourceFingerprint, GoToolchain: toolchain,
-		BuildTags: compiledBuildTags, BuildID: hex.EncodeToString(buildSum[:]), ExecutableSHA256: hex.EncodeToString(executableSum[:]),
-		SchemaVersion: schemaVersion, Capabilities: capabilities,
-	}, nil
+	identity := declaredBuildIdentity()
+	identity.ExecutableSHA256 = hex.EncodeToString(executableSum[:])
+	return identity, nil
 }
 
 func writeBuildInfo(w io.Writer) error {
