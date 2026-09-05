@@ -37,3 +37,30 @@ Required before release: exact rebuilt wheel/source correspondence, installed
 harness tests, Linux producer build and identity, clean source commit/tree,
 independent review packets, updated bundle pins, and provider-free acceptance.
 This document is provenance disclosure, not an independent PASS review.
+
+## Repairs after the reconstruction commit
+
+The initial reconstruction is commit `473ebdb8324d175fc911a727d9d63e5efcbcfc08`.
+Subsequent source edits deliberately depart from the historical wheel:
+
+- Restore the producer's existing Ruff rule selection and exceptions, without
+  adding new exceptions. Repair unused imports and mechanical lint findings;
+  apply formatter changes with an AST-equality check before functional edits.
+- Separate raw issue trace hints from repository-verified frames. Hints no
+  longer depend on the caller's working directory. Verified relative paths
+  must resolve inside the repository, including after symlink resolution.
+- Restore verified-witness precedence in final evidence reranking. Candidate
+  order is distinct from the score-separation gate: flat scores still do not
+  establish a confident primary target.
+- CI checks out LFS payloads so the real E5 load test receives an ONNX model,
+  not a Git LFS text pointer. The live local model-load check passes.
+
+Tests are reconciled with the recovered runtime contracts: explicit LSP scope
+arguments, real files for verified trace fixtures, demand-paged graph maps,
+source-supported graph edges, non-destructive LSP tombstones, rejection of
+unconfidenceable facts, and preservation of distinct evidence relationships.
+The runtime reference's corresponding test changes were inspected to confirm
+these contracts; runtime safety checks were not relaxed to satisfy old tests.
+Two strict expected-failure markers were removed where the recovered runtime
+already satisfies the checks. Route/re-export retention now exercises the real
+filter instead of depending on source-code line formatting.

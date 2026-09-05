@@ -249,11 +249,7 @@ def lexical_file_search(
             text = path.read_text(encoding="utf-8", errors="ignore")[:max_bytes]
         except OSError:
             continue
-        counts = Counter(
-            tok.lower()
-            for tok in _WORD_RE.findall(text)
-            if tok.lower() in term_set
-        )
+        counts = Counter(tok.lower() for tok in _WORD_RE.findall(text) if tok.lower() in term_set)
         if not counts:
             continue
         for term in counts:

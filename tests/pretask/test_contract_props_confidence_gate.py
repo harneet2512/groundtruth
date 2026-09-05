@@ -1,8 +1,8 @@
 """Regression (I1/I3): contract_map._read_props gates properties at the fact floor.
 
 A property mined below confidence 0.5 is not a contract FACT and must not be delivered
-(correct-or-quiet). A legacy schema without a `properties.confidence` column degrades to
-permissive (gt_gt behavior, I5). 'boundary_condition' has no value-validator, so it
+(correct-or-quiet). A legacy schema without a `properties.confidence` column cannot
+certify the property (B-25). 'boundary_condition' has no value-validator, so it
 isolates the confidence gate cleanly.
 """
 
@@ -43,10 +43,11 @@ def test_low_confidence_property_is_dropped():
     assert "y < 10" not in vals
 
 
-def test_legacy_schema_without_confidence_is_permissive():
+def test_legacy_schema_without_confidence_cannot_certify_properties():
     conn = _conn(False)
     conn.execute(
         "INSERT INTO properties (node_id,kind,value,line) VALUES (1,'boundary_condition','x > 0',1)"
     )
     conn.commit()
-    assert "x > 0" in _read_props(conn, [1]).get("boundary_condition", [])
+    assert _read_props(conn, [1]).get("boundary_condition", []) == []
+    assert conn.execute("SELECT value FROM properties").fetchone()[0] == "x > 0"

@@ -51,11 +51,7 @@ def obligation_to_finding(ob: Obligation) -> Finding:
         message=ob.reason,
         evidence_locations=[Location(file=ob.target_file, symbol=ob.source)],
         why_now=WhyNow.PATCH_READY,
-        agent_action=(
-            AgentAction.FIX_REQUIRED
-            if ob.confidence >= 0.85
-            else AgentAction.VERIFY
-        ),
+        agent_action=(AgentAction.FIX_REQUIRED if ob.confidence >= 0.85 else AgentAction.VERIFY),
         rule_id=f"GT-OBL-{ob.kind.upper()}",
     )
 
@@ -103,11 +99,7 @@ def change_evidence_to_finding(ce: ChangeEvidence) -> Finding:
         location=Location(file=ce.file_path, line=ce.line),
         message=ce.message,
         why_now=WhyNow.FILE_CHANGED,
-        agent_action=(
-            AgentAction.FIX_REQUIRED
-            if ce.confidence >= 0.85
-            else AgentAction.VERIFY
-        ),
+        agent_action=(AgentAction.FIX_REQUIRED if ce.confidence >= 0.85 else AgentAction.VERIFY),
         rule_id=f"GT-CHG-{ce.kind.upper()}",
     )
 
@@ -258,14 +250,26 @@ def evidence_node_to_finding(
     resolution = getattr(en, "resolution_method", None)
 
     if confidence is None:
-        if resolution in ("same_file", "import", "verified_unique", "type_flow", "import_type", "return_type", "unique_method", "lsp", "inherited"):
+        if resolution in (
+            "same_file",
+            "import",
+            "verified_unique",
+            "type_flow",
+            "import_type",
+            "return_type",
+            "unique_method",
+            "lsp",
+            "inherited",
+        ):
             confidence = min(1.0, 0.5 + score * 0.15)
         elif resolution == "name_match":
             confidence = min(1.0, 0.3 + score * 0.15)
         else:
             confidence = min(1.0, 0.4 + score * 0.15)
 
-    why_now = WhyNow.FILE_OPENED if family in ("IMPORT", "TEST", "PRECEDENT") else WhyNow.FILE_CHANGED
+    why_now = (
+        WhyNow.FILE_OPENED if family in ("IMPORT", "TEST", "PRECEDENT") else WhyNow.FILE_CHANGED
+    )
 
     return Finding(
         kind=kind,

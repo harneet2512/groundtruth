@@ -47,6 +47,7 @@ FIVE INVARIANTS (all enforced here + at import, all unit-tested):
 PURE · DETERMINISTIC · STDLIB-ONLY (``hashlib``). No time, no randomness, no I/O, no
 third-party or ``groundtruth`` imports — safe to consult on the hot delivery path.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -65,8 +66,8 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # the two-valued verdict
 # --------------------------------------------------------------------------- #
-DELIVER = "DELIVER"   # ship the fact's bytes to the model (the control-within-run arm)
-HOLDOUT = "HOLDOUT"   # withhold: zero model bytes, shadow-ledger row only (the treated arm)
+DELIVER = "DELIVER"  # ship the fact's bytes to the model (the control-within-run arm)
+HOLDOUT = "HOLDOUT"  # withhold: zero model bytes, shadow-ledger row only (the treated arm)
 
 # --------------------------------------------------------------------------- #
 # the participate / exclude sets — the E10 safety allowlist.
@@ -111,7 +112,7 @@ PARTICIPATING_CLASSES: frozenset[str] = frozenset(
 
 SAFETY_EXCLUDED_CLASSES: frozenset[str] = frozenset(
     {
-        "syntax_result",   # edit.syntax — the edit-acceptability integrity check
+        "syntax_result",  # edit.syntax — the edit-acceptability integrity check
         "submit_refusal",  # the completion gate
     }
 )
@@ -142,8 +143,8 @@ _CLASS_RESOLUTION: dict[str, str] = {
     "cochange_prior": "cochange_prior",
     "newfile_precedent": "newfile_precedent",
     "recovery": "recovery",
-    "syntax_result": "syntax_result",     # SAFETY
-    "submit_refusal": "submit_refusal",    # SAFETY
+    "syntax_result": "syntax_result",  # SAFETY
+    "submit_refusal": "submit_refusal",  # SAFETY
     # --- fact_registry finer evidence_type aliases ---
     "def_ref_partition": "def_partition",
     "name_fold": "def_partition",
@@ -190,11 +191,11 @@ _CLASS_RESOLUTION: dict[str, str] = {
     "verify.horizon.executed": "covering_red",
     "l5.build_fail": "covering_red",
     # --- SAFETY seam kinds (edit integrity + the submit/completion gate) -> excluded ---
-    "edit.syntax": "syntax_result",         # SAFETY
-    "edit_check": "syntax_result",           # SAFETY
-    "submit_gate": "submit_refusal",         # SAFETY
-    "completion_cert": "submit_refusal",     # SAFETY
-    "submit.refusal": "submit_refusal",      # SAFETY
+    "edit.syntax": "syntax_result",  # SAFETY
+    "edit_check": "syntax_result",  # SAFETY
+    "submit_gate": "submit_refusal",  # SAFETY
+    "completion_cert": "submit_refusal",  # SAFETY
+    "submit.refusal": "submit_refusal",  # SAFETY
 }
 
 # the fixed hash space — the first 8 bytes of the sha digest as an unsigned 64-bit bucket.
@@ -220,7 +221,7 @@ def canonical_class(raw: str) -> "str | None":
         return None
     for _pref in ("ga.", "gateway."):  # plane prefixes carried by ledger row labels
         if k.startswith(_pref):
-            k = k[len(_pref):]
+            k = k[len(_pref) :]
             break
     hit = _CLASS_RESOLUTION.get(k)
     if hit is not None:
@@ -257,9 +258,7 @@ def parse_rate(rate: object) -> float:
     return r
 
 
-def _bucket(
-    task_id: str, canon: str, dedup_key: str, predecision_id: str = ""
-) -> int:
+def _bucket(task_id: str, canon: str, dedup_key: str, predecision_id: str = "") -> int:
     """The deterministic sha256 bucket in ``[0, 2**64)`` for one delivery instance. Folds the
     canonical class in (invariant 4: stratification) and the ``dedup_key`` (so distinct
     delivery instances of the same class get independent draws). Injective framing via the
@@ -313,9 +312,7 @@ def assign(
     # integer threshold from the (deterministic, IEEE-754) product — no float in the compare.
     threshold = int(r * _HASH_SPACE)
     return (
-        HOLDOUT
-        if _bucket(task_id, canon, dedup_key, predecision_id or "") < threshold
-        else DELIVER
+        HOLDOUT if _bucket(task_id, canon, dedup_key, predecision_id or "") < threshold else DELIVER
     )
 
 
@@ -326,17 +323,13 @@ def assign(
 def _self_check() -> None:
     overlap = PARTICIPATING_CLASSES & SAFETY_EXCLUDED_CLASSES
     if overlap:
-        raise ValueError(
-            f"shadow_holdout: participate/safety sets overlap {sorted(overlap)}"
-        )
+        raise ValueError(f"shadow_holdout: participate/safety sets overlap {sorted(overlap)}")
     known = PARTICIPATING_CLASSES | SAFETY_EXCLUDED_CLASSES
     for src, dst in _CLASS_RESOLUTION.items():
         if not isinstance(src, str) or not src.strip():
             raise ValueError(f"shadow_holdout: resolution key {src!r} empty/non-str")
         if dst not in known:
-            raise ValueError(
-                f"shadow_holdout: resolution {src!r} -> {dst!r} is not a known class"
-            )
+            raise ValueError(f"shadow_holdout: resolution {src!r} -> {dst!r} is not a known class")
     # every safety class resolves to ITSELF and is non-participating (the E10 exclusion).
     for s in SAFETY_EXCLUDED_CLASSES:
         if _CLASS_RESOLUTION.get(s) != s or s in PARTICIPATING_CLASSES:

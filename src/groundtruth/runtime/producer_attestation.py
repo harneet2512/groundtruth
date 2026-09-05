@@ -189,9 +189,7 @@ def _validate_predicates(
             errors.append(f"{item}:proof_refs:required")
         if predicate.verdict == UNMEASURED and predicate.proof_refs:
             errors.append(f"{item}:proof_refs:forbidden_when_unmeasured")
-        if predicate.verdict in (PASS, FAIL) and not _nonempty_string(
-            predicate.observation
-        ):
+        if predicate.verdict in (PASS, FAIL) and not _nonempty_string(predicate.observation):
             errors.append(f"{item}:observation:empty")
         for proof_index, proof in enumerate(predicate.proof_refs):
             if not isinstance(proof, ProofRef):
@@ -224,9 +222,7 @@ def validate(attestation: ProducerAttestation) -> tuple[str, ...]:
     if registration is None:
         errors.append(f"evidence_type:unregistered:{attestation.evidence_type!r}")
     else:
-        if not producer_matches(
-            attestation.evidence_type, attestation.runtime_producer_id
-        ):
+        if not producer_matches(attestation.evidence_type, attestation.runtime_producer_id):
             errors.append(f"producer:unauthorized:{attestation.runtime_producer_id!r}")
         if attestation.registered_producer_id != registration.producer:
             errors.append(
@@ -247,9 +243,7 @@ def validate(attestation: ProducerAttestation) -> tuple[str, ...]:
         errors.append("source_artifacts:empty")
     elif not all(isinstance(ref, ArtifactRef) for ref in source_artifacts):
         errors.append("source_artifacts:wrong_type")
-        source_artifacts = tuple(
-            ref for ref in source_artifacts if isinstance(ref, ArtifactRef)
-        )
+        source_artifacts = tuple(ref for ref in source_artifacts if isinstance(ref, ArtifactRef))
     if source_artifacts and source_artifacts != tuple(sorted(set(source_artifacts))):
         errors.append("source_artifacts:not_unique_sorted")
     for index, ref in enumerate(source_artifacts):
@@ -330,16 +324,12 @@ def to_dict(attestation: ProducerAttestation) -> dict[str, Any]:
         "registered_producer_id": attestation.registered_producer_id,
         "candidate_id": attestation.candidate_id,
         "delivery_seal": attestation.delivery_seal,
-        "source_artifacts": [
-            _artifact_to_dict(ref) for ref in attestation.source_artifacts
-        ],
+        "source_artifacts": [_artifact_to_dict(ref) for ref in attestation.source_artifacts],
         "truth_predicates": [
-            _predicate_to_dict(predicate)
-            for predicate in attestation.truth_predicates
+            _predicate_to_dict(predicate) for predicate in attestation.truth_predicates
         ],
         "freshness_predicates": [
-            _predicate_to_dict(predicate)
-            for predicate in attestation.freshness_predicates
+            _predicate_to_dict(predicate) for predicate in attestation.freshness_predicates
         ],
         "truth_verdict": attestation.truth_verdict,
         "freshness_verdict": attestation.freshness_verdict,

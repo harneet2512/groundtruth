@@ -52,10 +52,10 @@ __all__ = ["StratumResult", "classify_stratum"]
 # Rust ``panicked at`` backtrace as B on a multi-language bench.
 _TRACEBACK_RES = (
     re.compile(r"^\s*Traceback \(most recent call last\):", re.MULTILINE),  # Python
-    re.compile(r"\n\s+at\s+.+\(.+:\d+:\d+\)"),                                # JS/TS
-    re.compile(r"^panic:\s|\ngoroutine \d+ \[", re.MULTILINE),               # Go
-    re.compile(r"thread '.*' panicked at|panicked at .+:\d+:\d+"),           # Rust
-    re.compile(r"^\s*at .+\.java:\d+\)", re.MULTILINE),                       # Java
+    re.compile(r"\n\s+at\s+.+\(.+:\d+:\d+\)"),  # JS/TS
+    re.compile(r"^panic:\s|\ngoroutine \d+ \[", re.MULTILINE),  # Go
+    re.compile(r"thread '.*' panicked at|panicked at .+:\d+:\d+"),  # Rust
+    re.compile(r"^\s*at .+\.java:\d+\)", re.MULTILINE),  # Java
 )
 
 # Feature-add verbs in the issue title region. EVIDENCE ONLY — never the sole
@@ -117,8 +117,8 @@ def classify_stratum(
     correct-or-quiet: a missing graph means ``symbols``/``unresolved`` cannot be
     known, so A/D degrade to B rather than guessing.
     """
-    anchors = issue_anchors if issue_anchors is not None else extract_issue_anchors(
-        issue_text, graph_db
+    anchors = (
+        issue_anchors if issue_anchors is not None else extract_issue_anchors(issue_text, graph_db)
     )
 
     # correct-or-quiet: A and D both assert something about GRAPH RESOLUTION
@@ -143,9 +143,7 @@ def classify_stratum(
     # few prose/error tokens that slipped past the anchor filter would mislabel an
     # existing-file bug as new-file. With no resolved anchors, unresolved dominance
     # alone still routes to D (the pure greenfield case).
-    d_dominant = graph_resolved and n_unres > 0 and (
-        n_sym == 0 or (n_unres >= n_sym and verb_hit)
-    )
+    d_dominant = graph_resolved and n_unres > 0 and (n_sym == 0 or (n_unres >= n_sym and verb_hit))
     a_anchored = graph_resolved and n_sym > 0
 
     if has_tb:

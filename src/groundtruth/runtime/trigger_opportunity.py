@@ -69,10 +69,18 @@ _UNOBSERVABLE_BOUNDARIES: dict[str, str] = {
 #: What ``gateway._observe_semantic_events`` can actually put on an observation. The
 #: import-time self-check asserts every observable trigger lands inside this set, so a
 #: registry row added at a boundary nothing emits fails LOUD instead of going quietly dark.
-DERIVABLE_BOUNDARIES: frozenset[str] = frozenset({
-    "edit_result", "test_result", "test_executed_no_tests", "file_view",
-    "submit", "search_result", "failed_search", "failure_obs",
-})
+DERIVABLE_BOUNDARIES: frozenset[str] = frozenset(
+    {
+        "edit_result",
+        "test_result",
+        "test_executed_no_tests",
+        "file_view",
+        "submit",
+        "search_result",
+        "failed_search",
+        "failure_obs",
+    }
+)
 
 _SCHEMA = "gt.trigger_opportunity.v1"
 
@@ -151,9 +159,7 @@ def observable_triggers() -> tuple[TriggerSpec, ...]:
 
 def triggers_for_event(event: str) -> tuple[TriggerSpec, ...]:
     """Every trigger whose boundary is ``event`` — the emitter's whole lookup."""
-    return tuple(
-        spec for spec in observable_triggers() if spec.required_event == event
-    )
+    return tuple(spec for spec in observable_triggers() if spec.required_event == event)
 
 
 def _self_check() -> None:

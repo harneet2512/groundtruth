@@ -117,8 +117,10 @@ def _is_source_file(path: str) -> bool:
 
 def _is_root_scaffold(status: str, path: str) -> bool:
     norm = _norm(path)
-    return status.startswith("A") and "/" not in norm and any(
-        fnmatch.fnmatch(norm, pattern) for pattern in ROOT_SCAFFOLD_PATTERNS
+    return (
+        status.startswith("A")
+        and "/" not in norm
+        and any(fnmatch.fnmatch(norm, pattern) for pattern in ROOT_SCAFFOLD_PATTERNS)
     )
 
 
@@ -157,10 +159,18 @@ def _focus_file(item: Any) -> str:
 # into the patch). Oversize/lockfile are ADVISORY only (correct-or-quiet:
 # a false block is worse than no gate — plan §6 invariant ②).
 # ---------------------------------------------------------------------------
-_LOCKFILE_NAMES: frozenset[str] = frozenset({
-    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock",
-    "go.sum", "poetry.lock", "gemfile.lock", "composer.lock",
-})
+_LOCKFILE_NAMES: frozenset[str] = frozenset(
+    {
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "cargo.lock",
+        "go.sum",
+        "poetry.lock",
+        "gemfile.lock",
+        "composer.lock",
+    }
+)
 _BINARY_DIFFER = re.compile(r"^Binary files a/(.+?) and b/(.+?) differ", re.MULTILINE)
 
 
@@ -247,8 +257,12 @@ def _git_numstat(repo_root: str) -> str:
     try:
         proc = subprocess.run(
             ["git", "-C", repo_root, "diff", "--numstat", "HEAD"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=20, check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -292,8 +306,12 @@ def audit_patch(
 
     root_scaffolds = sorted(path for status, path in rows if _is_root_scaffold(status, path))
     root_scaffold_set = set(root_scaffolds)
-    source_files = sorted(path for path in changed if path not in root_scaffold_set and _is_source_file(path))
-    test_files = sorted(path for path in changed if path not in root_scaffold_set and _is_test_file(path))
+    source_files = sorted(
+        path for path in changed if path not in root_scaffold_set and _is_source_file(path)
+    )
+    test_files = sorted(
+        path for path in changed if path not in root_scaffold_set and _is_test_file(path)
+    )
     cluster_touched = sorted(path for path in changed if path in cluster)
     focus_touched_set = {path for path in changed if path in focus}
     focus_touched = [path for path in focus_ranked if path in focus_touched_set]

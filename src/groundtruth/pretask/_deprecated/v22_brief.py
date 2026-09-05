@@ -49,6 +49,7 @@ the file paths, ``file:line — function`` anchors, and rank/score numbers only.
 Honest per-edge provenance lives in the appended ``<gt-graph-map>`` block
 (verified facts vs ``(unverified)`` name_match edges), not here.
 """
+
 from __future__ import annotations
 
 import os
@@ -82,9 +83,7 @@ def _lookup_start_lines(
     try:
         # RC-04: switch to URI mode + busy_timeout to avoid lock contention
         # with the gt-index writer; this lookup is read-only.
-        conn = sqlite3.connect(
-            f"file:{graph_db_path}?mode=ro", uri=True, timeout=10
-        )
+        conn = sqlite3.connect(f"file:{graph_db_path}?mode=ro", uri=True, timeout=10)
         conn.execute("PRAGMA busy_timeout = 5000")
     except sqlite3.Error:
         return {}
@@ -120,10 +119,7 @@ def _format_brief(
         parts.append("(no functions ranked)")
     for i, (fn, line) in enumerate(funcs_with_lines[:_TOP_FUNCS]):
         line_token = str(line) if line > 0 else "?"
-        parts.append(
-            f"{fn.file}:{line_token} — {fn.function} "
-            f"(rank={i + 1}, score={fn.score:.3f})"
-        )
+        parts.append(f"{fn.file}:{line_token} — {fn.function} (rank={i + 1}, score={fn.score:.3f})")
     parts.append("</gt-focus-functions>")
     parts.append("</gt-task-brief>")
     return "\n".join(parts)
@@ -172,6 +168,7 @@ def generate_brief(
         # broken ranker is observable instead of vanishing. "Fired != delivered."
         try:
             from groundtruth.observability.silent_failures import record
+
             record("v22_brief.rank_files", exc)
         except Exception:  # pragma: no cover — never trade one swallow for another
             pass
@@ -185,9 +182,7 @@ def generate_brief(
         ranked_funcs = []
 
     top_funcs = ranked_funcs[:_TOP_FUNCS]
-    line_lookup = _lookup_start_lines(
-        graph_db_path, [(fn.file, fn.function) for fn in top_funcs]
-    )
+    line_lookup = _lookup_start_lines(graph_db_path, [(fn.file, fn.function) for fn in top_funcs])
     funcs_with_lines = [(fn, line_lookup.get((fn.file, fn.function), 0)) for fn in top_funcs]
 
     rendered = _format_brief(ranked_files, funcs_with_lines)

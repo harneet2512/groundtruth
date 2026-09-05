@@ -54,6 +54,7 @@ PERSISTS the run identity (``episode_id``), the ``step_limit`` budget, and the d
 ``delivery_ledger`` handle (parity with the ledger FILE surviving via
 ``_ledger_line_direct``). Per-turn accumulation is ordinary field mutation.
 """
+
 from __future__ import annotations
 
 import re
@@ -246,8 +247,7 @@ class EpisodeState:
                 for stem, entry in sorted(self.probe_ledger.items())
             },
             "edit_events": [dict(ev) for ev in self.edit_events],
-            "horizon_latches": {k: self.horizon_latches[k]
-                                for k in sorted(self.horizon_latches)},
+            "horizon_latches": {k: self.horizon_latches[k] for k in sorted(self.horizon_latches)},
             "submit_bounce_count": self.submit_bounce_count,
             # per-slot copy, mirroring edit_events (W4/F4 2026-07-10): slots are
             # envelope DICTS; sharing them let a later mark_* rewrite an exported
@@ -279,8 +279,7 @@ class EpisodeState:
         e.edited_tokens = set(d.get("edited_tokens") or ())
         e.tested_tokens = set(d.get("tested_tokens") or ())
         e.edited_lines_by_file = {
-            str(k): [list(r) for r in v]
-            for k, v in (d.get("edited_lines_by_file") or {}).items()
+            str(k): [list(r) for r in v] for k, v in (d.get("edited_lines_by_file") or {}).items()
         }
         e.test_count = int(d.get("test_count", 0))
         e.test_evidence_seen = bool(d.get("test_evidence_seen", False))

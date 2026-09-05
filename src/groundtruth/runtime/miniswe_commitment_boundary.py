@@ -51,7 +51,8 @@ class MiniSweCommitmentBoundary:
         plan_observer: Callable[
             [CommitmentControlContext, CommitmentControlPlan, tuple[Any, ...]],
             None,
-        ] | None = None,
+        ]
+        | None = None,
     ):
         execute_actions = getattr(agent, "execute_actions", None)
         if not callable(execute_actions):
@@ -81,10 +82,7 @@ class MiniSweCommitmentBoundary:
     @staticmethod
     def _tool_call_bound(actions: tuple[Any, ...]) -> bool:
         """Whether withholding these actions would strand a provider tool call."""
-        return any(
-            isinstance(action, dict) and action.get("tool_call_id")
-            for action in actions
-        )
+        return any(isinstance(action, dict) and action.get("tool_call_id") for action in actions)
 
     @classmethod
     def _unexecuted_observations(
@@ -108,9 +106,7 @@ class MiniSweCommitmentBoundary:
             return None
         get_template_vars = getattr(agent, "get_template_vars", None)
         try:
-            template_vars = (
-                get_template_vars() if callable(get_template_vars) else None
-            )
+            template_vars = get_template_vars() if callable(get_template_vars) else None
             rendered = formatter(
                 cls._message_with_actions(message, deferred),
                 [],
@@ -130,7 +126,10 @@ class MiniSweCommitmentBoundary:
         and thrashed to the step cap on 28/37 tasks). ``GT_WITHHOLD_REASON=0``
         is the kill switch back to the bare host padding."""
         return os.environ.get("GT_WITHHOLD_REASON", "1").strip().lower() not in (
-            "0", "false", "no", "off"
+            "0",
+            "false",
+            "no",
+            "off",
         )
 
     @classmethod
@@ -179,9 +178,7 @@ class MiniSweCommitmentBoundary:
             _agent: Any,
             message: dict[str, Any],
         ) -> list[dict[str, Any]]:
-            actions = tuple(
-                (message.get("extra") or {}).get("actions") or ()
-            )
+            actions = tuple((message.get("extra") or {}).get("actions") or ())
             if not actions:
                 return boundary._original_execute_actions(message)
             context = boundary.context_builder(message)
@@ -194,19 +191,14 @@ class MiniSweCommitmentBoundary:
                     intent.action.action_id: action
                     for intent, action in zip(context.intents, actions)
                 }
-                execute_now = tuple(
-                    by_id[intent.action.action_id]
-                    for intent in plan.execute_now
-                )
+                execute_now = tuple(by_id[intent.action.action_id] for intent in plan.execute_now)
             else:
                 if boundary.plan_observer is not None:
                     boundary.plan_observer(context, plan, actions)
                 return boundary._original_execute_actions(message)
 
             executed_ids = {id(action) for action in execute_now}
-            deferred = tuple(
-                action for action in actions if id(action) not in executed_ids
-            )
+            deferred = tuple(action for action in actions if id(action) not in executed_ids)
             if not deferred:
                 if boundary.plan_observer is not None:
                     boundary.plan_observer(context, plan, actions)
@@ -215,9 +207,7 @@ class MiniSweCommitmentBoundary:
                 )
             unexecuted: list[dict[str, Any]] | None = None
             if boundary._tool_call_bound(deferred):
-                unexecuted = boundary._unexecuted_observations(
-                    _agent, message, deferred
-                )
+                unexecuted = boundary._unexecuted_observations(_agent, message, deferred)
                 if unexecuted is not None:
                     unexecuted = boundary._explain_withhold(
                         unexecuted,

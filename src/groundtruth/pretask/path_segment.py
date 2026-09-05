@@ -5,6 +5,7 @@ the resulting segment-bag-of-words against issue query tokens. Returns a
 per-file 0-1 score suitable as a multiplicative boost on top of v7.4's
 content-BM25 file ranking.
 """
+
 from __future__ import annotations
 
 import math

@@ -17,6 +17,7 @@ Per CLAUDE.md: this is the kind of single-function boundary normalization
 required so every consumer query operates on canonical keys instead of
 reinventing inline normalization.
 """
+
 from __future__ import annotations
 
 import os
@@ -39,7 +40,7 @@ def _strip_workspace(path: str, workspace_root: str) -> str:
     ws = _normalize(workspace_root)
     np = _normalize(path)
     if np.startswith(ws + "/"):
-        return np[len(ws) + 1:]
+        return np[len(ws) + 1 :]
     if np == ws:
         return ""
     return np
@@ -71,7 +72,7 @@ def _candidate_forms(agent_path: str, workspace_root: str) -> list[str]:
     # Strip /workspace/ or /testbed/ container prefixes
     for container in ("workspace/", "testbed/", "repo/"):
         if np.startswith(container):
-            tail = np[len(container):]
+            tail = np[len(container) :]
             add(tail)
             # If next segment looks like instance_id, strip it too
             tparts = tail.split("/")

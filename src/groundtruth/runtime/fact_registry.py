@@ -97,15 +97,15 @@ __all__ = [
 # Event names = the §1 fine observation boundaries (earliest_event / deliver_by must be one
 # of these). Kept distinct from evidence_envelope._EVENTS on purpose: that is the coarse
 # preferred_event; these are the finer §1 boundaries. The comment on each maps it back.
-EVENT_TASK_START = "task_start"            # step-0 brief boundary (≈ envelope step0)
-EVENT_SEARCH_RESULT = "search_result"      # a search/grep result observation (≈ search)
-EVENT_FILE_VIEW = "file_view"              # a file-view observation (≈ view)
-EVENT_EDIT_RESULT = "edit_result"          # an edit-result observation (≈ edit)
-EVENT_TEST_RESULT = "test_result"          # a test-run result observation (≈ test)
-EVENT_SUBMIT = "submit"                    # the submit interception boundary (≈ submit)
+EVENT_TASK_START = "task_start"  # step-0 brief boundary (≈ envelope step0)
+EVENT_SEARCH_RESULT = "search_result"  # a search/grep result observation (≈ search)
+EVENT_FILE_VIEW = "file_view"  # a file-view observation (≈ view)
+EVENT_EDIT_RESULT = "edit_result"  # an edit-result observation (≈ edit)
+EVENT_TEST_RESULT = "test_result"  # a test-run result observation (≈ test)
+EVENT_SUBMIT = "submit"  # the submit interception boundary (≈ submit)
 EVENT_FIRST_VIEW_EDIT = "first_view_edit"  # §1 "first view/edit" (companion prior boundary)
-EVENT_FAILED_SEARCH = "failed_search"      # §1 "failed_search/ADD" (missing-role boundary)
-EVENT_FAILURE_OBS = "failure_obs"          # §1 "failure/loop obs" (stuck/pivot boundary)
+EVENT_FAILED_SEARCH = "failed_search"  # §1 "failed_search/ADD" (missing-role boundary)
+EVENT_FAILURE_OBS = "failure_obs"  # §1 "failure/loop obs" (stuck/pivot boundary)
 
 EVENTS: frozenset[str] = frozenset(
     {
@@ -147,9 +147,7 @@ RENDERERS: frozenset[str] = frozenset(
 # an internal producer input cannot borrow model-facing delivery gates.
 FACT_ROLE_DELIVERY = "fact_delivery"
 FACT_ROLE_INTERNAL_SUPPORT = "internal_support"
-FACT_ROLES: frozenset[str] = frozenset(
-    {FACT_ROLE_DELIVERY, FACT_ROLE_INTERNAL_SUPPORT}
-)
+FACT_ROLES: frozenset[str] = frozenset({FACT_ROLE_DELIVERY, FACT_ROLE_INTERNAL_SUPPORT})
 
 # max_dose sentinel for the ONE unbounded fact class (obligations = the whole plan, not a
 # single dose). §1 renders this as "—"; kept as the literal §1 cell value for fidelity.
@@ -176,17 +174,17 @@ class FactRegistration:
     hashable and the table round-trips byte-stably.
     """
 
-    fact_class: str            # the stable fact-class identity (== its REGISTRY key)
-    producer: str              # the engine that produces it (§1 producer column)
-    target_decision: str       # the EXACT agent decision it is meant to change (§1)
-    earliest_event: str        # first observation boundary it may deliver at (in EVENTS)
-    deliver_by: str            # LAST-useful boundary; deliver later => expire (in EVENTS)
-    surface: str               # delivery channel (§1 surface; in SURFACES)
-    native_renderer: str       # native FORM (§1 native_renderer; in RENDERERS)
-    max_dose: str              # dose ceiling per the §1 max_dose column ("1"/"small"/"—")
+    fact_class: str  # the stable fact-class identity (== its REGISTRY key)
+    producer: str  # the engine that produces it (§1 producer column)
+    target_decision: str  # the EXACT agent decision it is meant to change (§1)
+    earliest_event: str  # first observation boundary it may deliver at (in EVENTS)
+    deliver_by: str  # LAST-useful boundary; deliver later => expire (in EVENTS)
+    surface: str  # delivery channel (§1 surface; in SURFACES)
+    native_renderer: str  # native FORM (§1 native_renderer; in RENDERERS)
+    max_dose: str  # dose ceiling per the §1 max_dose column ("1"/"small"/"—")
     freshness_deps: tuple[str, ...] = field(default=())  # revisions that stale the fact
     receipt_predicate: str = ""  # NAME of the non-reacquisition receipt predicate (for now)
-    causal_eval: str = ""        # the paired/counterfactual method that grades causality
+    causal_eval: str = ""  # the paired/counterfactual method that grades causality
     fact_role: str = FACT_ROLE_DELIVERY  # terminal proof role; inventory membership unchanged
     # SS-1 (2026-07-13) — METADATA ONLY (consumed by telemetry; NO behavior change). Whether a
     # consumption ACK is expected for this class. Internal support rows set this false even
@@ -245,11 +243,11 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="spec",
         target_decision="initial plan",
         earliest_event=EVENT_TASK_START,
-        deliver_by=EVENT_TASK_START,          # §1: task_start
+        deliver_by=EVENT_TASK_START,  # §1: task_start
         surface="brief",
         native_renderer="plan",
-        max_dose=_DOSE_UNBOUNDED,             # §1: "—" (the whole plan, not one dose)
-        freshness_deps=("issue",),            # §1: issue
+        max_dose=_DOSE_UNBOUNDED,  # §1: "—" (the whole plan, not one dose)
+        freshness_deps=("issue",),  # §1: issue
         receipt_predicate="plan_reflects_obligations",
         causal_eval="paired_plan_coverage_delta",
     ),
@@ -267,10 +265,10 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         # win. The T0 baked brief tag is NOT registry-routed (gt_agent._substrate_brief reads
         # brief.txt directly), so this data change does not disturb the baked-brief delivery.
         earliest_event=EVENT_SEARCH_RESULT,
-        deliver_by=EVENT_SEARCH_RESULT,       # §1 re-slot: task_start -> search_result (D2)
+        deliver_by=EVENT_SEARCH_RESULT,  # §1 re-slot: task_start -> search_result (D2)
         surface="brief",
         native_renderer="ranked-list",
-        max_dose="small",                     # §1: small
+        max_dose="small",  # §1: small
         freshness_deps=("nodes", "edges", "content_rev"),  # §1: nodes+edges+content_rev
         receipt_predicate="opened_ranked_file_without_search",
         causal_eval="paired_steps_to_first_correct_edit",
@@ -280,7 +278,7 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="post_search",
         target_decision="which def to inspect",
         earliest_event=EVENT_SEARCH_RESULT,
-        deliver_by=EVENT_SEARCH_RESULT,       # §1: same search_result
+        deliver_by=EVENT_SEARCH_RESULT,  # §1: same search_result
         surface="post_search",
         native_renderer="grep-native",
         max_dose="1",
@@ -293,7 +291,7 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="contract_map",
         target_decision="how to modify a fn",
         earliest_event=EVENT_FILE_VIEW,
-        deliver_by=EVENT_FILE_VIEW,           # §1: file_view (PRE-EDIT) — last boundary
+        deliver_by=EVENT_FILE_VIEW,  # §1: file_view (PRE-EDIT) — last boundary
         #                                       the contract can still shape the edit
         surface="post_view",
         native_renderer="contract",
@@ -307,7 +305,7 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="edit_check",
         target_decision="is the edit acceptable",
         earliest_event=EVENT_EDIT_RESULT,
-        deliver_by=EVENT_EDIT_RESULT,         # §1: same edit_result
+        deliver_by=EVENT_EDIT_RESULT,  # §1: same edit_result
         surface="post_edit",
         native_renderer="compiler-native",
         max_dose="1",
@@ -323,7 +321,7 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="patch_delta",
         target_decision="must callers change",
         earliest_event=EVENT_EDIT_RESULT,
-        deliver_by=EVENT_EDIT_RESULT,         # §1: transactional edit_result
+        deliver_by=EVENT_EDIT_RESULT,  # §1: transactional edit_result
         surface="post_edit",
         native_renderer="diff-native",
         max_dose="1",
@@ -336,11 +334,11 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="covering_runner",
         target_decision="next repair action",
         earliest_event=EVENT_TEST_RESULT,
-        deliver_by=EVENT_TEST_RESULT,         # §1: same test_result
+        deliver_by=EVENT_TEST_RESULT,  # §1: same test_result
         surface="post_test",
         native_renderer="test-native",
         max_dose="1",
-        freshness_deps=("patch_rev",),        # §1: patch_rev
+        freshness_deps=("patch_rev",),  # §1: patch_rev
         receipt_predicate="targeted_covering_failure",
         causal_eval="paired_repair_targeting_delta",
     ),
@@ -349,7 +347,7 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="submit_gate",
         target_decision="is completion allowed",
         earliest_event=EVENT_SUBMIT,
-        deliver_by=EVENT_SUBMIT,              # §1: submit interception
+        deliver_by=EVENT_SUBMIT,  # §1: submit interception
         surface="submit",
         native_renderer="test-native",
         max_dose="1",
@@ -362,11 +360,11 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="curation",
         target_decision="companion-file choice",
         earliest_event=EVENT_FIRST_VIEW_EDIT,
-        deliver_by=EVENT_FIRST_VIEW_EDIT,     # §1: first view/edit
+        deliver_by=EVENT_FIRST_VIEW_EDIT,  # §1: first view/edit
         surface="post_view",
         native_renderer="list",
         max_dose="1",
-        freshness_deps=("cochange_rev",),     # §1: cochange_rev
+        freshness_deps=("cochange_rev",),  # §1: cochange_rev
         receipt_predicate="opened_companion_file",
         causal_eval="paired_companion_hit_rate",
         # Gateway consumes cochange as a ranking prior and explicitly emits no
@@ -380,11 +378,11 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="change_surface",
         target_decision="destination/integration",
         earliest_event=EVENT_FAILED_SEARCH,
-        deliver_by=EVENT_FAILED_SEARCH,       # §1: failed_search/ADD
+        deliver_by=EVENT_FAILED_SEARCH,  # §1: failed_search/ADD
         surface="post_search",
         native_renderer="list",
         max_dose="1",
-        freshness_deps=("closure_rev",),      # §1: closure_rev
+        freshness_deps=("closure_rev",),  # §1: closure_rev
         receipt_predicate="created_at_precedent_path",
         causal_eval="paired_integration_correctness",
     ),
@@ -393,11 +391,11 @@ _REGISTRATIONS: tuple[FactRegistration, ...] = (
         producer="governor",
         target_decision="whether to pivot",
         earliest_event=EVENT_FAILURE_OBS,
-        deliver_by=EVENT_FAILURE_OBS,         # §1: same failure/loop obs
+        deliver_by=EVENT_FAILURE_OBS,  # §1: same failure/loop obs
         surface="steer",
         native_renderer="imperative",
         max_dose="1",
-        freshness_deps=("episode_state",),    # §1: episode_state
+        freshness_deps=("episode_state",),  # §1: episode_state
         receipt_predicate="pivoted_after_steer",
         causal_eval="paired_pivot_after_stuck_rate",
     ),
@@ -527,9 +525,7 @@ def _self_check() -> None:
     )
     for key, reg in REGISTRY.items():
         if reg.fact_class != key:
-            raise ValueError(
-                f"fact_registry: key {key!r} != fact_class {reg.fact_class!r}"
-            )
+            raise ValueError(f"fact_registry: key {key!r} != fact_class {reg.fact_class!r}")
         for name in _scalars:
             val = getattr(reg, name)
             if not isinstance(val, str) or not val.strip():
@@ -552,13 +548,8 @@ def _self_check() -> None:
             raise ValueError(f"fact_registry: {key}.ack_expected is not a bool")
         if reg.fact_role not in FACT_ROLES:
             raise ValueError(f"fact_registry: {key}.fact_role {reg.fact_role!r}")
-        if (
-            reg.fact_role == FACT_ROLE_INTERNAL_SUPPORT
-            and reg.ack_expected is not False
-        ):
-            raise ValueError(
-                f"fact_registry: {key} internal support cannot expect delivery ack"
-            )
+        if reg.fact_role == FACT_ROLE_INTERNAL_SUPPORT and reg.ack_expected is not False:
+            raise ValueError(f"fact_registry: {key} internal support cannot expect delivery ack")
     # Graph-F2: the evidence-type alias map is part of the vocabulary contract — a bad
     # alias must fail LOUD at import, never silently mis-route (or silence) a shipped fact.
     for src, dst in _EVIDENCE_TYPE_ALIASES.items():
@@ -1006,9 +997,13 @@ def _self_check_executable() -> None:
         if registration_for(et) is None:
             raise ValueError(f"fact_registry: FRESHNESS_SURFACES key {et!r} resolves to no class")
         if is_patch_bound(et):
-            raise ValueError(f"fact_registry: {et!r} is both patch-bound and graph-freshness-mapped")
+            raise ValueError(
+                f"fact_registry: {et!r} is both patch-bound and graph-freshness-mapped"
+            )
         if not surfaces or not all(s in _KNOWN_DB_SURFACES for s in surfaces):
-            raise ValueError(f"fact_registry: FRESHNESS_SURFACES[{et!r}] has an unknown/empty surface")
+            raise ValueError(
+                f"fact_registry: FRESHNESS_SURFACES[{et!r}] has an unknown/empty surface"
+            )
         # the operational surfaces MUST cover the canonical class's graph deps, minus any
         # DOCUMENTED narrowing — a silent DROP of a canonical dep (drift) fails here.
         canonical = set(registry_graph_surfaces(et)) - _SURFACE_NARROWINGS.get(et, frozenset())

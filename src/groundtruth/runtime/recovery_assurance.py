@@ -41,17 +41,11 @@ _FAILURE_STATE_MARKER_KEYS = frozenset(
 
 def _canonical_value(value: Any) -> Any:
     if is_dataclass(value):
-        return {
-            field.name: _canonical_value(getattr(value, field.name))
-            for field in fields(value)
-        }
+        return {field.name: _canonical_value(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Mapping):
-        return {
-            str(key): _canonical_value(value[key])
-            for key in sorted(value, key=str)
-        }
+        return {str(key): _canonical_value(value[key]) for key in sorted(value, key=str)}
     if isinstance(value, (tuple, list)):
         return [_canonical_value(item) for item in value]
     if isinstance(value, (set, frozenset)):
@@ -83,13 +77,11 @@ def _hash(value: Any) -> str:
 def _quarantine_marker_path(
     runtime: rr.AttemptReasoningRuntime,
 ) -> Path:
-    attempt_hash = hashlib.sha256(
-        runtime.attempt_id.encode("utf-8", "surrogatepass")
-    ).hexdigest()[:16]
+    attempt_hash = hashlib.sha256(runtime.attempt_id.encode("utf-8", "surrogatepass")).hexdigest()[
+        :16
+    ]
     journal_path = Path(runtime.journal.path)
-    return journal_path.with_name(
-        f"{journal_path.name}.gt_attempt_health_{attempt_hash}.json"
-    )
+    return journal_path.with_name(f"{journal_path.name}.gt_attempt_health_{attempt_hash}.json")
 
 
 def _failure_state_payload(
@@ -107,13 +99,9 @@ def _failure_state_payload(
         "last_verified_snapshot_id": state.last_verified_snapshot_id,
         "native_path_enabled": state.native_path_enabled,
         "quarantine_reason": (
-            state.quarantine_reason.value
-            if state.quarantine_reason is not None
-            else None
+            state.quarantine_reason.value if state.quarantine_reason is not None else None
         ),
-        "recovery_attempted_signatures": list(
-            state.recovery_attempted_signatures
-        ),
+        "recovery_attempted_signatures": list(state.recovery_attempted_signatures),
     }
 
 
@@ -163,9 +151,7 @@ def _persist_quarantine_marker(
         or not state.native_path_enabled
         or state.quarantine_reason is None
     ):
-        raise rr.StateIntegrityError(
-            "attempt-health marker accepts only terminal quarantine state"
-        )
+        raise rr.StateIntegrityError("attempt-health marker accepts only terminal quarantine state")
     path = _quarantine_marker_path(runtime)
     payload = _sealed_marker_bytes(state)
     if path.exists():
@@ -195,9 +181,8 @@ def _state_from_marker(
             raw.get("schema") != _QUARANTINE_MARKER_SCHEMA
             or not isinstance(seal, str)
             or seal != _hash(unsigned)
-            or payload != (
-                _canonical_json({**unsigned, "record_sha256": seal}) + "\n"
-            ).encode("utf-8")
+            or payload
+            != (_canonical_json({**unsigned, "record_sha256": seal}) + "\n").encode("utf-8")
             or not isinstance(raw.get("state"), dict)
         ):
             raise ValueError("attempt-health marker seal invalid")
@@ -214,18 +199,11 @@ def _state_from_marker(
         )
         if (
             set(state_raw) != _FAILURE_STATE_MARKER_KEYS
-            or any(
-                type(state_raw.get(field_name)) is not bool
-                for field_name in bool_fields
-            )
+            or any(type(state_raw.get(field_name)) is not bool for field_name in bool_fields)
             or any(
                 not isinstance(state_raw.get(field_name), list)
-                or any(
-                    not isinstance(item, str)
-                    for item in state_raw[field_name]
-                )
-                or len(state_raw[field_name])
-                != len(set(state_raw[field_name]))
+                or any(not isinstance(item, str) for item in state_raw[field_name])
+                or len(state_raw[field_name]) != len(set(state_raw[field_name]))
                 for field_name in list_fields
             )
         ):
@@ -236,8 +214,7 @@ def _state_from_marker(
             health=rr.RuntimeHealthState(state_raw["health"]),
             assurance=rr.AssuranceStatus(state_raw["assurance"]),
             isolated_components=tuple(
-                str(item)
-                for item in state_raw.get("isolated_components", ())
+                str(item) for item in state_raw.get("isolated_components", ())
             ),
             recovery_attempted_signatures=tuple(
                 str(item)
@@ -246,20 +223,12 @@ def _state_from_marker(
                     (),
                 )
             ),
-            last_verified_snapshot_id=str(
-                state_raw.get("last_verified_snapshot_id", "")
-            ),
+            last_verified_snapshot_id=str(state_raw.get("last_verified_snapshot_id", "")),
             gt_emission_enabled=state_raw["gt_emission_enabled"],
             gt_interruption_enabled=state_raw["gt_interruption_enabled"],
-            gt_certification_enabled=state_raw[
-                "gt_certification_enabled"
-            ],
+            gt_certification_enabled=state_raw["gt_certification_enabled"],
             native_path_enabled=state_raw["native_path_enabled"],
-            quarantine_reason=(
-                rr.FaultCode(reason_raw)
-                if reason_raw is not None
-                else None
-            ),
+            quarantine_reason=(rr.FaultCode(reason_raw) if reason_raw is not None else None),
             failed_event_id=str(state_raw.get("failed_event_id", "")),
         )
         if (
@@ -355,9 +324,7 @@ def _validate_request_against_journal(
     """Bind recovery to the exact verified snapshot and committed event tail."""
 
     if events:
-        snapshot, tail = runtime.journal.load_snapshot_and_tail(
-            runtime.attempt_id
-        )
+        snapshot, tail = runtime.journal.load_snapshot_and_tail(runtime.attempt_id)
         snapshot_id = f"{runtime.attempt_id}:{snapshot.sequence}"
         tail_ids = tuple(event.event_id for event in tail)
         tail_hash = events[-1].content_hash
@@ -419,36 +386,24 @@ def _replay_once(
     for event in tail:
         replayed_snapshot = rr.reduce_event(replayed_snapshot, event)
     if replayed_snapshot != work_state:
-        raise rr.StateIntegrityError(
-            "snapshot plus committed tail diverges from full event replay"
-        )
-    if (
-        reasoning_graph.revision != work_state.revision
-        or reasoning_graph.source_event_ids
-        != tuple(event.event_id for event in events)
+        raise rr.StateIntegrityError("snapshot plus committed tail diverges from full event replay")
+    if reasoning_graph.revision != work_state.revision or reasoning_graph.source_event_ids != tuple(
+        event.event_id for event in events
     ):
-        raise rr.StateIntegrityError(
-            "work-state and reasoning-graph causal projections diverge"
-        )
+        raise rr.StateIntegrityError("work-state and reasoning-graph causal projections diverge")
 
-    evidence_records = runtime.journal.evidence_records_for_attempt(
-        runtime.attempt_id
-    )
+    evidence_records = runtime.journal.evidence_records_for_attempt(runtime.attempt_id)
     evidence: dict[str, rr.EvidenceRecord] = {}
     evidence_histories: list[tuple[str, tuple[rr.EvidenceRecord, ...]]] = []
     for item in evidence_records:
         if item.evidence_id in evidence:
-            raise rr.StateIntegrityError(
-                "duplicate evidence identity during integrity replay"
-            )
+            raise rr.StateIntegrityError("duplicate evidence identity during integrity replay")
         history = runtime.journal.evidence_history(
             item.evidence_id,
             attempt_id=runtime.attempt_id,
         )
         if not history or history[-1] != item:
-            raise rr.StateIntegrityError(
-                "evidence latest projection diverges from its journal"
-            )
+            raise rr.StateIntegrityError("evidence latest projection diverges from its journal")
         evidence[item.evidence_id] = item
         evidence_histories.append((item.evidence_id, history))
 
@@ -462,32 +417,22 @@ def _replay_once(
         ]
     ] = []
     delivered_evidence: set[str] = set()
-    for delivery_attempt_id, compilation in (
-        runtime.journal.compilations_for_attempt(runtime.attempt_id)
+    for delivery_attempt_id, compilation in runtime.journal.compilations_for_attempt(
+        runtime.attempt_id
     ):
-        compilation_history = runtime.journal.compilation_history(
-            delivery_attempt_id
-        )
-        delivery_history = runtime.journal.delivery_history(
-            delivery_attempt_id
-        )
+        compilation_history = runtime.journal.compilation_history(delivery_attempt_id)
+        delivery_history = runtime.journal.delivery_history(delivery_attempt_id)
         if (
             not compilation_history
             or not delivery_history
             or compilation_history[-1] != compilation
             or compilation.delivery_attempt != delivery_history[-1]
         ):
-            raise rr.StateIntegrityError(
-                "compilation and delivery journals have divergent heads"
-            )
+            raise rr.StateIntegrityError("compilation and delivery journals have divergent heads")
         if compilation.model_call_id in delivery_attempt_ids:
-            raise rr.StateIntegrityError(
-                "model-call identity reused during integrity replay"
-            )
+            raise rr.StateIntegrityError("model-call identity reused during integrity replay")
         compilations[delivery_attempt_id] = compilation
-        delivery_attempt_ids[
-            compilation.model_call_id
-        ] = delivery_attempt_id
+        delivery_attempt_ids[compilation.model_call_id] = delivery_attempt_id
         compilation_delivery_history.append(
             (
                 delivery_attempt_id,
@@ -498,9 +443,7 @@ def _replay_once(
         if any(rr.is_delivered(attempt) for attempt in delivery_history):
             delivered_evidence.update(delivery_history[-1].evidence_ids)
 
-    journal_delivery_ids = set(
-        runtime.journal.delivery_attempt_ids_for_attempt(runtime.attempt_id)
-    )
+    journal_delivery_ids = set(runtime.journal.delivery_attempt_ids_for_attempt(runtime.attempt_id))
     if journal_delivery_ids != set(compilations):
         raise rr.StateIntegrityError(
             "orphan delivery or compilation journal during integrity replay"
@@ -697,9 +640,7 @@ def handle_runtime_fault(
             else rr.RuntimeHealthState.RECOVERED
         ),
         assurance=(
-            rr.AssuranceStatus.DEGRADED
-            if retains_degradation
-            else rr.AssuranceStatus.ASSURED
+            rr.AssuranceStatus.DEGRADED if retains_degradation else rr.AssuranceStatus.ASSURED
         ),
         recovery_attempted_signatures=attempted,
         last_verified_snapshot_id=attestation.snapshot_id,

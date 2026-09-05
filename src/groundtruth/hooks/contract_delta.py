@@ -22,6 +22,7 @@ Smith et al. FSE 2015 (repair overfitting — patches pass given tests yet regre
 (propagate edits to dependents); The Distracting Effect arXiv:2505.06914 (correct-or-quiet); Lost in
 the Middle NeurIPS/TACL 2024 (delta first / primacy).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -128,7 +129,12 @@ def _old_content(repo_root: str, file_rel: str) -> str:
             try:
                 r = subprocess.run(
                     ["git", "-C", repo_root, "show", f"{ref}:{rel}"],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, env=_git_env(),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=10,
+                    env=_git_env(),
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     return r.stdout
@@ -169,8 +175,14 @@ def _index_one(content: str, file_rel: str) -> str | None:
         return None
     db = os.path.join(d, "g.db")
     try:
-        r = subprocess.run([binary, "-root", d, "-output", db],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        r = subprocess.run(
+            [binary, "-root", d, "-output", db],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
         if r.returncode != 0 or not os.path.exists(db):
             return None
     except (subprocess.SubprocessError, OSError):
@@ -279,8 +291,7 @@ def _diff_func(pre: dict[str, set], post: dict[str, set]) -> list[str]:
     b = {s.split("|", 1)[0] for s in post.get("return_shape", set())}
     if a != b and (a or b):
         lines.append(
-            f"  return shape: {', '.join(sorted(a)) or 'none'} -> "
-            f"{', '.join(sorted(b)) or 'none'}"
+            f"  return shape: {', '.join(sorted(a)) or 'none'} -> {', '.join(sorted(b)) or 'none'}"
         )
     # Raised exception TYPES — dropped (removed a check callers catch) / new.
     a = pre.get("exception_type", set())
@@ -361,8 +372,11 @@ def compute_delta(
             # (or the func is brand-new). Either way, reporting the entire post
             # contract as "new" is the run4 false-positive flood. Stay quiet.
             if not pre_props and post_props:
-                print(f"[GT_META] contract_delta_skip: degenerate_old func={name}",
-                      file=sys.stderr, flush=True)
+                print(
+                    f"[GT_META] contract_delta_skip: degenerate_old func={name}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 continue
             dlines = _diff_func(pre_props, post_props)
             if not dlines:

@@ -10,6 +10,7 @@ Anchors marked as trusted (semantic_score >= TAU_ANCHOR or symbol match) seed
 the BFS in graph_reach.py. Untrusted anchors stay in the candidate set but do
 not seed graph expansion.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -221,14 +222,21 @@ def _embed(texts: list[str], model: object, *, is_query: bool = False) -> np.nda
         # (its own kwarg validation) ??? fall back to the symmetric call for ST, which
         # has no query/passage asymmetry to thread anyway.
         try:
-            return np.asarray(model.encode(
-                texts, normalize_embeddings=True, show_progress_bar=False,
-                batch_size=128, is_query=is_query,
-            ))  # type: ignore[union-attr]
+            return np.asarray(
+                model.encode(
+                    texts,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                    batch_size=128,
+                    is_query=is_query,
+                )
+            )  # type: ignore[union-attr]
         except (TypeError, ValueError):
-            return np.asarray(model.encode(
-                texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128
-            ))  # type: ignore[union-attr]
+            return np.asarray(
+                model.encode(
+                    texts, normalize_embeddings=True, show_progress_bar=False, batch_size=128
+                )
+            )  # type: ignore[union-attr]
     if hasattr(model, "embed_batch"):
         return np.asarray(model.embed_batch(list(texts), is_query=is_query), dtype=np.float32)  # type: ignore[union-attr]
     if hasattr(model, "embed"):
@@ -382,9 +390,7 @@ def _get_file_embeddings(
     # cosine map (semantic_top_k -> sem_scores) so they match the symbol + lexical
     # pipes (#18). De-duplicate separator/prefix variants, then sort so DB
     # insertion order cannot reach a bounded semantic cut.
-    file_paths = sorted(
-        dict.fromkeys(_norm_path(row[0]) for row in c.fetchall() if row[0])
-    )
+    file_paths = sorted(dict.fromkeys(_norm_path(row[0]) for row in c.fetchall() if row[0]))
 
     # Per-symbol passage BODY comes from the SHARED assembler (the SAME source the
     # localizer half ??? graph_localizer._assemble_symbol_passages ??? reads), so a given
@@ -404,12 +410,18 @@ def _get_file_embeddings(
         "SELECT id, file_path, name, COALESCE(signature,''), start_line, end_line "
         "FROM nodes WHERE is_test = 0"
     ).fetchall()
-    _symbol_rows.sort(key=lambda row: (
-        _norm_path(str(row[1] or "")),
-        row[4] is None, int(row[4] or 0),
-        row[5] is None, int(row[5] or 0),
-        str(row[2] or ""), str(row[3] or ""), int(row[0] or 0),
-    ))
+    _symbol_rows.sort(
+        key=lambda row: (
+            _norm_path(str(row[1] or "")),
+            row[4] is None,
+            int(row[4] or 0),
+            row[5] is None,
+            int(row[5] or 0),
+            str(row[2] or ""),
+            str(row[3] or ""),
+            int(row[0] or 0),
+        )
+    )
     for _id, _fp, _nm, _sig, _sl, _el in _symbol_rows:
         _k = _norm_path(_fp)
         if not _k or _k not in file_passages or len(file_passages[_k]) >= 60:
@@ -505,10 +517,12 @@ def _get_file_embeddings(
         # A passage skipped by the encode budget has no vector ??? skip it (None) so the
         # file scores on its remaining symbols rather than KeyError-ing the brief.
         vecs = [
-            v for v in (
+            v
+            for v in (
                 vec_by_hash.get(passage_hash(p, model_name, dim, _SUMMARY_VERSION))
                 for p in file_passages[fp]
-            ) if v is not None
+            )
+            if v is not None
         ]
         if vecs:
             file_matrix[fp] = np.vstack(vecs).astype(np.float32)
@@ -590,9 +604,7 @@ def semantic_top_k(
     ``alpha*max_i(cos_i) + (1-alpha)*mean(top_k cos_i)`` (``aggregate_symbol_cosines``)
     ??? so the gold function is not averaged into 60 siblings. The return CONTRACT is
     byte-identical: ``dict[file_path -> float]`` in [0, 1]."""
-    file_paths, file_matrix = _get_file_embeddings(
-        graph_db, repo_root, model, issue_text
-    )
+    file_paths, file_matrix = _get_file_embeddings(graph_db, repo_root, model, issue_text)
     if not file_paths:
         return {}
 
@@ -630,14 +642,9 @@ def semantic_top_k(
     if score_all:
         # Full component-score map: keep only finite, strictly-positive scores
         # (correct-or-quiet ??? never surface 0/NaN as a semantic signal).
-        result = {
-            fp: float(score)
-            for fp, score in ranked
-            if math.isfinite(score) and score > 0.0
-        }
+        result = {fp: float(score) for fp, score in ranked if math.isfinite(score) and score > 0.0}
         if body_enriched_files_out is not None:
-            body_enriched_files_out.update(
-                set(result) & _semantic_body_files(graph_db))
+            body_enriched_files_out.update(set(result) & _semantic_body_files(graph_db))
         return result
     # SEED map: same strictly-positive discipline as the component map (fix
     # 2026-06-09). A zero/negative-cosine file carries NO semantic evidence ???
@@ -646,9 +653,7 @@ def semantic_top_k(
     # the corpus mismatched (a zero embedder now yields an EMPTY seed map, not
     # 20 fake semantic anchors). Correct-or-quiet at the filter level.
     result = {
-        fp: float(score)
-        for fp, score in ranked[:k_sem_top]
-        if math.isfinite(score) and score > 0.0
+        fp: float(score) for fp, score in ranked[:k_sem_top] if math.isfinite(score) and score > 0.0
     }
     if body_enriched_files_out is not None:
         body_enriched_files_out.update(set(result) & _semantic_body_files(graph_db))
@@ -687,12 +692,20 @@ def select_anchors(
           embedding matmul (``_get_file_embeddings`` memoises the encode).
     """
     sem_seed_scores = semantic_top_k(
-        issue_text, repo_root, graph_db, model, k_sem_top=k_sem_top,
+        issue_text,
+        repo_root,
+        graph_db,
+        model,
+        k_sem_top=k_sem_top,
     )
     # Full cosine map for the component term (no seed effect). Cheap: reuses the
     # cached file embeddings, only re-runs the matmul + sort.
     sem_all_scores = semantic_top_k(
-        issue_text, repo_root, graph_db, model, score_all=True,
+        issue_text,
+        repo_root,
+        graph_db,
+        model,
+        score_all=True,
         body_enriched_files_out=body_enriched_files_out,
     )
     # Anchor/seed logic operates on the bounded seed map (unchanged behaviour).
@@ -752,4 +765,3 @@ def select_anchors(
     # lexical ties therefore keep the deterministic relevance order above.
     anchors.sort(key=lambda a: a.semantic_score, reverse=True)
     return anchors, sem_seed_scores, sem_all_scores
-

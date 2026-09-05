@@ -28,15 +28,15 @@ from .feature_lineage import (
 
 
 CONTROL_PARTICIPATION_SCHEMA = "gt.control_participation.v1"
-PARTICIPATION_DECISIONS = frozenset(
-    {"APPLIED", "NO_EFFECT", "SUPPRESSED", "ERROR"}
-)
+PARTICIPATION_DECISIONS = frozenset({"APPLIED", "NO_EFFECT", "SUPPRESSED", "ERROR"})
 CONTROL_PRECEDES_DELIVERY = "CONTROL_PRECEDES_DELIVERY"
 RECEIPT_FOLLOWS_DELIVERY = "RECEIPT_FOLLOWS_DELIVERY"
-PARTICIPATION_TEMPORAL_RELATIONS = frozenset({
-    CONTROL_PRECEDES_DELIVERY,
-    RECEIPT_FOLLOWS_DELIVERY,
-})
+PARTICIPATION_TEMPORAL_RELATIONS = frozenset(
+    {
+        CONTROL_PRECEDES_DELIVERY,
+        RECEIPT_FOLLOWS_DELIVERY,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -64,17 +64,16 @@ class ControlDecisionContract:
             raise ValueError("fact_class_required must be a bool")
         if self.temporal_relation not in PARTICIPATION_TEMPORAL_RELATIONS:
             raise ValueError("unknown temporal_relation")
-        if (
-            self.temporal_relation == RECEIPT_FOLLOWS_DELIVERY
-            and self.role != "mediator"
-        ):
+        if self.temporal_relation == RECEIPT_FOLLOWS_DELIVERY and self.role != "mediator":
             raise ValueError("post-delivery receipt controls must be mediators")
         if self.role == "mediator" and not self.fact_class_required:
             raise ValueError("mediator controls require concrete FACT identity")
 
 
 def _eligibility(
-    feature_id: str, *sites: str, unmeasured_reason: str = "",
+    feature_id: str,
+    *sites: str,
+    unmeasured_reason: str = "",
 ) -> ControlDecisionContract:
     return ControlDecisionContract(
         feature_id=feature_id,
@@ -109,10 +108,12 @@ CONTROL_DECISION_CONTRACTS = {
         "mini_seam.obligation_nudge.freshness_demotion",
     ),
     "GT_SS_NOVELTY": _eligibility(
-        "GT_SS_NOVELTY", "mini_seam.ss_content_decision.novelty",
+        "GT_SS_NOVELTY",
+        "mini_seam.ss_content_decision.novelty",
     ),
     "GT_SS_EXEC_TRUTH": _eligibility(
-        "GT_SS_EXEC_TRUTH", "mini_seam.covering_selection.runner_eligibility",
+        "GT_SS_EXEC_TRUTH",
+        "mini_seam.covering_selection.runner_eligibility",
     ),
     "GT_EDIT_OVERLAY": _eligibility(
         "GT_EDIT_OVERLAY",
@@ -124,65 +125,80 @@ CONTROL_DECISION_CONTRACTS = {
         "gateway.route_delivery.registry_timing",
     ),
     "GT_SS_RECOVERY_V2": _eligibility(
-        "GT_SS_RECOVERY_V2", "mini_seam.recovery_candidate.v2_gate",
+        "GT_SS_RECOVERY_V2",
+        "mini_seam.recovery_candidate.v2_gate",
     ),
     "GT_BRIEF_MINIMAL": _eligibility(
         "GT_BRIEF_MINIMAL",
         "pretask.v1r_brief.minimal_reduction",
     ),
     "GT_SS_DEDUP2": _eligibility(
-        "GT_SS_DEDUP2", "mini_seam.ss_content_decision.semantic_dedup",
+        "GT_SS_DEDUP2",
+        "mini_seam.ss_content_decision.semantic_dedup",
     ),
     "GT_SS_ELIGIBILITY": _eligibility(
-        "GT_SS_ELIGIBILITY", "mini_seam.cd_prefix.command_substitution",
+        "GT_SS_ELIGIBILITY",
+        "mini_seam.cd_prefix.command_substitution",
     ),
     # ITEM 0 (2026-07-18): the post_search lattice MASTER enable gate. Its executable decision
     # site is the seam's _search_localize_decision master check (gt_mini_patch _POST_SEARCH_ON,
     # gt_mini_patch.py:4588) that decides WHETHER the def-partition producer runs on the agent's
     # own grep — the same lattice GT_SS_ELIGIBILITY widens.
     "GT_POST_SEARCH": _eligibility(
-        "GT_POST_SEARCH", "mini_seam.post_search.lattice_master_enable",
+        "GT_POST_SEARCH",
+        "mini_seam.post_search.lattice_master_enable",
     ),
     "GT_XSESSION_MEMORY": _eligibility(
         "GT_XSESSION_MEMORY",
         "gateway.xsession_policy.inert_suppression",
     ),
     "GT_D7_RELATEDNESS": _eligibility(
-        "GT_D7_RELATEDNESS", "mini_seam.receipt_judge.relatedness",
+        "GT_D7_RELATEDNESS",
+        "mini_seam.receipt_judge.relatedness",
     ),
     "GT_SS_SHADOW": _eligibility(
-        "GT_SS_SHADOW", "mini_seam.shadow_holdout.assignment",
+        "GT_SS_SHADOW",
+        "mini_seam.shadow_holdout.assignment",
     ),
     "GT_SS_LATE_DROP": _eligibility(
-        "GT_SS_LATE_DROP", "mini_seam.ss_content_decision.late_drop",
+        "GT_SS_LATE_DROP",
+        "mini_seam.ss_content_decision.late_drop",
     ),
     "GT_BRIEF_NATIVE": _mediator(
-        "GT_BRIEF_NATIVE", "pretask.v1r_brief.native_render",
+        "GT_BRIEF_NATIVE",
+        "pretask.v1r_brief.native_render",
     ),
     "GT_COMPLETION_CERT": _mediator(
-        "GT_COMPLETION_CERT", "mini_seam.submit_gate.completion_certificate",
+        "GT_COMPLETION_CERT",
+        "mini_seam.submit_gate.completion_certificate",
     ),
     "GT_CONTENT_LEG": _mediator(
-        "GT_CONTENT_LEG", "pretask.v1r_brief.content_bm25_rank",
+        "GT_CONTENT_LEG",
+        "pretask.v1r_brief.content_bm25_rank",
     ),
     "GT_CONTRACT_BILATERAL": _mediator(
-        "GT_CONTRACT_BILATERAL", "mini_seam.contract.bilateral_selection",
+        "GT_CONTRACT_BILATERAL",
+        "mini_seam.contract.bilateral_selection",
         "gateway.caller_contract.bilateral_selection",
     ),
     "GT_CONTRACT_MODE": _mediator(
-        "GT_CONTRACT_MODE", "mini_seam.contract.mode_selection",
+        "GT_CONTRACT_MODE",
+        "mini_seam.contract.mode_selection",
         "gateway.caller_contract.mode_selection",
     ),
     "GT_CONTRACT_NATIVE": _mediator(
-        "GT_CONTRACT_NATIVE", "mini_seam.contract.native_render",
+        "GT_CONTRACT_NATIVE",
+        "mini_seam.contract.native_render",
         "gateway.caller_contract.native_render",
     ),
     "GT_EVIDENCE_NATIVE": _mediator(
-        "GT_EVIDENCE_NATIVE", "mini_seam.evidence.native_render",
+        "GT_EVIDENCE_NATIVE",
+        "mini_seam.evidence.native_render",
         "gateway.caller_contract.caller_rows",
     ),
     "GT_GATEWAY": _mediator(
-        "GT_GATEWAY", "gateway.augment.candidate_admission",
+        "GT_GATEWAY",
+        "gateway.augment.candidate_admission",
         # The admission site stamps the PRE-render candidate identity (eligibility /
         # decision chronology: the candidate was admitted BEFORE delivery). It can never
         # join a delivery, whose sealed bytes are the FINAL rendered form. The committed
@@ -191,34 +207,44 @@ CONTROL_DECISION_CONTRACTS = {
         "mini_seam.gateway.candidate_committed",
     ),
     "GT_GATEWAY_EDIT_BRIDGES": _mediator(
-        "GT_GATEWAY_EDIT_BRIDGES", "gateway.augment.edit_bridge_candidate",
+        "GT_GATEWAY_EDIT_BRIDGES",
+        "gateway.augment.edit_bridge_candidate",
     ),
     "GT_GATEWAY_NATIVE": _mediator(
-        "GT_GATEWAY_NATIVE", "mini_seam.gateway.native_render",
+        "GT_GATEWAY_NATIVE",
+        "mini_seam.gateway.native_render",
     ),
     "GT_GLOBAL_ARBITER": _mediator(
-        "GT_GLOBAL_ARBITER", "mini_seam.global_arbiter.winner_selection",
+        "GT_GLOBAL_ARBITER",
+        "mini_seam.global_arbiter.winner_selection",
     ),
     "GT_INSEAM_METRICS": _mediator(
-        "GT_INSEAM_METRICS", "mini_seam.inseam_metrics.fact_observation",
+        "GT_INSEAM_METRICS",
+        "mini_seam.inseam_metrics.fact_observation",
     ),
     "GT_L6_FRESH": _mediator(
-        "GT_L6_FRESH", "mini_seam.graph_db.fresh_copy_selection",
+        "GT_L6_FRESH",
+        "mini_seam.graph_db.fresh_copy_selection",
     ),
     "GT_LANE_ENVELOPE": _mediator(
-        "GT_LANE_ENVELOPE", "mini_seam.lane_envelope.candidate_conversion",
+        "GT_LANE_ENVELOPE",
+        "mini_seam.lane_envelope.candidate_conversion",
     ),
     "GT_NUDGE_NATIVE": _mediator(
-        "GT_NUDGE_NATIVE", "mini_seam.nudge.native_render",
+        "GT_NUDGE_NATIVE",
+        "mini_seam.nudge.native_render",
     ),
     "GT_POST_SEARCH_NATIVE": _mediator(
-        "GT_POST_SEARCH_NATIVE", "mini_seam.post_search.native_render",
+        "GT_POST_SEARCH_NATIVE",
+        "mini_seam.post_search.native_render",
     ),
     "GT_SCOPE_NATIVE": _mediator(
-        "GT_SCOPE_NATIVE", "mini_seam.scope.native_render",
+        "GT_SCOPE_NATIVE",
+        "mini_seam.scope.native_render",
     ),
     "GT_SEM_BODY": _mediator(
-        "GT_SEM_BODY", "pretask.v1r_brief.semantic_body_rank",
+        "GT_SEM_BODY",
+        "pretask.v1r_brief.semantic_body_rank",
     ),
     "GT_SS_ACK_FORM": _mediator(
         "GT_SS_ACK_FORM",
@@ -247,22 +273,28 @@ CONTROL_DECISION_CONTRACTS = {
     # GT_SS_ACK_FORM.form_selection precedent). Until then the control terminal reads no rows and
     # reports UNMEASURED (fail-closed) — never a fabricated effect.
     "GT_SS_COHERENCE_V2": _mediator(
-        "GT_SS_COHERENCE_V2", "mini_seam.coherence.recovery_pivot",
+        "GT_SS_COHERENCE_V2",
+        "mini_seam.coherence.recovery_pivot",
     ),
     "GT_SS_PROVENANCE": _mediator(
-        "GT_SS_PROVENANCE", "mini_seam.delivery.provenance_seal",
+        "GT_SS_PROVENANCE",
+        "mini_seam.delivery.provenance_seal",
     ),
     "GT_STEER_NATIVE": _mediator(
-        "GT_STEER_NATIVE", "mini_seam.steer.native_render",
+        "GT_STEER_NATIVE",
+        "mini_seam.steer.native_render",
     ),
     "GT_VERIFICATION_PLAN": _mediator(
-        "GT_VERIFICATION_PLAN", "mini_seam.verification.plan_selection",
+        "GT_VERIFICATION_PLAN",
+        "mini_seam.verification.plan_selection",
     ),
     "GT_VERIFY_EXECUTE": _mediator(
-        "GT_VERIFY_EXECUTE", "mini_seam.verification.execution",
+        "GT_VERIFY_EXECUTE",
+        "mini_seam.verification.execution",
     ),
     "GT_XSESSION_RANKUP": _mediator(
-        "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
+        "GT_XSESSION_RANKUP",
+        "gateway.xsession_rankup.boost",
     ),
 }
 
@@ -303,18 +335,14 @@ class ControlParticipation:
             raise ValueError(f"CAP role mismatch for {self.feature_id}")
         contract = control_contract(self.feature_id)
         if contract.measurement_status != "SUPPORTED":
-            raise ValueError(
-                f"{self.feature_id} is UNMEASURED: {contract.unmeasured_reason}"
-            )
+            raise ValueError(f"{self.feature_id} is UNMEASURED: {contract.unmeasured_reason}")
         if self.decision_site not in contract.decision_sites:
             raise ValueError(
-                f"unsupported decision site for {self.feature_id}: "
-                f"{self.decision_site!r}"
+                f"unsupported decision site for {self.feature_id}: {self.decision_site!r}"
             )
         if self.temporal_relation != contract.temporal_relation:
             raise ValueError(
-                f"temporal relation mismatch for {self.feature_id}: "
-                f"{self.temporal_relation!r}"
+                f"temporal relation mismatch for {self.feature_id}: {self.temporal_relation!r}"
             )
         if self.decision not in PARTICIPATION_DECISIONS:
             raise ValueError(f"unknown participation decision: {self.decision!r}")
@@ -335,9 +363,7 @@ class ControlParticipation:
                     "iteration strictly before the control iteration"
                 )
         elif self.related_delivery_iteration is not None:
-            raise ValueError(
-                "pre-delivery controls cannot declare a related delivery iteration"
-            )
+            raise ValueError("pre-delivery controls cannot declare a related delivery iteration")
         if type(self.candidate_chars) is not int or self.candidate_chars < 0:
             raise ValueError("candidate_chars must be a non-negative integer")
         if bool(self.candidate_chars) != bool(self.candidate_sha256_16):
@@ -389,18 +415,15 @@ def build_control_participation(
 ) -> ControlParticipation:
     contract = control_contract(feature_id)
     if contract.measurement_status != "SUPPORTED":
-        raise ValueError(
-            f"{feature_id} is UNMEASURED: {contract.unmeasured_reason}"
-        )
+        raise ValueError(f"{feature_id} is UNMEASURED: {contract.unmeasured_reason}")
     if decision_site not in contract.decision_sites:
-        raise ValueError(
-            f"unsupported decision site for {feature_id}: {decision_site!r}"
-        )
+        raise ValueError(f"unsupported decision site for {feature_id}: {decision_site!r}")
     if not isinstance(candidate_bytes, str):
         raise TypeError("candidate_bytes must be text")
     seal = (
         hashlib.sha256(candidate_bytes.encode("utf-8", "surrogatepass")).hexdigest()[:16]
-        if candidate_bytes else ""
+        if candidate_bytes
+        else ""
     )
     return ControlParticipation(
         schema=CONTROL_PARTICIPATION_SCHEMA,
@@ -440,9 +463,7 @@ def participation_to_dict(record: ControlParticipation) -> dict[str, Any]:
         "reason": record.reason,
     }
     if record.observation_binding is not None:
-        payload["observation_binding"] = observation_binding_to_dict(
-            record.observation_binding
-        )
+        payload["observation_binding"] = observation_binding_to_dict(record.observation_binding)
     return payload
 
 

@@ -20,6 +20,7 @@ Ablation variants (controlled by 'ablation' parameter):
 
 Feature-flag: GT_BRIEF_VERSION=v7_4 activates this scorer.
 """
+
 from __future__ import annotations
 
 import json
@@ -32,8 +33,9 @@ from numbers import Real
 from pathlib import Path
 from typing import Any, Literal
 
-from groundtruth.pretask.anchor_select import AnchorRecord, select_anchors
+from groundtruth.pretask.anchor_select import select_anchors
 from groundtruth.pretask.anchors import IssueAnchors, extract_issue_anchors
+
 # Single source of truth for "deterministic resolution method" (curation_map).
 # Dimension 3 (graph confidence) previously hand-rolled its own 7-method subset,
 # silently dropping impl_method/inherited/unique_method/return_type — genuinely
@@ -201,6 +203,7 @@ def _adapt_weights_for_issue(
     if graph_db and issue_anchors and issue_anchors.symbols:
         try:
             import sqlite3 as _sq_scope
+
             _sc = _sq_scope.connect(graph_db)
             _anchor_files = set()
             # DETERMINISM (D7): sample the anchor symbols in a CANONICAL order. The
@@ -239,16 +242,13 @@ def _adapt_weights_for_issue(
     if graph_db:
         try:
             import sqlite3 as _sq_conf
+
             _cc = _sq_conf.connect(graph_db)
-            _total = _cc.execute(
-                "SELECT COUNT(*) FROM edges WHERE type = 'CALLS'"
-            ).fetchone()[0]
+            _total = _cc.execute("SELECT COUNT(*) FROM edges WHERE type = 'CALLS'").fetchone()[0]
             # Deterministic fact-set from curation_map (single source — fix
             # 2026-06-09): the prior hand-rolled 7-method literal dropped
             # impl_method/inherited/unique_method/return_type from the det-%.
-            _det_in = ",".join(
-                "'" + m + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS)
-            )
+            _det_in = ",".join("'" + m + "'" for m in sorted(DETERMINISTIC_RESOLUTION_METHODS))
             _det = _cc.execute(
                 "SELECT COUNT(*) FROM edges WHERE type = 'CALLS' "
                 f"AND resolution_method IN ({_det_in})"
@@ -290,8 +290,10 @@ def _adapt_weights_for_issue(
             w["W_PATH"] = min(w.get("W_PATH", 1.0), 0.20)
             w["W_REACH"] = min(w.get("W_REACH", 1.0), 0.05)
         for _wk, _env in (
-            ("W_SEM", "GT_W_SEM"), ("W_LEX", "GT_W_LEX"),
-            ("W_PATH", "GT_W_PATH"), ("W_REACH", "GT_W_REACH"),
+            ("W_SEM", "GT_W_SEM"),
+            ("W_LEX", "GT_W_LEX"),
+            ("W_PATH", "GT_W_PATH"),
+            ("W_REACH", "GT_W_REACH"),
         ):
             _wv = os.environ.get(_env, "").strip()
             if _wv:
@@ -362,9 +364,7 @@ def _apply_dense_dispersion_gate(
     # actually order. A single covered value (1-of-N coverage) still yields MAD=0 →
     # flat (a lone file cannot discriminate); an all-equal covered set still yields
     # MAD=0 → flat; a sharp few-but-confident covered set yields MAD>0 → NOT flat.
-    _full = [
-        float(sem_component_scores.get(fp, 0.0) or 0.0) for fp in candidate_files
-    ]
+    _full = [float(sem_component_scores.get(fp, 0.0) or 0.0) for fp in candidate_files]
     if len(_full) < 2:
         return weights, False, 0.0
     covered = [v for v in _full if v > 0.0]
@@ -504,6 +504,7 @@ def _classify_issue_lexicality(
     # words (articles/conjunctions/prepositions/auxiliaries — _NL_FUNCTION_WORDS).
     # These never appear in code identifiers, so a high count = prose-heavy report.
     from groundtruth.pretask.anchors import _NL_FUNCTION_WORDS
+
     tokens = _WORD_TOKEN_RE.findall(text)
     n_tokens = len(tokens)
     n_nl_words = sum(1 for t in tokens if t.lower() in _NL_FUNCTION_WORDS)
@@ -564,10 +565,20 @@ DEFAULT_FOCUS_SIZE = 3  # hard cap on focus set — never grows above this
 DEFAULT_MAX_GRAPH_EXPAND = 20  # cap on graph-expanded candidates (top-N by reach score)
 
 _DOCS_EXTENSIONS = frozenset({".md", ".rst", ".txt"})
-_DOCS_FILENAMES = frozenset({
-    "readme", "changelog", "changes", "contributing", "license", "authors",
-    "history", "news", "todo", "acknowledgments",
-})
+_DOCS_FILENAMES = frozenset(
+    {
+        "readme",
+        "changelog",
+        "changes",
+        "contributing",
+        "license",
+        "authors",
+        "history",
+        "news",
+        "todo",
+        "acknowledgments",
+    }
+)
 _SOURCE_PREFIXES = ("src/", "lib/", "pkg/", "internal/", "core/", "app/")
 
 
@@ -627,8 +638,10 @@ class V74BriefResult:
     # three zeroing branches (`_SEMANTIC_AVAILABLE` zero, sparse-graph weights
     # override, RRF det/nosem signal-drop) — see run_v74 for the derivation.
     effective_w_sem: float = 0.0
-    k_sem_top_effective: int = 0      # the relative cap actually used for the sem-component map
-    sem_components_full: list[float] = field(default_factory=list)  # components['sem'] over ranked_full
+    k_sem_top_effective: int = 0  # the relative cap actually used for the sem-component map
+    sem_components_full: list[float] = field(
+        default_factory=list
+    )  # components['sem'] over ranked_full
     # --- Dense-dispersion gate observability (fix 2026-06-10, §4.2 flat-dense) ---
     # fired=True means the sem component arrived FLAT at the fusion (MAD ~ 0 over
     # the candidate set) and the fusion leaned on content/anchor-structural signals
@@ -655,13 +668,21 @@ class _OnnxEmbedderAdapter:
 
     def __init__(self, model):
         from groundtruth.memory.enrich.embed import DEFAULT_EMBED_DIM
+
         self._m = model
         # CHANGE 2: read the model's true dim (768 gte-modernbert / 384 e5), not a literal.
         self.dim = getattr(model, "dim", DEFAULT_EMBED_DIM)
 
-    def encode(self, texts, normalize_embeddings=True, show_progress_bar=False,
-               batch_size=128, is_query=None):
+    def encode(
+        self,
+        texts,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+        batch_size=128,
+        is_query=None,
+    ):
         import numpy as np
+
         texts = list(texts)
         if not texts:
             return np.zeros((0, self.dim), dtype=np.float32)
@@ -688,6 +709,7 @@ class _ZeroEmbeddingModel:
 
     def __init__(self) -> None:
         from groundtruth.memory.enrich.embed import _default_embed_dim
+
         self.dim = _default_embed_dim()
 
     def encode(
@@ -700,6 +722,7 @@ class _ZeroEmbeddingModel:
     ) -> Any:
         try:
             import numpy as _np
+
             return _np.zeros((len(texts), self.dim), dtype=_np.float32)
         except ImportError:
             return [[0.0] * self.dim for _ in texts]
@@ -740,6 +763,7 @@ def _get_model() -> Any:
             if not _force_onnx and not _require_embedder:
                 try:
                     from sentence_transformers import SentenceTransformer
+
                     _CACHED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
                     _SEMANTIC_AVAILABLE = True
                     return _CACHED_MODEL
@@ -751,10 +775,11 @@ def _get_model() -> Any:
                 _default_embed_model,
                 get_embedding_model,
             )
+
             # 2. ONNX code-tuned default (container-viable, no torch) — the benchmark path
             try:
                 _m = get_embedding_model()  # code-tuned default (GT_EMBED_MODEL_NAME/DIM)
-                _m._ensure_loaded()         # raises if onnxruntime / model files absent
+                _m._ensure_loaded()  # raises if onnxruntime / model files absent
                 _CACHED_MODEL = _OnnxEmbedderAdapter(_m)
                 _SEMANTIC_AVAILABLE = True
                 return _CACHED_MODEL
@@ -794,6 +819,7 @@ def _get_model() -> Any:
                 )
             # graceful (non-required) fallback: zero embeddings (semantic OFF)
             import logging
+
             logging.getLogger("groundtruth.pretask.v7_4_brief").warning(
                 "No semantic embedder (sentence-transformers AND ONNX both unavailable); "
                 "semantic scores will be 0. BM25 + graph signals will drive ranking."
@@ -872,7 +898,9 @@ def _score_variant_C(
 
 def _total_score(components: dict[str, float], weights: dict[str, float]) -> float:
     hub_pen = components.get("hub_pen", 0.0)
-    reach_contrib = weights.get("W_REACH", 0) * components.get("reach", 0.0) * max(0.0, 1.0 - hub_pen)
+    reach_contrib = (
+        weights.get("W_REACH", 0) * components.get("reach", 0.0) * max(0.0, 1.0 - hub_pen)
+    )
     evidence_pre_hub = (
         weights.get("W_SEM", 0) * components.get("sem", 0.0)
         + weights.get("W_LEX", 0) * components.get("lex", 0.0)
@@ -992,7 +1020,15 @@ def _rrf_fuse(
 def _ablation_weights(ablation: Ablation, base_weights: dict[str, float]) -> dict[str, float]:
     if ablation == "A":
         # Dense similarity only: no BM25, no graph, no hub, no frame/path signal
-        return {**base_weights, "W_LEX": 0.0, "W_REACH": 0.0, "W_PROX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0, "W_FRAME": 0.0}
+        return {
+            **base_weights,
+            "W_LEX": 0.0,
+            "W_REACH": 0.0,
+            "W_PROX": 0.0,
+            "W_HUB": 0.0,
+            "W_COMMIT": 0.0,
+            "W_FRAME": 0.0,
+        }
     if ablation == "B0":
         # Graph only (symbol-match anchors): no dense, no BM25
         return {**base_weights, "W_SEM": 0.0, "W_LEX": 0.0, "W_HUB": 0.0, "W_COMMIT": 0.0}
@@ -1034,10 +1070,7 @@ def _resolve_against_graph_files(
 
     # 1. Suffix match (longest graph path wins — most specific).
     suffix_matches = [
-        gf for gf in graph_files
-        if gf == norm
-        or gf.endswith("/" + norm)
-        or norm.endswith("/" + gf)
+        gf for gf in graph_files if gf == norm or gf.endswith("/" + norm) or norm.endswith("/" + gf)
     ]
     if suffix_matches:
         return max(suffix_matches, key=len)
@@ -1142,6 +1175,7 @@ def _compute_code_symbol_scores(
         return scores
     try:
         import sqlite3 as _sql
+
         conn = _sql.connect(graph_db)
         for sym in code_syms:
             parts = [p for p in sym.split(".") if p]
@@ -1222,11 +1256,11 @@ def graph_file_paths_for_frame(graph_db: str) -> list[str]:
     if not graph_db:
         return []
     import sqlite3 as _sql
+
     conn = _sql.connect(graph_db)
     try:
         rows = conn.execute(
-            "SELECT DISTINCT file_path FROM nodes "
-            "WHERE file_path IS NOT NULL AND is_test = 0"
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path IS NOT NULL AND is_test = 0"
         ).fetchall()
     finally:
         conn.close()
@@ -1256,7 +1290,9 @@ def _path_prior_scores(all_files: list[str], issue_text: str) -> dict[str, float
     # for fmt/hex.rs, yet the old >=4 floor dropped it -> path=0 -> gold buried.
     # Noise from short common words (lib/src/get/api) is now suppressed by IDF
     # (high document-frequency -> ~0 weight) instead of a blunt length cutoff.
-    _issue_words_raw = set(w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 3)
+    _issue_words_raw = set(
+        w.lower() for w in _re_path.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 3
+    )
     # NEGATION detection (2026-06-27): issue phrases like "not request/response",
     # "doesn't belong in X", "should not be in Y" negate the token that follows.
     # A negated token DEMOTES path matches instead of promoting them. Generalized:
@@ -1264,7 +1300,8 @@ def _path_prior_scores(all_files: list[str], issue_text: str) -> dict[str, float
     _neg_patterns = _re_path.findall(
         r"(?:not?\s+|doesn'?t\s+belong\s+in\s+|should\s+not\s+be\s+in\s+|"
         r"not\s+in\s+|outside\s+of\s+|instead\s+of\s+)([A-Za-z_]\w{2,})",
-        issue_text, _re_path.IGNORECASE,
+        issue_text,
+        _re_path.IGNORECASE,
     )
     _negated_words = {w.lower() for w in _neg_patterns if len(w) >= 3}
     _issue_words = _issue_words_raw - _negated_words
@@ -1311,10 +1348,7 @@ def _path_prior_scores(all_files: list[str], issue_text: str) -> dict[str, float
             # into the issue-term df: doing so dilutes exact directory matches
             # such as ``netloc`` based on unrelated short basenames.
             if tier > 0.0 and idf <= 0.0 and basename in iw:
-                base_df = sum(
-                    1 for candidate in all_files
-                    if basename in _norm_paths[candidate]
-                )
+                base_df = sum(1 for candidate in all_files if basename in _norm_paths[candidate])
                 if base_df > 0:
                     idf = _math_path.log2(_N_files / base_df) / _logN
             if tier > 0.0:
@@ -1396,6 +1430,7 @@ def _run_v74_legacy(
     # proof/final mode the brief is generated INSIDE the eval container (where the gates already
     # invoke run_v74). Inert outside proof mode (byte-identical).
     from groundtruth.runtime.context import assert_container_boundary as _assert_cb
+
     _assert_cb("run_v74/brief/scoring")
 
     issue_anchors = extract_issue_anchors(issue_text, graph_db)
@@ -1408,6 +1443,7 @@ def _run_v74_legacy(
         effective_weights["W_SEM"] = 0.0
 
     from groundtruth.runtime import proof as _proof
+
     # Stage 3: prove run_v74 uses the SAME embedder identity as localize/v1r (model-root
     # divergence -> raise in proof mode). Wires the never-called assert_same_embedder_identity.
     _proof.assert_same_embedder_identity(graph_db, "run_v74")
@@ -1429,7 +1465,10 @@ def _run_v74_legacy(
     #   embedder indistinguishable from a genuinely-zero one. We widen COMPONENT
     #   coverage WITHOUT widening what the agent sees (seed set unchanged).
     anchors, sem_scores, sem_all = select_anchors(
-        issue_text, repo_root, graph_db, model,
+        issue_text,
+        repo_root,
+        graph_db,
+        model,
         k_anchor=k_anchor,
         k_sem_top=k_sem_top,
         k_lex_top=k_lex_top,
@@ -1462,7 +1501,8 @@ def _run_v74_legacy(
             trusted, graph_db, max_depth=max_depth, min_confidence=min_confidence
         )
         reach_scores = compute_reach(
-            trusted, graph_db,
+            trusted,
+            graph_db,
             max_depth=max_depth,
             min_confidence=min_confidence,
             hub_penalties=hub_penalties,
@@ -1486,11 +1526,16 @@ def _run_v74_legacy(
             # pattern as the three fixes above: path tie-break + sorted iteration.
             # Byte-identical wherever no tie straddles the cap.
             by_reach = sorted(
-                ((fp, reach_scores[fp].reach_score)
-                 for fp in sorted(graph_only) if fp in reach_scores),
+                (
+                    (fp, reach_scores[fp].reach_score)
+                    for fp in sorted(graph_only)
+                    if fp in reach_scores
+                ),
                 key=lambda x: (-x[1], x[0]),
             )
-            graph_expanded = sem_files_pre | anchor_set_paths | {fp for fp, _ in by_reach[:max_graph_expand]}
+            graph_expanded = (
+                sem_files_pre | anchor_set_paths | {fp for fp, _ in by_reach[:max_graph_expand]}
+            )
 
     # Stage A candidate set = semantic top-K ∪ graph-expanded ∪ BM25 top-K ∪ path-matched
     # BUG-1 (2026-06-15): graph_expand returns RAW DB paths (graph_reach._build_file_graph
@@ -1522,7 +1567,10 @@ def _run_v74_legacy(
     # (same retrieval pass). Default 10 = unchanged (recall agent ab384a9ad8cf05d1a).
     _bm25_recall_k = int(os.environ.get("GT_BM25_RECALL_K", "10"))
     _lex_candidates = lexical_file_search(
-        issue_text, repo_root, graph_db, issue_anchors,
+        issue_text,
+        repo_root,
+        graph_db,
+        issue_anchors,
         max_files=max(50, _bm25_recall_k, len(candidate_set)),
     )
     # BUG-1: lexical_file_search().file is forward-slashed by graph_file_paths but NOT
@@ -1534,10 +1582,18 @@ def _run_v74_legacy(
     # Bidirectional substring: "color" matches "_colorama", "balance" matches "balance".
     import re as _re_fn
     import sqlite3 as _sql_fn
-    _issue_words_fn = set(w.lower() for w in _re_fn.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4)
+
+    _issue_words_fn = set(
+        w.lower() for w in _re_fn.findall(r"[A-Za-z_]\w{2,}", issue_text) if len(w) >= 4
+    )
     try:
         _conn_fn = _sql_fn.connect(graph_db)
-        _all_graph_files = [r[0] for r in _conn_fn.execute("SELECT DISTINCT file_path FROM nodes WHERE is_test = 0").fetchall()]
+        _all_graph_files = [
+            r[0]
+            for r in _conn_fn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE is_test = 0"
+            ).fetchall()
+        ]
         _conn_fn.close()
         for fp in _all_graph_files:
             basename = os.path.basename(fp).rsplit(".", 1)[0].lower()
@@ -1576,8 +1632,12 @@ def _run_v74_legacy(
     # W_SEM=0 — keeping effective_w_sem honest for the consumption proof.
     _enforce_sem_floor = bool(_SEMANTIC_AVAILABLE) and ablation not in ("B0", "B1")
     effective_weights = _adapt_weights_for_issue(
-        frame_scores, code_def_scores, effective_weights,
-        graph_db=graph_db, issue_anchors=issue_anchors, issue_text=issue_text,
+        frame_scores,
+        code_def_scores,
+        effective_weights,
+        graph_db=graph_db,
+        issue_anchors=issue_anchors,
+        issue_text=issue_text,
         enforce_floor=_enforce_sem_floor,
     )
 
@@ -1594,16 +1654,12 @@ def _run_v74_legacy(
     )
 
     if code_def_scores:
-        _existing_norm_cd = {
-            fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set
-        }
+        _existing_norm_cd = {fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set}
         for resolved_norm_cd in code_def_scores:
             if resolved_norm_cd not in _existing_norm_cd:
                 candidate_set.add(resolved_norm_cd)
     if frame_scores:
-        _existing_norm = {
-            fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set
-        }
+        _existing_norm = {fp.replace("\\", "/").lstrip("./").lstrip("/") for fp in candidate_set}
         for resolved_norm in frame_scores:
             if resolved_norm not in _existing_norm:
                 candidate_set.add(resolved_norm)
@@ -1647,6 +1703,7 @@ def _run_v74_legacy(
         max_reach = max((r.reach_score for r in reach_scores.values()), default=0.0)
         if max_reach > 0:
             from groundtruth.pretask.graph_reach import ReachRecord
+
             # BUG-1: graph_reach keys by RAW DB path; re-key to canonical form (keep the
             # higher reach_score on collision) so the reach COMPONENT matches all_files.
             _reach_norm: dict[str, ReachRecord] = {}
@@ -1711,22 +1768,29 @@ def _run_v74_legacy(
     sem_flat_gate_fired = False
     sem_dispersion_mad = 0.0
     if _enforce_sem_floor and ablation in ("C", "D") and all_files:
-        effective_weights, sem_flat_gate_fired, sem_dispersion_mad = (
-            _apply_dense_dispersion_gate(
-                effective_weights, sem_component_scores, all_files
-            )
+        effective_weights, sem_flat_gate_fired, sem_dispersion_mad = _apply_dense_dispersion_gate(
+            effective_weights, sem_component_scores, all_files
         )
 
     if ablation == "A":
         components_map = _score_variant_A(sem_scores, lex_scores, all_files)
     elif ablation in ("B0", "B1"):
         components_map = _score_variant_B(
-            reach_scores, prox_scores, all_files, sem_scores, lex_scores,
+            reach_scores,
+            prox_scores,
+            all_files,
+            sem_scores,
+            lex_scores,
             use_semantic_seed=(ablation == "B1"),
         )
     else:  # C or D — hub_penalties already computed above for path-specificity BFS
         components_map = _score_variant_C(
-            sem_component_scores, lex_scores, reach_scores, prox_scores, hub_penalties, all_files,
+            sem_component_scores,
+            lex_scores,
+            reach_scores,
+            prox_scores,
+            hub_penalties,
+            all_files,
             commit_scores,
         )
 
@@ -1746,7 +1810,11 @@ def _run_v74_legacy(
             components_map[fp]["frame"] = _frame_val
             components_map[fp]["code_def"] = _cdef_val
         else:
-            components_map[fp] = {"path": path_scores.get(fp, 0.0), "frame": _frame_val, "code_def": _cdef_val}
+            components_map[fp] = {
+                "path": path_scores.get(fp, 0.0),
+                "frame": _frame_val,
+                "code_def": _cdef_val,
+            }
 
     # item #19: max-normalize path/frame/code_def to [0,1], the SAME treatment lex
     # (L900-915) and reach (L925-936) already receive. Before this, lex/reach were
@@ -1806,9 +1874,13 @@ def _run_v74_legacy(
     def _wrrf_weights() -> dict[str, float]:
         out: dict[str, float] = {}
         for sig, env in (
-            ("sem", "GT_RRF_W_SEM"), ("lex", "GT_RRF_W_LEX"), ("path", "GT_RRF_W_PATH"),
-            ("reach", "GT_RRF_W_REACH"), ("anchor_prox", "GT_RRF_W_ANCHOR"),
-            ("frame", "GT_RRF_W_FRAME"), ("code_def", "GT_RRF_W_CODE_DEF"),
+            ("sem", "GT_RRF_W_SEM"),
+            ("lex", "GT_RRF_W_LEX"),
+            ("path", "GT_RRF_W_PATH"),
+            ("reach", "GT_RRF_W_REACH"),
+            ("anchor_prox", "GT_RRF_W_ANCHOR"),
+            ("frame", "GT_RRF_W_FRAME"),
+            ("code_def", "GT_RRF_W_CODE_DEF"),
         ):
             v = os.environ.get(env, "").strip()
             if v:
@@ -1817,9 +1889,16 @@ def _run_v74_legacy(
 
     _rrf_mode = os.environ.get("GT_RRF_FUSION", "").strip().lower()
     _rrf_modes = {
-        "wrrf", "sem_primary", "dense_primary",
-        "1", "on", "full", "rrf",
-        "det", "deterministic", "nosem",
+        "wrrf",
+        "sem_primary",
+        "dense_primary",
+        "1",
+        "on",
+        "full",
+        "rrf",
+        "det",
+        "deterministic",
+        "nosem",
     }
     if _rrf_mode in _rrf_modes:
         # RRF is discontinuous at a rank swap.  Consume the same six-decimal
@@ -1849,7 +1928,7 @@ def _run_v74_legacy(
         for fp, sc, comps in scored:
             fp_lower = fp.replace("\\", "/").lstrip("./").lower()
             if _is_docs_file(fp_lower):
-                sc *= (1.0 - _docs_penalty)
+                sc *= 1.0 - _docs_penalty
             elif _is_source_dir(fp_lower) and _source_boost != 1.0:
                 sc *= _source_boost
             adjusted.append((fp, sc, comps))
@@ -1867,8 +1946,10 @@ def _run_v74_legacy(
     if graph_db and os.environ.get("GT_TEST_TOOLING_DEMOTE", "1") != "0":
         try:
             from groundtruth.delivery.path_policy import (
-                test_tooling_roots as _ttr, is_test_tooling as _istt,
+                test_tooling_roots as _ttr,
+                is_test_tooling as _istt,
             )
+
             _tt_roots = _ttr(graph_db)
             if _tt_roots:
                 _kept = [t for t in scored if not _istt(t[0], _tt_roots)]
@@ -1897,15 +1978,17 @@ def _run_v74_legacy(
         else:
             entered_via = "semantic_seed"
 
-        ranked_records.append(RankedFile(
-            rank=rank,
-            path=fp,
-            score=round(score, 6),
-            components={k: round(v, 6) for k, v in comps.items()},
-            entered_via=entered_via,
-            min_path_length_from_anchor=r.min_path_length if r else 999,
-            is_gold=fp in gold_set,
-        ))
+        ranked_records.append(
+            RankedFile(
+                rank=rank,
+                path=fp,
+                score=round(score, 6),
+                components={k: round(v, 6) for k, v in comps.items()},
+                entered_via=entered_via,
+                min_path_length_from_anchor=r.min_path_length if r else 999,
+                is_gold=fp in gold_set,
+            )
+        )
 
     focus_set = [r.path for r in ranked_records[:focus_size]]
     gold_in_focus = bool(gold_set & set(focus_set))
@@ -1988,9 +2071,7 @@ def _run_v74_legacy(
     # components['sem'] over the FULL ranked candidate list (the rendered universe;
     # the brief layer slices its delivered subset from ranked_full). Read from the
     # ACTUAL components computed during scoring — not re-derived.
-    sem_components_full = [
-        float(r.components.get("sem", 0.0) or 0.0) for r in ranked_records
-    ]
+    sem_components_full = [float(r.components.get("sem", 0.0) or 0.0) for r in ranked_records]
     # The cap ACTUALLY in force for the sem-component map. After the decoupling the
     # component map is uncapped relative to the rendered set (every candidate with a
     # finite, strictly-positive cosine carries it), so the effective cap is RELATIVE
@@ -2012,22 +2093,32 @@ def _run_v74_legacy(
     # delivered components -> upstream>0 with rendered==0 is a DROPPED-semantic fail. Wrapped
     # so it never alters ranking/brief behavior (proof-mode reporting only).
     try:
-        _rendered_nz = sum(1 for s in sem_components_full
-                           if isinstance(s, (int, float)) and s and s > 0.0)
-        _upstream_nz = sum(1 for v in (sem_component_scores or {}).values()
-                           if isinstance(v, (int, float)) and v and v > 0.0)
-        _all_zero_reason = ("no_candidates" if len(ranked_records) == 0
-                            else ("" if _rendered_nz > 0 else "rendered_semantic_all_zero"))
-        _proof.write_embedder_certificate(_proof.build_embedder_certificate(
-            db=graph_db, bug_id=bug_id,
-            semantic_candidate_count=len(ranked_records),
-            rendered_candidate_count=len(ranked_records),
-            rendered_semantic_nonzero_count=_rendered_nz,
-            upstream_semantic_nonzero_count=_upstream_nz,
-            effective_w_sem=effective_w_sem,
-            all_zero_semantic_reason=_all_zero_reason,
-            run_v74_identity=_proof.embedder_identity(),
-        ))
+        _rendered_nz = sum(
+            1 for s in sem_components_full if isinstance(s, (int, float)) and s and s > 0.0
+        )
+        _upstream_nz = sum(
+            1
+            for v in (sem_component_scores or {}).values()
+            if isinstance(v, (int, float)) and v and v > 0.0
+        )
+        _all_zero_reason = (
+            "no_candidates"
+            if len(ranked_records) == 0
+            else ("" if _rendered_nz > 0 else "rendered_semantic_all_zero")
+        )
+        _proof.write_embedder_certificate(
+            _proof.build_embedder_certificate(
+                db=graph_db,
+                bug_id=bug_id,
+                semantic_candidate_count=len(ranked_records),
+                rendered_candidate_count=len(ranked_records),
+                rendered_semantic_nonzero_count=_rendered_nz,
+                upstream_semantic_nonzero_count=_upstream_nz,
+                effective_w_sem=effective_w_sem,
+                all_zero_semantic_reason=_all_zero_reason,
+                run_v74_identity=_proof.embedder_identity(),
+            )
+        )
     except Exception:
         pass
 
@@ -2035,10 +2126,13 @@ def _run_v74_legacy(
         bug_id=bug_id,
         repo=repo,
         hyperparameters=hyperparameters,
-        anchors=[{"path": a.path, "score": round(a.semantic_score, 4), "reason": a.reason}
-                 for a in anchors],
-        anchor_trust=[{"path": a.path, "trusted_for_expansion": a.trusted_for_expansion}
-                      for a in anchors],
+        anchors=[
+            {"path": a.path, "score": round(a.semantic_score, 4), "reason": a.reason}
+            for a in anchors
+        ],
+        anchor_trust=[
+            {"path": a.path, "trusted_for_expansion": a.trusted_for_expansion} for a in anchors
+        ],
         candidate_set_size=len(all_files),
         ranked_top10_focus=[asdict(r) for r in ranked_records[:10]],
         ranked_full=[asdict(r) for r in ranked_records],

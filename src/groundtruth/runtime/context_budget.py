@@ -1,4 +1,5 @@
 """Product-owned payload budget and dedupe helpers."""
+
 from __future__ import annotations
 
 import hashlib
@@ -8,8 +9,14 @@ from dataclasses import dataclass, field
 
 FACT_TAG_RE = re.compile(r"\[([A-Z][A-Z0-9_]*)\]")
 IMPERATIVE_PREFIXES = (
-    "Changing", "Must", "Check", "Run", "You edited", "Inspect",
-    "GT:", "Before",
+    "Changing",
+    "Must",
+    "Check",
+    "Run",
+    "You edited",
+    "Inspect",
+    "GT:",
+    "Before",
 )
 
 
@@ -30,21 +37,27 @@ class ContextBudgeter:
 
     def trim(self, payload: str, max_tokens: int = 500) -> BudgetResult:
         if not payload:
-            return BudgetResult("", {
-                "max_tokens_est": max_tokens,
-                "char_cap": max_tokens * 4,
-                "chars_used": 0,
-                "lines_kept": 0,
-                "lines_total": 0,
-                "dedupe_ids": len(self.delivered_fact_ids),
-            }, [])
+            return BudgetResult(
+                "",
+                {
+                    "max_tokens_est": max_tokens,
+                    "char_cap": max_tokens * 4,
+                    "chars_used": 0,
+                    "lines_kept": 0,
+                    "lines_total": 0,
+                    "dedupe_ids": len(self.delivered_fact_ids),
+                },
+                [],
+            )
         lines = payload.splitlines()
         fresh = [
-            ln for ln in lines
+            ln
+            for ln in lines
             if ln.strip()
             and ln.strip() not in self.delivered_facts
             and self.stable_fact_id(ln) not in self.delivered_fact_ids
         ]
+
         # C-1 (2026-07-10): SELECT under budget by priority (imperative > facts >
         # other — keep the actionable line when clipping), but EMIT the survivors in
         # the PRODUCER's original order. Previously the output was reordered into the
@@ -58,6 +71,7 @@ class ContextBudgeter:
             if "[" in ln or "->" in ln:
                 return 1
             return 2
+
         limit = max_tokens * 4
         chars = 0
         chosen: set[int] = set()
@@ -68,14 +82,18 @@ class ContextBudgeter:
             chosen.add(idx)
             chars += len(line) + 1
         result: list[str] = [fresh[i] for i in range(len(fresh)) if i in chosen]
-        return BudgetResult("\n".join(result), {
-            "max_tokens_est": max_tokens,
-            "char_cap": limit,
-            "chars_used": chars,
-            "lines_kept": len(result),
-            "lines_total": len(lines),
-            "dedupe_ids": len(self.delivered_fact_ids),
-        }, list(result))
+        return BudgetResult(
+            "\n".join(result),
+            {
+                "max_tokens_est": max_tokens,
+                "char_cap": limit,
+                "chars_used": chars,
+                "lines_kept": len(result),
+                "lines_total": len(lines),
+                "dedupe_ids": len(self.delivered_fact_ids),
+            },
+            list(result),
+        )
 
     def commit_delivered(self, lines: list[str]) -> None:
         """Call ONLY after the gate confirms this candidate won."""
@@ -100,7 +118,7 @@ def stable_fact_id(line: str) -> str:
     m = FACT_TAG_RE.search(stripped)
     if m:
         tag = m.group(1)
-        rest = stripped[m.end():].strip()
+        rest = stripped[m.end() :].strip()
         sym = re.split(r"\s|->|,|\(", rest, maxsplit=1)[0].strip()
         if sym:
             # C-3 (2026-07-10): TAG:first-symbol alone is too coarse — two DISTINCT

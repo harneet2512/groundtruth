@@ -55,9 +55,14 @@ def is_non_source_or_test(path: str) -> bool:
         return True
     if name.endswith((".test-d.ts", ".test-d.tsx", ".spec-d.ts", ".spec-d.tsx")):
         return True
-    if any(part in {"test", "tests", "testing", "__tests__", "fixtures", "fixture"} for part in parts):
+    if any(
+        part in {"test", "tests", "testing", "__tests__", "fixtures", "fixture"} for part in parts
+    ):
         return True
-    if any(part in {"examples", "example", "demo", "demos", "benchmark", "benchmarks"} for part in parts):
+    if any(
+        part in {"examples", "example", "demo", "demos", "benchmark", "benchmarks"}
+        for part in parts
+    ):
         return True
     if any(part in {"node_modules", "vendor", "third_party", "site-packages"} for part in parts):
         return True
@@ -88,7 +93,9 @@ def validate_brief_payload(
     """
     metrics = payload.get("metrics", {}) if isinstance(payload.get("metrics"), dict) else {}
     proof_raw = metrics.get("localization_proof")
-    proof = [rec for rec in proof_raw if isinstance(rec, dict)] if isinstance(proof_raw, list) else []
+    proof = (
+        [rec for rec in proof_raw if isinstance(rec, dict)] if isinstance(proof_raw, list) else []
+    )
     gold = [str(path) for path in (gold_files or []) if str(path).strip()]
 
     violations: list[str] = []

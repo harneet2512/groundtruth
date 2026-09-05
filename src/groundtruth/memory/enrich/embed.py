@@ -91,6 +91,7 @@ def _deterministic_session_options(ort_module):
     options.add_session_config_entry("session.use_deterministic_compute", "1")
     return options
 
+
 # GT_PASSAGE_WIDE (default OFF): the per-SYMBOL passage window (_PASSAGE_TOKEN_WINDOW =
 # 128) is memory-conservative and was tuned for the RETIRED e5 encoder. The current
 # default embedder (gte-modernbert-base) supports 8192 and the QUERY side already uses
@@ -175,7 +176,7 @@ def passage_window_status(model: "EmbeddingModel | None" = None) -> dict:
         "encode_batch": _encode_batch_size(),
         "is_e5_preserved": e5,
         "note": "C1 width-knob; broad-body retrieval = C2/B2 (index-time body_terms/"
-                "string_literals, rows 41/30) — independent of this flag",
+        "string_literals, rows 41/30) — independent of this flag",
     }
 
 
@@ -226,11 +227,17 @@ class EmbeddingModel:
         self.dim = dim
         _is_e5 = model_name in _E5_FAMILY
         # Prefix: e5 needs query:/passage:; everything else is symmetric (no prefix).
-        self.prefix_query = prefix_query if prefix_query is not None else ("query: " if _is_e5 else "")
-        self.prefix_passage = prefix_passage if prefix_passage is not None else ("passage: " if _is_e5 else "")
+        self.prefix_query = (
+            prefix_query if prefix_query is not None else ("query: " if _is_e5 else "")
+        )
+        self.prefix_passage = (
+            prefix_passage if prefix_passage is not None else ("passage: " if _is_e5 else "")
+        )
         # Pooling: e5 + jina-code = mean (over attention mask); gte/ModernBERT = CLS ([:,0]).
-        self.pooling = pooling if pooling is not None else (
-            "mean" if (_is_e5 or model_name in _MEAN_POOL_FAMILY) else "cls"
+        self.pooling = (
+            pooling
+            if pooling is not None
+            else ("mean" if (_is_e5 or model_name in _MEAN_POOL_FAMILY) else "cls")
         )
         self._session: "ort.InferenceSession | None" = None
         self._tokenizer: "Tokenizer | None" = None
@@ -267,7 +274,9 @@ class EmbeddingModel:
             onnx_path = self._resolve_onnx_path()
             tok_path = self.model_dir / "tokenizer.json"
             if not onnx_path.exists():
-                raise FileNotFoundError(f"ONNX model not found at {onnx_path}. Run: python scripts/setup_models.py")
+                raise FileNotFoundError(
+                    f"ONNX model not found at {onnx_path}. Run: python scripts/setup_models.py"
+                )
 
             tokenizer = Tok.from_file(str(tok_path))
             # BUG (latent, pre-GT_PASSAGE_WIDE): these two lines HARDCODED 128, ignoring
@@ -307,10 +316,12 @@ class EmbeddingModel:
                 _true_dim = _out_shape[-1] if _out_shape else None
                 if isinstance(_true_dim, int) and _true_dim > 0 and _true_dim != self.dim:
                     import warnings as _warnings
+
                     _warnings.warn(
                         f"embedder dim mismatch for {self.model_name}: declared "
                         f"{self.dim}, ONNX output width {_true_dim}; using {_true_dim}",
-                        RuntimeWarning, stacklevel=2,
+                        RuntimeWarning,
+                        stacklevel=2,
                     )
                     self.dim = int(_true_dim)
             except Exception:
@@ -340,7 +351,7 @@ class EmbeddingModel:
         out: list[list[float]] = []
         B = _encode_batch_size()
         for i in range(0, len(texts), B):
-            out.extend(self._embed_chunk(texts[i:i + B], is_query=is_query))
+            out.extend(self._embed_chunk(texts[i : i + B], is_query=is_query))
         return out
 
     def _embed_chunk(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
@@ -420,9 +431,7 @@ class EmbeddingModel:
 
     def embed_batch(self, texts: list[str], is_query: bool = False) -> list[list[float]]:
         prefix = self.prefix_query if is_query else self.prefix_passage
-        return self._embed_prefixed(
-            [f"{prefix}{text}" for text in texts], is_query=is_query
-        )
+        return self._embed_prefixed([f"{prefix}{text}" for text in texts], is_query=is_query)
 
 
 _models: dict[tuple[str, int], EmbeddingModel] = {}
@@ -460,11 +469,15 @@ def embed_query(text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 
     return get_embedding_model(model_name, dim).embed(text, is_query=True)
 
 
-def embed_passage(text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> list[float]:
+def embed_passage(
+    text: str, model_name: str = "intfloat/e5-small-v2", dim: int = 384
+) -> list[float]:
     return get_embedding_model(model_name, dim).embed(text, is_query=False)
 
 
-def embed_batch(passages: list[str], model_name: str = "intfloat/e5-small-v2", dim: int = 384) -> list[list[float]]:
+def embed_batch(
+    passages: list[str], model_name: str = "intfloat/e5-small-v2", dim: int = 384
+) -> list[list[float]]:
     return get_embedding_model(model_name, dim).embed_batch(passages, is_query=False)
 
 
@@ -548,7 +561,7 @@ def symbol_passage(name: str, signature: str, body_snippet: str = "") -> str:
     if not head and not body:
         return ""
     passage = f"{head}\n{body}".strip() if body else head
-    return passage[:_symbol_passage_char_cap()]
+    return passage[: _symbol_passage_char_cap()]
 
 
 def passage_hash(

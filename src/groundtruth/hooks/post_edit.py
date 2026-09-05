@@ -87,6 +87,7 @@ def _resolve_file_path(conn, query_path: str):
 def _open_graph_db(db_path: str):
     """Open graph.db in read-only WAL mode with busy timeout."""
     import sqlite3
+
     try:
         uri = f"file:{db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True)
@@ -216,6 +217,7 @@ def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.7
     """
     try:
         import sqlite3 as _sq
+
         conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         conn.close()
@@ -238,9 +240,9 @@ def _edge_filter_for_db(db_path: str, *, alias: str = "e", min_conf: float = 0.7
 # EXTENDS with method `inheritance` (conf 1.0) and IMPLEMENTS with `implements`
 # (conf 0.8-1.0); both are deterministic structural relationships, not name
 # guesses. Generalized across languages (tree-sitter relationships.go).
-_HIERARCHY_VERIFIED_METHODS = frozenset(
-    {"inheritance", "implements"}
-) | DETERMINISTIC_RESOLUTION_METHODS
+_HIERARCHY_VERIFIED_METHODS = (
+    frozenset({"inheritance", "implements"}) | DETERMINISTIC_RESOLUTION_METHODS
+)
 
 
 def _hierarchy_edge_filter_clause(*, alias: str = "e") -> str:
@@ -277,6 +279,7 @@ def _hierarchy_edge_filter_for_db(db_path: str, *, alias: str = "e") -> str:
     """
     try:
         import sqlite3 as _sq
+
         conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(edges)").fetchall()}
         conn.close()
@@ -293,28 +296,54 @@ def _hierarchy_edge_filter_for_db(db_path: str, *, alias: str = "e") -> str:
 # isolation per the four-pillar always-fire rule. Both bracket and colon
 # token shapes are listed because the renderer emits both.
 _G7_CALLER_DERIVED_PREFIXES = (
-    "[CALLERS]", "[CALLER]", "CALLERS:", "[REVIEW]",
-    "[PROPAGATE]", "[IMPACT]", "[MISMATCH]", "[CONTRACT]",
+    "[CALLERS]",
+    "[CALLER]",
+    "CALLERS:",
+    "[REVIEW]",
+    "[PROPAGATE]",
+    "[IMPACT]",
+    "[MISMATCH]",
+    "[CONTRACT]",
 )
 _G7_PILLAR_KEEP_PREFIXES = (
     "[CONTRACT-DELTA]",
-    "[SIGNATURE]", "[RETURN_TYPE]", "[BEHAVIORAL CONTRACT]",
-    "PRESERVE:", "MUTATES:", "ACCUMULATES:",
-    "[RAISES]", "[CATCHES]", "PARAMS:",
-    "[OVERRIDE]", "[INTERFACE]",
-    "[TWIN]", "TWINS:", "[SIMILAR]", "[PATTERN]",
+    "[SIGNATURE]",
+    "[RETURN_TYPE]",
+    "[BEHAVIORAL CONTRACT]",
+    "PRESERVE:",
+    "MUTATES:",
+    "ACCUMULATES:",
+    "[RAISES]",
+    "[CATCHES]",
+    "PARAMS:",
+    "[OVERRIDE]",
+    "[INTERFACE]",
+    "[TWIN]",
+    "TWINS:",
+    "[SIMILAR]",
+    "[PATTERN]",
     # "Calls into:" is the edited fn's OWN outbound callee contract — it
     # requires ZERO callers and is Contract/Completeness evidence (TASK #49),
     # so it must survive the isolation gate per the four-pillar always-fire
     # rule (the agent most needs to know what it calls when nothing calls it).
     "Calls into:",
-    "[TEST]", "[COMPLETENESS]", "[SCOPE]",
-    "[CO-CHANGE]", "[BOUNDARY]", "[SECURITY]", "[SERDE]",
-    "[CONCURRENCY]", "[CONFIG]", "[ORDER]", "[RESOURCE]",
-    "FIELD:", "READS:",
+    "[TEST]",
+    "[COMPLETENESS]",
+    "[SCOPE]",
+    "[CO-CHANGE]",
+    "[BOUNDARY]",
+    "[SECURITY]",
+    "[SERDE]",
+    "[CONCURRENCY]",
+    "[CONFIG]",
+    "[ORDER]",
+    "[RESOURCE]",
+    "FIELD:",
+    "READS:",
     # Route handlers often have 0 graph callers (framework-dispatched) and
     # re-export flags are file-level — both must survive the isolation gate. (B5)
-    "[ROUTE]", "[RE-EXPORT]",
+    "[ROUTE]",
+    "[RE-EXPORT]",
 )
 
 
@@ -328,6 +357,7 @@ def g7_filter_isolated(func_parts: list[str], sig: str = "") -> list[str]:
 
     Pure function — module-level for unit testing.
     """
+
     def _drop_caller_derived(p: str) -> bool:
         s = p.lstrip()
         return any(s.startswith(pfx) for pfx in _G7_CALLER_DERIVED_PREFIXES)
@@ -363,6 +393,7 @@ def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None
         return None
     try:
         import sqlite3 as _sq_resolve
+
         conn = _sq_resolve.connect(db_path)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
         has_exported = "is_exported" in cols
@@ -386,7 +417,7 @@ def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None
         is_exp = row[2] if has_exported and len(row) > 2 else 0
         graph_parts = graph_path.replace("\\", "/").split("/")
         if len(graph_parts) <= len(norm_parts):
-            if norm_parts[-len(graph_parts):] == graph_parts:
+            if norm_parts[-len(graph_parts) :] == graph_parts:
                 if len(graph_parts) > best_match_len:
                     best_match_len = len(graph_parts)
                     matched = [(node_id, is_exp)]
@@ -403,13 +434,15 @@ def _resolve_node_id(db_path: str, file_path: str, func_name: str) -> int | None
         print(
             f"[GT_META] resolve_disambiguated: {func_name}@{file_path} "
             f"matched={len(matched)} picked_id={pool[0][0]} (tiebreak)",
-            file=sys.stderr, flush=True,
+            file=sys.stderr,
+            flush=True,
         )
         return pool[0][0]
     print(
         f"[GT_META] resolve_no_suffix_match: {func_name}@{file_path} "
         f"candidates={len(candidates)} — returning None (no suffix match, won't guess wrong file)",
-        file=sys.stderr, flush=True,
+        file=sys.stderr,
+        flush=True,
     )
     return None
 
@@ -418,6 +451,7 @@ def _load_issue_anchors() -> dict:
     """Load issue anchors (symbols, paths, test_names) written by wrapper."""
     try:
         import json as _json
+
         raw = open(_ISSUE_ANCHORS_PATH, encoding="utf-8").read().strip()
         if not raw:
             return {"symbols": [], "paths": [], "test_names": []}
@@ -460,9 +494,7 @@ def _annotate_evidence_header(
     if not callers or not issue_terms:
         return ""
 
-    relevant_count = sum(
-        1 for c in callers if _compute_caller_relevance(c, issue_terms) > 0
-    )
+    relevant_count = sum(1 for c in callers if _compute_caller_relevance(c, issue_terms) > 0)
 
     if relevant_count == 0:
         header = "[NOTE] Callers of this file show 0 keyword overlap with the issue.\n"
@@ -565,9 +597,9 @@ def _classify_return_usage(lines_after: list[str]) -> str:
 import re as _re
 
 _TEMPLATE_SUBS = [
-    (_re.compile(r'"[^"]*"'), 'STRING'),
-    (_re.compile(r"'[^']*'"), 'STRING'),
-    (_re.compile(r'\b\d+\b'), 'NUM'),
+    (_re.compile(r'"[^"]*"'), "STRING"),
+    (_re.compile(r"'[^']*'"), "STRING"),
+    (_re.compile(r"\b\d+\b"), "NUM"),
 ]
 
 
@@ -612,8 +644,11 @@ def _detect_structural_twins(
             templates[tmpl] = []
         templates[tmpl].append((start + i + 1, stripped))
 
-    twin_groups = [(tmpl, entries) for tmpl, entries in templates.items()
-                   if len(entries) >= 2 and len(entries) <= 6]
+    twin_groups = [
+        (tmpl, entries)
+        for tmpl, entries in templates.items()
+        if len(entries) >= 2 and len(entries) <= 6
+    ]
 
     if not twin_groups:
         return ""
@@ -631,7 +666,10 @@ def _detect_structural_twins(
 
 
 def _detect_edit_propagation(
-    db_path: str, file_path: str, func_name: str, repo_root: str,  # noqa: ARG001
+    db_path: str,
+    file_path: str,
+    func_name: str,
+    repo_root: str,  # noqa: ARG001
 ) -> str:
     """Find call sites that may need updating after a function edit.
 
@@ -641,6 +679,7 @@ def _detect_edit_propagation(
     """
     try:
         import sqlite3 as _sql
+
         conn = _sql.connect(db_path)
         _resolved_fp = _resolve_file_path(conn, file_path)
         _filter_clause = _edge_filter_for_db(db_path)
@@ -680,7 +719,12 @@ def _classify_file_kind(file_path: str) -> str:
     """Classify a file as source, test, or config for co-change phrasing."""
     norm = "/" + file_path.replace("\\", "/").lower().lstrip("/")
     base = os.path.basename(file_path).lower()
-    if base.startswith("test_") or base.endswith("_test.py") or "/tests/" in norm or "/test/" in norm:
+    if (
+        base.startswith("test_")
+        or base.endswith("_test.py")
+        or "/tests/" in norm
+        or "/test/" in norm
+    ):
         return "test"
     if base.endswith((".yml", ".yaml", ".toml", ".cfg", ".ini", ".json", ".xml")):
         return "config"
@@ -712,11 +756,14 @@ def _test_edit_advisory(modified_files: list[str]) -> str:
     Fires once per test file per task (deduped) so it advises, not spams. Returns '' for
     pure source edits.
     """
-    tests = sorted({
-        f for f in modified_files
-        if _classify_file_kind(f) == "test"
-        or _TEST_FIXTURE_RE.search("/" + f.replace("\\", "/").lower().lstrip("/"))
-    })
+    tests = sorted(
+        {
+            f
+            for f in modified_files
+            if _classify_file_kind(f) == "test"
+            or _TEST_FIXTURE_RE.search("/" + f.replace("\\", "/").lower().lstrip("/"))
+        }
+    )
     if not tests:
         return ""
     try:
@@ -755,6 +802,7 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
         COCHANGE_WINDOW_COMMITS,
         log_threshold_use,
     )
+
     norm_fp = file_path.replace("\\", "/").lstrip("/")
 
     co_counts: dict[str, int] = {}
@@ -764,9 +812,15 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
     if _db_path and os.path.exists(_db_path):
         try:
             import sqlite3 as _sq
+
             _cc_conn = _sq.connect(_db_path)
             _cc_conn.row_factory = _sq.Row
-            _tables = {r[0] for r in _cc_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            _tables = {
+                r[0]
+                for r in _cc_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
             if "cochanges" in _tables:
                 for row in _cc_conn.execute(
                     "SELECT file_b AS partner, count FROM cochanges WHERE file_a = ? "
@@ -775,11 +829,7 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
                     (norm_fp, norm_fp),
                 ).fetchall():
                     partner = row["partner"]
-                    if (
-                        partner
-                        and partner != norm_fp
-                        and _path_policy_is_deliverable(partner)
-                    ):
+                    if partner and partner != norm_fp and _path_policy_is_deliverable(partner):
                         co_counts[partner] = row["count"]
             _cc_conn.close()
         except Exception:
@@ -789,9 +839,21 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
     if not co_counts:
         try:
             import subprocess
+
             result = subprocess.run(
-                ["git", "log", "--name-only", "--pretty=format:__COMMIT__", f"-{COCHANGE_WINDOW_COMMITS}"],
-                cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+                [
+                    "git",
+                    "log",
+                    "--name-only",
+                    "--pretty=format:__COMMIT__",
+                    f"-{COCHANGE_WINDOW_COMMITS}",
+                ],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
                 env=_git_env(),
             )
             if result.returncode == 0:
@@ -800,7 +862,9 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
                     if line.strip() == "__COMMIT__":
                         if norm_fp in current_commit_files:
                             for f in current_commit_files:
-                                if f != norm_fp and not f.endswith((".md", ".rst", ".txt", ".lock")):
+                                if f != norm_fp and not f.endswith(
+                                    (".md", ".rst", ".txt", ".lock")
+                                ):
                                     co_counts[f] = co_counts.get(f, 0) + 1
                         current_commit_files = []
                     elif line.strip():
@@ -813,14 +877,26 @@ def _co_change_reminder(file_path: str, repo_root: str, edited_files: list[str])
             pass
 
     edited_set = set(edited_files)
-    unedited_co = [(f, c) for f, c in co_counts.items() if f not in edited_set and c >= COCHANGE_MEDIUM_THRESHOLD]
+    unedited_co = [
+        (f, c)
+        for f, c in co_counts.items()
+        if f not in edited_set and c >= COCHANGE_MEDIUM_THRESHOLD
+    ]
     unedited_co.sort(key=lambda x: (-x[1], x[0]))
 
     if not unedited_co:
-        print(f"[GT_META] cochange: source=git_log file={file_path} pairs=0", file=sys.stderr, flush=True)
+        print(
+            f"[GT_META] cochange: source=git_log file={file_path} pairs=0",
+            file=sys.stderr,
+            flush=True,
+        )
         return ""
 
-    print(f"[GT_META] cochange: source=git_log file={file_path} pairs={len(unedited_co)}", file=sys.stderr, flush=True)
+    print(
+        f"[GT_META] cochange: source=git_log file={file_path} pairs={len(unedited_co)}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     top_file, top_count = unedited_co[0]
     file_kind = _classify_file_kind(top_file)
@@ -860,9 +936,15 @@ def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str)
     """
     try:
         import subprocess
+
         result = subprocess.run(
             ["git", "log", "--name-only", "--pretty=format:COMMIT", "-30", "--", file_path],
-            cwd=repo_root, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
             env=_git_env(),
         )
         if result.returncode != 0:
@@ -894,7 +976,11 @@ def _scope_completeness(edited_files: list[str], file_path: str, repo_root: str)
 
 
 def _compose_scope_signal(
-    db_path: str, file_path: str, func_name: str, repo_root: str, edited_files: list[str],
+    db_path: str,
+    file_path: str,
+    func_name: str,
+    repo_root: str,
+    edited_files: list[str],
 ) -> str:
     """Compose a single multi-file scope signal from three independent mechanisms.
 
@@ -949,7 +1035,10 @@ def _read_source_line(full_path: str, line_no: int, extra_lines: int = 0, end_li
                     cur_indent = len(line) - len(line.lstrip())
                     if cur_indent < base_indent:
                         break
-                    if any(stripped.lstrip().startswith(kw) for kw in ("def ", "async def ", "class ", "func ", "function ", "fn ")):
+                    if any(
+                        stripped.lstrip().startswith(kw)
+                        for kw in ("def ", "async def ", "class ", "func ", "function ", "fn ")
+                    ):
                         break
                     lines_to_read.append(stripped)
                 elif lines_to_read:
@@ -974,18 +1063,19 @@ def _read_source_lines(full_path: str, start: int, end: int) -> str:
         return ""
 
 
-
-
 def _get_callers_from_graph(
-    db_path: str, file_path: str, function_name: str, repo_root: str,
-    seen_files: list[str], limit: int = 5
+    db_path: str,
+    file_path: str,
+    function_name: str,
+    repo_root: str,
+    seen_files: list[str],
+    limit: int = 5,
 ) -> list[dict[str, str]]:
     """Query graph.db for cross-file callers with confidence >= 0.7.
 
     Returns list of dicts: {file, line, caller_name, code}
     Filters out callers from files the agent has already visited.
     """
-    import sqlite3 as _sqlite3
 
     results: list[dict[str, str]] = []
     try:
@@ -1030,7 +1120,8 @@ def _get_callers_from_graph(
                 print(
                     f"[GT_META] categorical_filter: {function_name} total_callers={_all_count} "
                     f"after_filter={len(rows)} excluded={_all_count - len(rows)}",
-                    file=sys.stderr, flush=True,
+                    file=sys.stderr,
+                    flush=True,
                 )
 
         # Removed numeric 0.5 fallback. Per research (Squeez 2604.04979,
@@ -1090,7 +1181,7 @@ def _get_callers_from_graph(
                 try:
                     param_rows = conn.execute(
                         "SELECT value FROM properties WHERE node_id = ? AND kind = 'param' ORDER BY line",
-                        (resolved_target_id,)
+                        (resolved_target_id,),
                     ).fetchall()
                     if param_rows:
                         param_names = [r[0].split(":")[0].split("=")[0].strip() for r in param_rows]
@@ -1098,18 +1189,20 @@ def _get_callers_from_graph(
                 except Exception:
                     pass
 
-            results.append({
-                "file": caller_file,
-                "line": str(source_line or "?"),
-                "caller_name": caller_name,
-                "code": code,
-                "pre_context": pre_context,
-                "unseen": "1" if is_unseen else "0",
-                "confidence": str(edge_conf),
-                "resolution_method": res_method,
-                "return_usage": usage,
-                "arg_mapping": arg_mapping,
-            })
+            results.append(
+                {
+                    "file": caller_file,
+                    "line": str(source_line or "?"),
+                    "caller_name": caller_name,
+                    "code": code,
+                    "pre_context": pre_context,
+                    "unseen": "1" if is_unseen else "0",
+                    "confidence": str(edge_conf),
+                    "resolution_method": res_method,
+                    "return_usage": usage,
+                    "arg_mapping": arg_mapping,
+                }
+            )
 
             if len(results) >= limit:
                 break
@@ -1135,7 +1228,11 @@ def _get_callers_from_graph(
                 LIMIT 5
             """
             hop2_rows = conn.execute(
-                hop2_query, (_resolved_wrapper, wrapper_name, )
+                hop2_query,
+                (
+                    _resolved_wrapper,
+                    wrapper_name,
+                ),
             ).fetchall()
 
             # Only follow if the wrapper has <3 callers (thin wrapper pattern)
@@ -1152,20 +1249,20 @@ def _get_callers_from_graph(
                     h2_end = h2row["end_line"] or 0
                     if h2_line and h2_line > 0:
                         full_path = os.path.join(repo_root, h2_file)
-                        code = _read_source_line(
-                            full_path, h2_line, extra_lines=2, end_line=h2_end
-                        )
+                        code = _read_source_line(full_path, h2_line, extra_lines=2, end_line=h2_end)
                     if code:
                         code = f"[via wrapper] {code}"
 
-                    results.append({
-                        "file": h2_file,
-                        "line": str(h2_line or "?"),
-                        "caller_name": h2_name,
-                        "code": code,
-                        "unseen": "1" if is_unseen else "0",
-                        "confidence": str(float(wrapper.get("confidence", "0.5")) * 0.9),
-                    })
+                    results.append(
+                        {
+                            "file": h2_file,
+                            "line": str(h2_line or "?"),
+                            "caller_name": h2_name,
+                            "code": code,
+                            "unseen": "1" if is_unseen else "0",
+                            "confidence": str(float(wrapper.get("confidence", "0.5")) * 0.9),
+                        }
+                    )
 
                     if len(results) >= limit:
                         break
@@ -1174,9 +1271,11 @@ def _get_callers_from_graph(
 
         issue_terms = _load_issue_terms()
         if issue_terms and len(results) > 1:
+
             def _issue_score(caller: dict) -> int:
                 text = (caller.get("file", "") + " " + caller.get("code", "")).lower()
                 return sum(1 for t in issue_terms if t in text)
+
             results.sort(key=lambda c: _issue_score(c), reverse=True)
 
     except Exception as e:
@@ -1187,7 +1286,6 @@ def _get_callers_from_graph(
 
 def _get_signature_from_graph(db_path: str, file_path: str, function_name: str) -> str:
     """Get function signature + return type from graph.db."""
-    import sqlite3 as _sqlite3
 
     try:
         node_id = _resolve_node_id(db_path, file_path, function_name)
@@ -1215,7 +1313,6 @@ def _get_siblings_from_graph(
     db_path: str, file_path: str, function_name: str, repo_root: str
 ) -> list[dict[str, str]]:
     """Get sibling functions (same class/file) from graph.db with a body snippet."""
-    import sqlite3 as _sqlite3
 
     results: list[dict[str, str]] = []
     try:
@@ -1256,9 +1353,24 @@ def _get_siblings_from_graph(
             ).fetchall()
         conn.close()
 
-        _DUNDER_SKIP = {"__init__", "__repr__", "__str__", "__eq__", "__hash__", "__del__",
-                        "__len__", "__iter__", "__next__", "__contains__", "__getitem__",
-                        "__setitem__", "__enter__", "__exit__", "__call__", "__bool__"}
+        _DUNDER_SKIP = {
+            "__init__",
+            "__repr__",
+            "__str__",
+            "__eq__",
+            "__hash__",
+            "__del__",
+            "__len__",
+            "__iter__",
+            "__next__",
+            "__contains__",
+            "__getitem__",
+            "__setitem__",
+            "__enter__",
+            "__exit__",
+            "__call__",
+            "__bool__",
+        }
         for sib in siblings:
             sib_name = sib["name"]
             if sib_name in _DUNDER_SKIP:
@@ -1276,11 +1388,13 @@ def _get_siblings_from_graph(
                 body_end = min(start + 12, end)  # up to 12 lines
                 snippet = _read_source_lines(full_path, body_start, body_end)
 
-            results.append({
-                "name": sib_name,
-                "signature": sib_sig,
-                "snippet": snippet.strip(),
-            })
+            results.append(
+                {
+                    "name": sib_name,
+                    "signature": sib_sig,
+                    "snippet": snippet.strip(),
+                }
+            )
 
     except Exception as e:
         _append_gt_log("get_siblings_error", str(e))
@@ -1289,7 +1403,10 @@ def _get_siblings_from_graph(
 
 
 def _get_interface_peers_from_graph(
-    db_path: str, file_path: str, function_name: str, repo_root: str,
+    db_path: str,
+    file_path: str,
+    function_name: str,
+    repo_root: str,
     edited_files: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Find same-method implementations across classes sharing an interface/base.
@@ -1325,7 +1442,8 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: func={function_name} file={norm_path} "
             f"extends_edges_in_db={_ext_count}",
-            file=sys.stderr, flush=True,
+            file=sys.stderr,
+            flush=True,
         )
 
         # Find the class containing this method (disambiguated)
@@ -1340,7 +1458,8 @@ def _get_interface_peers_from_graph(
             print(
                 f"[GT_META] peer_detection: no method node or no parent_id, "
                 f"fallback to name_match. method_found={method_node is not None}",
-                file=sys.stderr, flush=True,
+                file=sys.stderr,
+                flush=True,
             )
             conn.close()
             return _get_name_match_peers(db_path, file_path, function_name, repo_root, edited)
@@ -1352,7 +1471,8 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: class={class_node['name'] if class_node else '?'} "
             f"class_id={class_id}",
-            file=sys.stderr, flush=True,
+            file=sys.stderr,
+            flush=True,
         )
 
         # Strategy 1: Find parent via EXTENDS/IMPLEMENTS edges (gated — LIPI #10)
@@ -1365,7 +1485,8 @@ def _get_interface_peers_from_graph(
         print(
             f"[GT_META] peer_detection: extends_edges_from_class={len(parent_edges)} "
             f"targets={[(pe['target_id'], pe['type']) for pe in parent_edges]}",
-            file=sys.stderr, flush=True,
+            file=sys.stderr,
+            flush=True,
         )
 
         peer_class_ids: list[int] = []
@@ -1414,16 +1535,18 @@ def _get_interface_peers_from_graph(
                 snippet = _read_source_lines(full_path, body_start, body_end)
 
             is_edited = any(pm_norm.endswith(ef) or ef.endswith(pm_norm) for ef in edited)
-            results.append({
-                "name": function_name,
-                "file": pm_norm,
-                "signature": pm["signature"] or "",
-                "snippet": snippet.strip(),
-                "edited": is_edited,
-                # LIPI #10: this peer was related through a gated, verified
-                # EXTENDS/IMPLEMENTS hierarchy edge — it is a structural FACT.
-                "verified": "1",
-            })
+            results.append(
+                {
+                    "name": function_name,
+                    "file": pm_norm,
+                    "signature": pm["signature"] or "",
+                    "snippet": snippet.strip(),
+                    "edited": is_edited,
+                    # LIPI #10: this peer was related through a gated, verified
+                    # EXTENDS/IMPLEMENTS hierarchy edge — it is a structural FACT.
+                    "verified": "1",
+                }
+            )
 
         conn.close()
 
@@ -1437,7 +1560,10 @@ def _get_interface_peers_from_graph(
 
 
 def _get_name_match_peers(
-    db_path: str, file_path: str, function_name: str, repo_root: str,
+    db_path: str,
+    file_path: str,
+    function_name: str,
+    repo_root: str,
     edited: set[str],
 ) -> list[dict[str, str]]:
     """Fallback: find same-method-name in same directory (no inheritance edges needed)."""
@@ -1485,18 +1611,20 @@ def _get_name_match_peers(
                 snippet = _read_source_lines(full_path, body_start, body_end)
 
             is_edited = any(pm_norm.endswith(ef) or ef.endswith(pm_norm) for ef in edited)
-            results.append({
-                "name": function_name,
-                "file": pm_norm,
-                "signature": pm["signature"] or "",
-                "snippet": snippet.strip(),
-                "edited": is_edited,
-                # LIPI #10: this is the name+directory fallback — NO verified
-                # relating edge. It is a name_match-grade guess; the renderer must
-                # mark it unverified so it is never laundered as a structural fact
-                # (correct-or-quiet: relabel the guess, don't present it as a peer).
-                "verified": "0",
-            })
+            results.append(
+                {
+                    "name": function_name,
+                    "file": pm_norm,
+                    "signature": pm["signature"] or "",
+                    "snippet": snippet.strip(),
+                    "edited": is_edited,
+                    # LIPI #10: this is the name+directory fallback — NO verified
+                    # relating edge. It is a name_match-grade guess; the renderer must
+                    # mark it unverified so it is never laundered as a structural fact
+                    # (correct-or-quiet: relabel the guess, don't present it as a peer).
+                    "verified": "0",
+                }
+            )
 
         results.sort(key=lambda r: (not r["edited"], r["file"]))
     except Exception as e:
@@ -1505,9 +1633,7 @@ def _get_name_match_peers(
     return results[:3]
 
 
-def _get_override_chain(
-    db_path: str, file_path: str, method_name: str
-) -> list[dict[str, str]]:
+def _get_override_chain(db_path: str, file_path: str, method_name: str) -> list[dict[str, str]]:
     """Find parent class implementations of this method via EXTENDS edges."""
     results: list[dict[str, str]] = []
     try:
@@ -1549,20 +1675,20 @@ def _get_override_chain(
         ).fetchall()
         conn.close()
         for row in rows:
-            results.append({
-                "method": row["name"],
-                "file": row["file_path"],
-                "signature": row["signature"] or "",
-                "class": row["class_name"],
-            })
+            results.append(
+                {
+                    "method": row["name"],
+                    "file": row["file_path"],
+                    "signature": row["signature"] or "",
+                    "class": row["class_name"],
+                }
+            )
     except Exception as e:
         _append_gt_log("override_chain_error", str(e))
     return results
 
 
-def _get_route_reexport_flags(
-    db_path: str, file_path: str, func_name: str
-) -> list[str]:
+def _get_route_reexport_flags(db_path: str, file_path: str, func_name: str) -> list[str]:
     """Relationship gap-fill, verified against the indexer (correct-or-quiet):
     HANDLES_ROUTE -> flag only (route path discarded, target is a file-rep node);
     RE_EXPORTS -> file-level two-hop matched on nodes.file_path (endpoints are
@@ -1576,10 +1702,13 @@ def _get_route_reexport_flags(
     try:
         conn = _open_graph_db(db_path)
         fid = _resolve_node_id(db_path, file_path, func_name)
-        if fid and conn.execute(
-            "SELECT 1 FROM edges WHERE source_id = ? AND type = 'HANDLES_ROUTE' LIMIT 1",
-            (fid,),
-        ).fetchone():
+        if (
+            fid
+            and conn.execute(
+                "SELECT 1 FROM edges WHERE source_id = ? AND type = 'HANDLES_ROUTE' LIMIT 1",
+                (fid,),
+            ).fetchone()
+        ):
             lines.append(
                 "[ROUTE] framework-invoked route handler - the call graph is "
                 "unsound here; verify the route binding on co-edit"
@@ -1656,9 +1785,7 @@ def _find_same_name_twins(
         for r in rows:
             same_file = r["file_path"] == my_path
             same_class = (
-                my_parent is not None
-                and r["parent_id"] is not None
-                and r["parent_id"] == my_parent
+                my_parent is not None and r["parent_id"] is not None and r["parent_id"] == my_parent
             )
             if not (same_file or same_class):
                 continue
@@ -1747,9 +1874,10 @@ def _get_test_assertions_from_graph(
         conn = _open_graph_db(db_path)
 
         # Check if assertions table exists
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
         if "assertions" not in tables:
             conn.close()
             return []
@@ -1779,10 +1907,18 @@ def _get_test_assertions_from_graph(
 
         # Rank by issue-keyword overlap + helper file deprioritization
         # PRIOR-003: _common.py/conftest.py/helper.py must not outrank direct tests
-        _HELPER_PATTERNS = ("_common.py", "conftest.py", "helper.py", "helpers.py",
-                            "fixtures.py", "utils.py", "base.py")
+        _HELPER_PATTERNS = (
+            "_common.py",
+            "conftest.py",
+            "helper.py",
+            "helpers.py",
+            "fixtures.py",
+            "utils.py",
+            "base.py",
+        )
         _issue_terms = _load_issue_terms()
         if len(rows) > 1:
+
             def _test_relevance(r):
                 score = 0
                 # Deprioritize helper/support files (TCTracer ICSE 2020: naming convention signal)
@@ -1794,16 +1930,19 @@ def _get_test_assertions_from_graph(
                     text = ((r["test_name"] or "") + " " + (r["expression"] or "")).lower()
                     score += sum(1 for t in _issue_terms if t in text)
                 return score
+
             rows = sorted(rows, key=_test_relevance, reverse=True)
 
         for row in rows[:3]:
-            results.append({
-                "kind": row["kind"] or "",
-                "expression": row["expression"] or "",
-                "expected": row["expected"] or "",
-                "test_name": row["test_name"] or "",
-                "test_file": row["file_path"] or "",
-            })
+            results.append(
+                {
+                    "kind": row["kind"] or "",
+                    "expression": row["expression"] or "",
+                    "expected": row["expected"] or "",
+                    "test_name": row["test_name"] or "",
+                    "test_file": row["file_path"] or "",
+                }
+            )
     except Exception as e:
         _append_gt_log("get_test_assertions_error", str(e))
 
@@ -1822,6 +1961,7 @@ def _discover_test_files_by_convention(
     Then validates they exist on disk.
     """
     import sqlite3 as _sq
+
     stem = os.path.splitext(os.path.basename(file_path))[0]
     if not stem or not db_path:
         return []
@@ -1851,6 +1991,7 @@ def _get_test_assertions_from_file(
 ) -> list[str]:
     """Fallback: find test files via graph edges + naming convention, grep for assertions."""
     import sqlite3 as _sq
+
     if not repo_root:
         repo_root = os.environ.get("GT_REPO_ROOT", "/testbed")
     try:
@@ -1901,10 +2042,20 @@ def _get_test_assertions_from_file(
                         with open(full, encoding="utf-8", errors="ignore") as tf:
                             for line in tf:
                                 stripped = line.strip()
-                                if stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")) or ".assert_called" in stripped or ".assert_any_call" in stripped or ".assert_not_called" in stripped or ".assert_has_calls" in stripped:
+                                if (
+                                    stripped.startswith(
+                                        ("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")
+                                    )
+                                    or ".assert_called" in stripped
+                                    or ".assert_any_call" in stripped
+                                    or ".assert_not_called" in stripped
+                                    or ".assert_has_calls" in stripped
+                                ):
                                     hits = sum(1 for t in issue_terms if t in stripped.lower())
                                     if hits > 0:
-                                        assertions.append(f"{test_file}: {clip_balanced(stripped, 120)}")
+                                        assertions.append(
+                                            f"{test_file}: {clip_balanced(stripped, 120)}"
+                                        )
                                         if len(assertions) >= 3:
                                             return assertions
                     except OSError:
@@ -1921,12 +2072,22 @@ def _get_test_assertions_from_file(
                         with open(full, encoding="utf-8", errors="ignore") as tf:
                             for line in tf:
                                 stripped = line.strip()
-                                if any(tn in stripped for tn in _test_names if stripped.startswith(("def ", "func ", "fn "))):
+                                if any(
+                                    tn in stripped
+                                    for tn in _test_names
+                                    if stripped.startswith(("def ", "func ", "fn "))
+                                ):
                                     in_target_func = True
-                                elif in_target_func and stripped.startswith(("def ", "func ", "fn ", "class ")):
+                                elif in_target_func and stripped.startswith(
+                                    ("def ", "func ", "fn ", "class ")
+                                ):
                                     in_target_func = False
-                                elif in_target_func and stripped.startswith(("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")):
-                                    assertions.append(f"{test_file}: {clip_balanced(stripped, 120)}")
+                                elif in_target_func and stripped.startswith(
+                                    ("assert", "self.assert", "expect(", "EXPECT_", "CHECK(")
+                                ):
+                                    assertions.append(
+                                        f"{test_file}: {clip_balanced(stripped, 120)}"
+                                    )
                                     if len(assertions) >= 3:
                                         return assertions
                     except OSError:
@@ -1936,11 +2097,8 @@ def _get_test_assertions_from_file(
         return []
 
 
-def _find_nearest_candidate(
-    file_path: str, brief_candidates: list[str], db_path: str
-) -> str:
+def _find_nearest_candidate(file_path: str, brief_candidates: list[str], db_path: str) -> str:
     """Find the nearest brief candidate connected to this file via graph.db edges."""
-    import sqlite3 as _sqlite3
 
     if not brief_candidates:
         return ""
@@ -2025,7 +2183,11 @@ def _signature_default_count(signature: str) -> int:
     if not inner:
         return 0
     parts = [p.strip() for p in inner.split(",") if p.strip()]
-    return sum(1 for p in parts if "=" in p and p.split(":")[0].split("=")[0].strip() not in ("self", "cls"))
+    return sum(
+        1
+        for p in parts
+        if "=" in p and p.split(":")[0].split("=")[0].strip() not in ("self", "cls")
+    )
 
 
 def _extract_call_arity(code: str, function_name: str) -> int | None:
@@ -2111,7 +2273,8 @@ def _check_arity_mismatch(
     caller_refs = ", ".join(f"{m[0]}:{m[1]}" for m in mismatches[:2])
 
     log_threshold_use(
-        "SIGNATURE_MISMATCH", best_conf,
+        "SIGNATURE_MISMATCH",
+        best_conf,
         f"func={func_name} new_arity={new_arity} min_required={min_required} mismatches={len(mismatches)}",
     )
 
@@ -2185,7 +2348,9 @@ def _format_test_command(test_file: str, test_name: str) -> str:
 
 
 def _get_targeted_verification_suggestion(
-    db_path: str, file_path: str, function_names: list[str],
+    db_path: str,
+    file_path: str,
+    function_names: list[str],
 ) -> str:
     """LEGITIMACY-DISABLED: always returns "" — GT stays test-BLIND.
 
@@ -2205,8 +2370,10 @@ def _get_targeted_verification_suggestion(
         VERIFY_LABEL_MEDIUM_METHODS,
         log_threshold_use,
     )
+
     try:
         import sqlite3
+
         conn = sqlite3.connect(db_path)
         _resolved_verify = _resolve_file_path(conn, file_path)
         if _resolved_verify is None:
@@ -2279,7 +2446,8 @@ def _get_targeted_verification_suggestion(
                     label = "medium"
 
                 log_threshold_use(
-                    "VERIFY_LABEL", label,
+                    "VERIFY_LABEL",
+                    label,
                     f"test={test_file}::{test_name} res={res_method} conf={edge_conf:.2f} class={target_class}",
                 )
                 conn.close()
@@ -2332,10 +2500,7 @@ def format_risk_evidence(
 
     if confidence >= 0.9 and num_callers >= 3:
         unique_files = list(dict.fromkeys(c["file"] for c in callers))
-        top_files = ", ".join(
-            f.rsplit("/", 1)[-1] if "/" in f else f
-            for f in unique_files[:3]
-        )
+        top_files = ", ".join(f.rsplit("/", 1)[-1] if "/" in f else f for f in unique_files[:3])
         lines: list[str] = [
             f"[CONTRACT] {num_callers} callers depend on {function_name}() — changes here affect {top_files}:"
         ]
@@ -2375,15 +2540,27 @@ def _format_param_display(param_value: str) -> str:
 # render BEFORE params/resources so a downstream char cap (owned by the wrapper)
 # keeps them. Pure / module-level for unit testing.
 _CONTRACT_HIGH_VALUE_PREFIXES = (
-    "PRESERVE:", "[RAISES]", "[RETURNS]", "[CATCHES]", "[BOUNDARY]",
+    "PRESERVE:",
+    "[RAISES]",
+    "[RETURNS]",
+    "[CATCHES]",
+    "[BOUNDARY]",
 )
 # Conditional-return / classified-return lines render as ``L<line>: <expr>`` —
 # high-value return-path facts. Matched by shape (not a bare ``L`` prefix, which
 # would falsely promote any future ``L``-prefixed marker).
 _CONTRACT_RETURN_LINE_RE = re.compile(r"^L\d+:")
 _CONTRACT_LOW_VALUE_PREFIXES = (
-    "PARAMS:", "[RESOURCE]", "FIELD:", "READS:", "[CONFIG]", "[ORDER]",
-    "[CONCURRENCY]", "[SECURITY]", "[SERDE]", "[TWIN]",
+    "PARAMS:",
+    "[RESOURCE]",
+    "FIELD:",
+    "READS:",
+    "[CONFIG]",
+    "[ORDER]",
+    "[CONCURRENCY]",
+    "[SECURITY]",
+    "[SERDE]",
+    "[TWIN]",
 )
 
 
@@ -2395,7 +2572,7 @@ def _contract_line_value(line: str) -> str:
     if s.startswith("["):
         close = s.find("]")
         if close != -1:
-            return s[close + 1:].strip()
+            return s[close + 1 :].strip()
     m = _re.match(r"^[A-Za-z_]\w*:\s*(.*)$", s)
     if m:
         return m.group(1).strip()
@@ -2407,7 +2584,9 @@ def _contract_sort_rank(line: str) -> int:
     resources/fields), 2 for everything else — used as a STABLE sort key so
     high-value contract content survives a downstream cap (C1d ordering)."""
     s = line.strip()
-    if any(s.startswith(p) for p in _CONTRACT_HIGH_VALUE_PREFIXES) or _CONTRACT_RETURN_LINE_RE.match(s):
+    if any(
+        s.startswith(p) for p in _CONTRACT_HIGH_VALUE_PREFIXES
+    ) or _CONTRACT_RETURN_LINE_RE.match(s):
         return 0
     if any(s.startswith(p) for p in _CONTRACT_LOW_VALUE_PREFIXES):
         return 1
@@ -2444,28 +2623,31 @@ def _map_args_to_params(call_line: str, func_name: str, params: list[str]) -> st
     -> 'passes token→value, strict=True→strict'
     """
     import re as _re_map
+
     # Find the function call and extract args with balanced-paren awareness
-    start_match = _re_map.search(rf'{_re_map.escape(func_name)}\s*\(', call_line)
+    start_match = _re_map.search(rf"{_re_map.escape(func_name)}\s*\(", call_line)
     if not start_match:
         return ""
     start = start_match.end()
     depth, end = 1, start
     while end < len(call_line) and depth > 0:
-        if call_line[end] == '(':
+        if call_line[end] == "(":
             depth += 1
-        elif call_line[end] == ')':
+        elif call_line[end] == ")":
             depth -= 1
         end += 1
     if depth != 0:
         return ""
-    arg_str = call_line[start:end - 1]
+    arg_str = call_line[start : end - 1]
     # Split on commas at depth 0 only
     args: list[str] = []
     current, d = [], 0
     for ch in arg_str:
-        if ch == '(' : d += 1
-        elif ch == ')': d -= 1
-        elif ch == ',' and d == 0:
+        if ch == "(":
+            d += 1
+        elif ch == ")":
+            d -= 1
+        elif ch == "," and d == 0:
             args.append("".join(current).strip())
             current = []
             continue
@@ -2474,7 +2656,7 @@ def _map_args_to_params(call_line: str, func_name: str, params: list[str]) -> st
         args.append("".join(current).strip())
     args = [a for a in args if a]
     mappings: list[str] = []
-    for i, arg in enumerate(args[:len(params)]):
+    for i, arg in enumerate(args[: len(params)]):
         if "=" in arg and "==" not in arg:
             mappings.append(arg)
         else:
@@ -2524,7 +2706,7 @@ def _format_callee_entry(name: str, signature: str, file_path: str) -> str:
     # Strip a leading "def "/"func "/"fn " keyword if the spec stored one.
     for _kw in ("def ", "func ", "fn ", "function "):
         if head.startswith(_kw):
-            head = head[len(_kw):].strip()
+            head = head[len(_kw) :].strip()
             break
     if name and not head.startswith(name + "(") and not head.startswith(name + " "):
         # Signature is a bare param list (e.g. "(self, key, string: str)") or a
@@ -2532,15 +2714,17 @@ def _format_callee_entry(name: str, signature: str, file_path: str) -> str:
         if head.startswith("("):
             rendered = f"{name}{head}"
         else:
-            rendered = f"{name}({head})" if not head.startswith("(") and "(" not in head else f"{name} {head}"
+            rendered = (
+                f"{name}({head})"
+                if not head.startswith("(") and "(" not in head
+                else f"{name} {head}"
+            )
     else:
         rendered = head
     return f"{rendered} ({file_path})"
 
 
-def _passes_relevance_gate(
-    candidate_text: str, issue_terms: set[str], fn_tokens: set[str]
-) -> bool:
+def _passes_relevance_gate(candidate_text: str, issue_terms: set[str], fn_tokens: set[str]) -> bool:
     """TASK #47 relevance gate for non-edge signals ([RECALL]/[SIMILAR]/[FORMAT]).
 
     A non-edge signal is only rendered when its text overlaps EITHER the issue
@@ -2574,6 +2758,7 @@ def _identifier_tokens(name: str) -> set[str]:
     {"embed", "album", "embedalbum"}.
     """
     import re as _re
+
     n = (name or "").strip()
     if not n:
         return set()
@@ -2594,30 +2779,28 @@ def _identifier_tokens(name: str) -> set[str]:
 # shell is present we count it as metadata_only — that IS the signal that L3 is
 # hollow on this task.
 
-_GT_LAYER_EVENTS = os.environ.get(
-    "GT_LAYER_EVENTS_PATH", "/tmp/gt_layer_events.jsonl"
-)
+_GT_LAYER_EVENTS = os.environ.get("GT_LAYER_EVENTS_PATH", "/tmp/gt_layer_events.jsonl")
 
 # Prefixes/markers that carry REAL textual evidence (code, a signature, a
 # concrete contract clause, a test assertion). Matched on the line's lstrip.
 _L3_REAL_MARKERS = (
-    "[SIGNATURE]",      # actual signature text
-    "[TEST]",           # test assertion expression
-    "[PEER]",           # peer method snippet/signature
-    "[PATTERN]",        # sibling body snippet
-    "[TWIN]",           # twin definition location + fix directive
-    "[OVERRIDE]",       # parent method signature
-    "[SIMILAR]",        # fingerprint-similar function (carries name+loc)
-    "PRESERVE:",        # behavioral-contract guard/return clause
+    "[SIGNATURE]",  # actual signature text
+    "[TEST]",  # test assertion expression
+    "[PEER]",  # peer method snippet/signature
+    "[PATTERN]",  # sibling body snippet
+    "[TWIN]",  # twin definition location + fix directive
+    "[OVERRIDE]",  # parent method signature
+    "[SIMILAR]",  # fingerprint-similar function (carries name+loc)
+    "PRESERVE:",  # behavioral-contract guard/return clause
     "MUTATES:",
     "ACCUMULATES:",
     "VOID_SIDE_EFFECT",
-    "Calls into:",      # callee entries with signatures
+    "Calls into:",  # callee entries with signatures
     "Called by:",
     "MUST PRESERVE:",
     "TOP CALLER:",
     "[PROPAGATE]",
-    "[COMPLETENESS]",   # names concrete test groups
+    "[COMPLETENESS]",  # names concrete test groups
     "[REVIEW]",
     "Impact:",
     "Verify:",
@@ -2652,7 +2835,7 @@ def _l3_line_is_real(line: str) -> bool:
     # A marker line is REAL only if it has content beyond the marker token.
     for mk in _L3_REAL_MARKERS:
         if s.startswith(mk):
-            payload = s[len(mk):].strip()
+            payload = s[len(mk) :].strip()
             return len(payload) >= 2
     # Indented body lines (contract returns "  L42: return x", body "  code",
     # caller "  file:line  → code") count as real when they carry >3 chars.
@@ -2695,6 +2878,7 @@ def _emit_l3_accounting(
     try:
         import json as _json
         from datetime import datetime as _dt, timezone as _tz
+
         rec = {
             "ts": _dt.now(_tz.utc).isoformat(),
             "layer": "L3",
@@ -2781,7 +2965,11 @@ def generate_improved_evidence(
 
     for func_name in function_names:  # budget-based cap replaces hard [:3] limit
         if chars_used > effective_max_chars * 0.8 and func_name != function_names[0]:
-            print(f"[GT_META] func_budget_exhausted: skipping {func_name} chars_used={chars_used}/{effective_max_chars}", file=sys.stderr, flush=True)
+            print(
+                f"[GT_META] func_budget_exhausted: skipping {func_name} chars_used={chars_used}/{effective_max_chars}",
+                file=sys.stderr,
+                flush=True,
+            )
             break
         func_parts: list[str] = []
         callers: list[dict[str, str]] = []
@@ -2797,8 +2985,12 @@ def generate_improved_evidence(
                     if ret_type and ret_type != "None":
                         func_parts.append(f"MUST PRESERVE: returns {ret_type}")
             callers = _get_callers_from_graph(
-                db_path, file_path, func_name, repo_root,
-                seen_files=edited_files, limit=3,
+                db_path,
+                file_path,
+                func_name,
+                repo_root,
+                seen_files=edited_files,
+                limit=3,
             )
             if callers:
                 func_parts.append("TOP CALLER:")
@@ -2825,8 +3017,13 @@ def generate_improved_evidence(
                 _bc_node_id = None
                 try:
                     import sqlite3 as _sq_bc
+
                     if not os.path.exists(db_path):
-                        print(f"[GT_META] behavioral_contract: db_missing:{db_path}", file=sys.stderr, flush=True)
+                        print(
+                            f"[GT_META] behavioral_contract: db_missing:{db_path}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     else:
                         # LIPI #11 (plumbing): use the ONE canonical resolver
                         # (`_resolve_node_id`) instead of an inline re-implementation.
@@ -2851,10 +3048,22 @@ def generate_improved_evidence(
                             if _row_bc:
                                 func_start, func_end = _row_bc[0], _row_bc[1]
                         if func_start is None:
-                            print(f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path}", file=sys.stderr, flush=True)
+                            print(
+                                f"[GT_META] behavioral_contract: no_node:{func_name}@{file_path}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                 except Exception as _bc_db_exc:
-                    print(f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}", file=sys.stderr, flush=True)
-                print(f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}", file=sys.stderr, flush=True)
+                    print(
+                        f"[GT_META] behavioral_contract_db_error: {_bc_db_exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                print(
+                    f"[GT_META] behavioral_contract: func={func_name} file={file_path} start={func_start} end={func_end}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 if func_start and func_end:
                     full_path = os.path.join(repo_root, file_path) if repo_root else file_path
                     try:
@@ -2862,14 +3071,26 @@ def generate_improved_evidence(
                             all_lines = _f_bc.readlines()
                         func_body_for_contract = "".join(all_lines[func_start - 1 : func_end])
                     except OSError as _bc_os_exc:
-                        print(f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}", file=sys.stderr, flush=True)
-                print(f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}", file=sys.stderr, flush=True)
+                        print(
+                            f"[GT_META] behavioral_contract_file_error: {_bc_os_exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                print(
+                    f"[GT_META] behavioral_contract: body_len={len(func_body_for_contract)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 # B2: also handle short bodies (<=20 chars) as full-body contract
                 if func_body_for_contract and len(func_body_for_contract) <= 20:
                     _body_lines_short = func_body_for_contract.splitlines()
-                    _body_only_short = _body_lines_short[1:] if len(_body_lines_short) > 1 else _body_lines_short
+                    _body_only_short = (
+                        _body_lines_short[1:] if len(_body_lines_short) > 1 else _body_lines_short
+                    )
                     if _body_only_short and len(_body_only_short) <= 5:
-                        func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only_short)} lines)")
+                        func_parts.append(
+                            f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only_short)} lines)"
+                        )
                         for _bl in _body_only_short:
                             func_parts.append(f"  {_bl.rstrip()}")
                 if func_body_for_contract and len(func_body_for_contract) > 20:
@@ -2882,15 +3103,21 @@ def generate_improved_evidence(
                             _props_conn = _open_graph_db(db_path)
                             _props = _props_conn.execute(
                                 "SELECT kind, value, line FROM properties WHERE node_id = ? ORDER BY line",
-                                (_bc_node_id,)
+                                (_bc_node_id,),
                             ).fetchall()
                             _props_conn.close()
                             if _props:
                                 _props_used = True
-                                _raises_types: list[str] = []  # exception_type values (dedup, cap 3)
+                                _raises_types: list[
+                                    str
+                                ] = []  # exception_type values (dedup, cap 3)
                                 _return_shapes: list[str] = []  # return_shape values (dedup, cap 2)
-                                _exc_flow_values: list[str] = []  # emitted exception_flow values (for Tier-A dedup)
-                                _flow_count = 0  # data_flow lines emitted (cap 3 — most-used params)
+                                _exc_flow_values: list[
+                                    str
+                                ] = []  # emitted exception_flow values (for Tier-A dedup)
+                                _flow_count = (
+                                    0  # data_flow lines emitted (cap 3 — most-used params)
+                                )
                                 for _prop in _props:
                                     _pk, _pv, _pl = _prop["kind"], _prop["value"], _prop["line"]
                                     # C1 chokepoint: every {_pv} render below is an
@@ -2927,7 +3154,11 @@ def generate_improved_evidence(
                                         _exc_flow_values.append(_pv)
                                     elif _pk == "exception_type":
                                         # Indexer emits 100s/repo; dedup + cap 3, aggregated on one line below.
-                                        if _pv and _pv not in _raises_types and len(_raises_types) < 3:
+                                        if (
+                                            _pv
+                                            and _pv not in _raises_types
+                                            and len(_raises_types) < 3
+                                        ):
                                             _raises_types.append(_pv)
                                     elif _pk == "exception_handler":
                                         _props_contract_lines.append(f"  [CATCHES] {_pv}")
@@ -2957,7 +3188,11 @@ def generate_improved_evidence(
                                         _props_contract_lines.append(f"  [TWIN] {_pv}")
                                     elif _pk == "return_shape":
                                         # Indexer emits 100s-1000s/repo; dedup + cap 2, rendered below.
-                                        if _pv and _pv not in _return_shapes and len(_return_shapes) < 2:
+                                        if (
+                                            _pv
+                                            and _pv not in _return_shapes
+                                            and len(_return_shapes) < 2
+                                        ):
                                             _return_shapes.append(_pv)
                                     elif _pk == "visibility":
                                         pass  # stored for MCP query, not displayed inline
@@ -3000,11 +3235,14 @@ def generate_improved_evidence(
                                         # Append mined shape only if it adds info not in
                                         # the typed return_type (e.g. "dict" vs "Dict[str, Any]").
                                         _shape_extras = [
-                                            s for s in _return_shapes
+                                            s
+                                            for s in _return_shapes
                                             if s.lower() not in _node_return_type.lower()
                                         ]
                                         if _shape_extras:
-                                            _agg_lines.append(f"  [RETURNS] {_node_return_type} (shape: {', '.join(_shape_extras)})")
+                                            _agg_lines.append(
+                                                f"  [RETURNS] {_node_return_type} (shape: {', '.join(_shape_extras)})"
+                                            )
                                         else:
                                             _agg_lines.append(f"  [RETURNS] {_node_return_type}")
                                     else:
@@ -3027,14 +3265,24 @@ def generate_improved_evidence(
                                             continue
                                         _seen_params.add(_fp)
                                         _formatted_params.append(_fp)
-                                    _props_contract_lines.insert(0, f"  PARAMS: {', '.join(_formatted_params)}")
+                                    _props_contract_lines.insert(
+                                        0, f"  PARAMS: {', '.join(_formatted_params)}"
+                                    )
                                 _kind_counts: dict[str, int] = {}
                                 for _p_item in _props:
                                     _kc_key = _p_item["kind"]
                                     _kind_counts[_kc_key] = _kind_counts.get(_kc_key, 0) + 1
-                                print(f"[GT_META] properties_query: node_id={_bc_node_id} total={len(_props)} kinds={_kind_counts}", file=sys.stderr, flush=True)
+                                print(
+                                    f"[GT_META] properties_query: node_id={_bc_node_id} total={len(_props)} kinds={_kind_counts}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
                         except Exception as _props_exc:
-                            print(f"[GT_META] behavioral_contract_properties_error: {_props_exc}", file=sys.stderr, flush=True)
+                            print(
+                                f"[GT_META] behavioral_contract_properties_error: {_props_exc}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                             _props_used = False
 
                     if _props_used and _props_contract_lines:
@@ -3053,7 +3301,10 @@ def generate_improved_evidence(
                             # lines first, from the end; a matching line is only
                             # dropped when nothing else remains to cut.
                             _cap_terms = _load_issue_terms()
-                            while _props_contract_lines and len("\n".join(_props_contract_lines)) > 800:
+                            while (
+                                _props_contract_lines
+                                and len("\n".join(_props_contract_lines)) > 800
+                            ):
                                 _victim = None
                                 if _cap_terms:
                                     for _ci in range(len(_props_contract_lines) - 1, -1, -1):
@@ -3061,7 +3312,9 @@ def generate_improved_evidence(
                                         if not any(_t in _cl for _t in _cap_terms):
                                             _victim = _ci
                                             break
-                                _props_contract_lines.pop(len(_props_contract_lines) - 1 if _victim is None else _victim)
+                                _props_contract_lines.pop(
+                                    len(_props_contract_lines) - 1 if _victim is None else _victim
+                                )
                         # C1c: suppress the header entirely when nothing survived
                         # (correct-or-quiet — never a [BEHAVIORAL CONTRACT] with no body).
                         if _props_contract_lines:
@@ -3069,13 +3322,18 @@ def generate_improved_evidence(
                             func_parts.extend(_props_contract_lines)
                     else:
                         # Regex fallback for non-Go-indexed repos or old databases
-                        print(f"[GT_META] properties_fallback: using regex extraction (no properties in graph.db)", file=sys.stderr, flush=True)
+                        print(
+                            "[GT_META] properties_fallback: using regex extraction (no properties in graph.db)",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                         from groundtruth.evidence.change import (
                             _regex_extract_guards,
                             _regex_extract_mutations,
                             _regex_extract_accumulations,
                             _classify_return_statements,
                         )
+
                         guards = _regex_extract_guards(func_body_for_contract)
                         mutations = _regex_extract_mutations(func_body_for_contract)
                         accumulations = _regex_extract_accumulations(func_body_for_contract)
@@ -3093,18 +3351,24 @@ def generate_improved_evidence(
                             if guards:
                                 for gt_type, gt_cond in guards[:3]:
                                     gt_cond = clip_balanced(gt_cond) if gt_cond else gt_cond
-                                    contract_lines.append(f"  PRESERVE: if {gt_cond} then {gt_type}")
+                                    contract_lines.append(
+                                        f"  PRESERVE: if {gt_cond} then {gt_type}"
+                                    )
                             if mutations:
                                 _mut_targets = ", ".join(t for _, t in mutations[:4])
                                 contract_lines.append(f"  MUTATES: {_mut_targets}")
                             if accumulations:
                                 for _acc_type, _acc_var in accumulations[:3]:
                                     if _acc_type == "append_build":
-                                        contract_lines.append(f"  ACCUMULATES: {_acc_var} via .append()")
+                                        contract_lines.append(
+                                            f"  ACCUMULATES: {_acc_var} via .append()"
+                                        )
                                     elif _acc_type == "increment":
                                         contract_lines.append(f"  ACCUMULATES: {_acc_var} via +=")
                                     elif _acc_type == "string_compose":
-                                        contract_lines.append(f"  ACCUMULATES: {_acc_var} via string composition")
+                                        contract_lines.append(
+                                            f"  ACCUMULATES: {_acc_var} via string composition"
+                                        )
                             if classified_returns:
                                 for rp_line, rp_kind, rp_text in classified_returns[:4]:
                                     if rp_kind == "VOID_SIDE_EFFECT":
@@ -3131,15 +3395,24 @@ def generate_improved_evidence(
                             # Skip def line (first line) to get body-only lines
                             _body_only = _body_lines[1:] if len(_body_lines) > 1 else _body_lines
                             if _body_only and len(_body_only) <= 5:
-                                func_parts.append(f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only)} lines)")
+                                func_parts.append(
+                                    f"[BEHAVIORAL CONTRACT] (full body — {len(_body_only)} lines)"
+                                )
                                 for _bl in _body_only:
                                     func_parts.append(f"  {_bl.rstrip()}")
             except Exception as _bc_outer_exc:
-                print(f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}", file=sys.stderr, flush=True)
+                print(
+                    f"[GT_META] behavioral_contract_outer_error: {type(_bc_outer_exc).__name__}: {_bc_outer_exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         # --- Priority 1: Caller CODE lines (verification: did you break dependents?) ---
         callers = _get_callers_from_graph(
-            db_path, file_path, func_name, repo_root,
+            db_path,
+            file_path,
+            func_name,
+            repo_root,
             seen_files=edited_files,
             limit=base_max + 10,
         )
@@ -3154,6 +3427,7 @@ def generate_improved_evidence(
         _anchor_syms = set(s.lower() for s in _anchors.get("symbols", []))
         _anchor_paths = set(p.lower() for p in _anchors.get("paths", []))
         if _anchor_syms or _anchor_paths:
+
             def _anchor_score(c: dict) -> int:
                 fp = (c.get("file", "") or "").lower()
                 cn = (c.get("caller_name", "") or "").lower()
@@ -3165,20 +3439,20 @@ def generate_improved_evidence(
                 if any(s in fp for s in _anchor_syms):
                     score += 1
                 return score
+
             _pre_order = [c.get("file", "") for c in ordered_callers[:3]]
             ordered_callers = sorted(ordered_callers, key=_anchor_score, reverse=True)
             _post_order = [c.get("file", "") for c in ordered_callers[:3]]
             if _pre_order != _post_order:
                 print(
                     f"[GT_META] anchor_rerank: {func_name} before={_pre_order} after={_post_order}",
-                    file=sys.stderr, flush=True,
+                    file=sys.stderr,
+                    flush=True,
                 )
 
         # Determine aggregate confidence for this caller set
         # Use median confidence (CG Risk Detection 2025: density-weighted aggregate)
-        caller_confidences = [
-            float(c.get("confidence", "0.5")) for c in ordered_callers
-        ]
+        caller_confidences = [float(c.get("confidence", "0.5")) for c in ordered_callers]
         if caller_confidences:
             _sorted_conf = sorted(caller_confidences)
             _n = len(_sorted_conf)
@@ -3188,7 +3462,9 @@ def generate_improved_evidence(
 
         # Confidence-gated risk-warning evidence framing
         risk_lines = format_risk_evidence(
-            ordered_callers, func_name, aggregate_confidence,
+            ordered_callers,
+            func_name,
+            aggregate_confidence,
         )
         if risk_lines:
             func_parts.extend(risk_lines)
@@ -3224,10 +3500,7 @@ def generate_improved_evidence(
                         (resolved_target_id, _resolved_callees_fp),
                     ).fetchall()
                     _callees_conn.close()
-                    _callees = [
-                        c for c in _callees
-                        if _path_policy_is_deliverable(c["file_path"])
-                    ]
+                    _callees = [c for c in _callees if _path_policy_is_deliverable(c["file_path"])]
                 if _callees:
                     # TASK #49: render each callee WITH its signature so the
                     # agent sees the contract it must satisfy at the call site
@@ -3243,13 +3516,15 @@ def generate_improved_evidence(
                     func_parts.append(_callee_text)
                     if _evidence_accumulator is not None:
                         for _ce in _callees[:3]:
-                            _evidence_accumulator.append({
-                                "kind": "l3_callee",
-                                "file_path": _ce["file_path"],
-                                "symbol": _ce["name"],
-                                "source": "graph_db",
-                                "reason": f"called by {func_name}",
-                            })
+                            _evidence_accumulator.append(
+                                {
+                                    "kind": "l3_callee",
+                                    "file_path": _ce["file_path"],
+                                    "symbol": _ce["name"],
+                                    "source": "graph_db",
+                                    "reason": f"called by {func_name}",
+                                }
+                            )
             except Exception:
                 pass
 
@@ -3268,33 +3543,49 @@ def generate_improved_evidence(
 
             # Diff-aware arity check: compare new sig vs caller call arity
             _arity_warning = _check_arity_mismatch(
-                sig, func_name, ordered_callers, edited_files,
+                sig,
+                func_name,
+                ordered_callers,
+                edited_files,
             )
             if _arity_warning:
                 func_parts.append(_arity_warning)
                 if _evidence_accumulator is not None:
-                    _evidence_accumulator.append({
-                        "kind": "l3_signature_mismatch",
-                        "file_path": file_path, "symbol": func_name,
-                        "text": _arity_warning, "source": "graph_db",
-                    })
+                    _evidence_accumulator.append(
+                        {
+                            "kind": "l3_signature_mismatch",
+                            "file_path": file_path,
+                            "symbol": func_name,
+                            "text": _arity_warning,
+                            "source": "graph_db",
+                        }
+                    )
             # Structured capture: signature
             if _evidence_accumulator is not None:
-                _evidence_accumulator.append({
-                    "kind": "l3_signature", "file_path": file_path,
-                    "symbol": func_name, "text": sig, "source": "graph_db",
-                })
+                _evidence_accumulator.append(
+                    {
+                        "kind": "l3_signature",
+                        "file_path": file_path,
+                        "symbol": func_name,
+                        "text": sig,
+                        "source": "graph_db",
+                    }
+                )
 
         # Structured capture: callers
         if _evidence_accumulator is not None and callers:
             for c in callers[:5]:
-                _evidence_accumulator.append({
-                    "kind": "l3_caller_code", "file_path": c["file"],
-                    "symbol": c.get("caller_name", ""),
-                    "line_start": int(c.get("line", 0) or 0),
-                    "text": c.get("code", ""), "source": "graph_db",
-                    "reason": "calls edited function",
-                    })
+                _evidence_accumulator.append(
+                    {
+                        "kind": "l3_caller_code",
+                        "file_path": c["file"],
+                        "symbol": c.get("caller_name", ""),
+                        "line_start": int(c.get("line", 0) or 0),
+                        "text": c.get("code", ""),
+                        "source": "graph_db",
+                        "reason": "calls edited function",
+                    }
+                )
 
         # === EVIDENCE PRIORITY ORDER ===
         # 1. Callers + Signature (already appended above)
@@ -3308,7 +3599,10 @@ def generate_improved_evidence(
         _skip_peer = func_name.startswith("__") and func_name.endswith("__")
         if not _skip_peer:
             peers = _get_interface_peers_from_graph(
-                db_path, file_path, func_name, repo_root,
+                db_path,
+                file_path,
+                func_name,
+                repo_root,
                 edited_files=edited_files,
             )
             if peers:
@@ -3322,7 +3616,9 @@ def generate_improved_evidence(
                     # never laundered as a fact (correct-or-quiet).
                     _verified = peer.get("verified", "1") != "0"
                     _marker = "[PEER]" if _verified else "[PEER?]"
-                    _vnote = "" if _verified else " (name-only match — verify it shares an interface)"
+                    _vnote = (
+                        "" if _verified else " (name-only match — verify it shares an interface)"
+                    )
                     if peer["snippet"]:
                         func_parts.append(
                             f"{_marker} {peer_base}::{func_name}(){edited_tag}{_vnote}:\n{clip_balanced(peer['snippet'], 300)}"
@@ -3333,19 +3629,24 @@ def generate_improved_evidence(
                         )
                 if _evidence_accumulator is not None:
                     for peer in peers[:2]:
-                        _evidence_accumulator.append({
-                            "kind": "l3_interface_peer",
-                            "file_path": peer["file"],
-                            "symbol": func_name,
-                            "text": clip_balanced(peer["snippet"], 200) or clip_balanced(peer["signature"], 120),
-                            "source": "graph_db",
-                        })
+                        _evidence_accumulator.append(
+                            {
+                                "kind": "l3_interface_peer",
+                                "file_path": peer["file"],
+                                "symbol": func_name,
+                                "text": clip_balanced(peer["snippet"], 200)
+                                or clip_balanced(peer["signature"], 120),
+                                "source": "graph_db",
+                            }
+                        )
 
         # --- Priority 2c: Override chain (parent class methods) ---
         overrides = _get_override_chain(db_path, file_path, func_name)
         for ovr in overrides[:1]:
             sig_display = f" — {ovr['signature'][:80]}" if ovr["signature"] else ""
-            func_parts.append(f"[OVERRIDE] {ovr['class']}.{ovr['method']}() at {ovr['file']}{sig_display}")
+            func_parts.append(
+                f"[OVERRIDE] {ovr['class']}.{ovr['method']}() at {ovr['file']}{sig_display}"
+            )
 
         # Relationship gap-fill (route-handler flag + two-hop re-export). COMPOSES
         # excluded (JSX render composition, not has-a). Correct-or-quiet. (B5)
@@ -3378,10 +3679,12 @@ def generate_improved_evidence(
         # Still queried so G7 silence gate can check `not siblings`.
         siblings = _get_siblings_from_graph(db_path, file_path, func_name, repo_root)
         if siblings and (_anchor_syms or _anchor_paths):
+
             def _sib_anchor_score(s: dict) -> int:
                 sn = s.get("name", "").lower()
                 ss = (s.get("snippet", "") or s.get("signature", "")).lower()
                 return sum(2 for sym in _anchor_syms if sym in sn or sym in ss)
+
             siblings.sort(key=_sib_anchor_score, reverse=True)
         # B1: sibling [PATTERN] output suppressed from agent evidence.
         # _get_siblings_from_graph() and sorting retained for G7 gate + accumulator.
@@ -3393,6 +3696,7 @@ def generate_improved_evidence(
                 _impact_siblings: set[str] = set()
                 try:
                     from groundtruth.hooks.obligation_check import find_obligations
+
                     _obs = find_obligations(file_path, repo_root, {func_name})
                     for _o in _obs:
                         for sib in siblings:
@@ -3442,19 +3746,26 @@ def generate_improved_evidence(
                     if sib["name"] not in _impact_siblings:
                         continue
                     if sib["snippet"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}() does:\n{clip_balanced(sib['snippet'], 300)}")
+                        func_parts.append(
+                            f"[PATTERN] sibling {sib['name']}() does:\n{clip_balanced(sib['snippet'], 300)}"
+                        )
                     elif sib["signature"]:
-                        func_parts.append(f"[PATTERN] sibling {sib['name']}(): {clip_balanced(sib['signature'], 120)}")
+                        func_parts.append(
+                            f"[PATTERN] sibling {sib['name']}(): {clip_balanced(sib['signature'], 120)}"
+                        )
                     break
 
             if _evidence_accumulator is not None:
                 for sib in siblings[:2]:
-                    _evidence_accumulator.append({
-                        "kind": "l3_sibling_pattern", "file_path": file_path,
-                        "symbol": sib.get("name", ""),
-                        "text": sib.get("snippet", "") or sib.get("signature", ""),
-                        "source": "graph_db",
-                    })
+                    _evidence_accumulator.append(
+                        {
+                            "kind": "l3_sibling_pattern",
+                            "file_path": file_path,
+                            "symbol": sib.get("name", ""),
+                            "text": sib.get("snippet", "") or sib.get("signature", ""),
+                            "source": "graph_db",
+                        }
+                    )
 
         # --- Same-name twin detection (P3) + Fingerprint similarity (P4) ---
         # TASK #50: a same-name definition in the same file/class is the
@@ -3464,15 +3775,12 @@ def generate_improved_evidence(
         # non-edge, fingerprint-derived guess and must overlap the issue or the
         # edited fn's tokens, else it injects noise (e.g. unrelated embed_album).
         if resolved_target_id and db_path:
-            _twins = _find_same_name_twins(
-                db_path, resolved_target_id, func_name, file_path
-            )
+            _twins = _find_same_name_twins(db_path, resolved_target_id, func_name, file_path)
             _twin_base = file_path.replace("\\", "/").rsplit("/", 1)[-1]
             for _twin_name, _twin_line in _twins[:2]:
                 _loc = f"{_twin_base}:{_twin_line}" if _twin_line else _twin_base
                 func_parts.append(
-                    f"[TWIN] {_twin_name}() also defined at {_loc} — "
-                    f"apply the fix here too"
+                    f"[TWIN] {_twin_name}() also defined at {_loc} — apply the fix here too"
                 )
 
             _sim_issue_terms = _load_issue_terms()
@@ -3485,14 +3793,9 @@ def generate_improved_evidence(
                 if shared_count < 3 and sim_name != func_name:
                     continue
                 sim_base = sim_file.rsplit("/", 1)[-1] if "/" in sim_file else sim_file
-                _sim_line = (
-                    f"[SIMILAR] {sim_name}() in {sim_base} shares {shared_count} calls"
-                )
-                _sim_relevant = (
-                    sim_name == func_name
-                    or _passes_relevance_gate(
-                        sim_name + " " + sim_base, _sim_issue_terms, _sim_fn_tokens
-                    )
+                _sim_line = f"[SIMILAR] {sim_name}() in {sim_base} shares {shared_count} calls"
+                _sim_relevant = sim_name == func_name or _passes_relevance_gate(
+                    sim_name + " " + sim_base, _sim_issue_terms, _sim_fn_tokens
                 )
                 if _sim_relevant:
                     func_parts.append(_sim_line)
@@ -3516,14 +3819,16 @@ def generate_improved_evidence(
             _kept = g7_filter_isolated(func_parts, sig)
             _suppressed = len(func_parts) - len(_kept)
             _kept_kinds = [
-                p.lstrip().split(":")[0].split("]")[0] + ("]" if p.lstrip().startswith("[") else ":")
+                p.lstrip().split(":")[0].split("]")[0]
+                + ("]" if p.lstrip().startswith("[") else ":")
                 for p in _kept[:5]
             ]
             print(
                 f"[GT_META] g7_gate: func={func_name} input={len(func_parts)} "
                 f"kept={len(_kept)} suppressed={_suppressed} "
                 f"kept_types={_kept_kinds}",
-                file=sys.stderr, flush=True,
+                file=sys.stderr,
+                flush=True,
             )
             func_parts = _kept
 
@@ -3552,7 +3857,11 @@ def generate_improved_evidence(
 
         if len(func_parts) < 10:
             scope_signal = _compose_scope_signal(
-                db_path, file_path, func_name, repo_root, edited_files,
+                db_path,
+                file_path,
+                func_name,
+                repo_root,
+                edited_files,
             )
             if scope_signal:
                 func_parts.append(f"  {scope_signal}")
@@ -3560,16 +3869,30 @@ def generate_improved_evidence(
         # --- Priority 6: Issue obligation check + mismatch + format contracts ---
         try:
             from groundtruth.evidence.issue_obligations import load_and_check
+
             obligation_warnings = load_and_check(diff_text or "")
-            print(f"[GT_META] obligation_check: diff_len={len(diff_text or '')} warnings={len(obligation_warnings)} issue_exists={os.path.exists('/tmp/gt_issue.txt')}", file=sys.stderr, flush=True)
+            print(
+                f"[GT_META] obligation_check: diff_len={len(diff_text or '')} warnings={len(obligation_warnings)} issue_exists={os.path.exists('/tmp/gt_issue.txt')}",
+                file=sys.stderr,
+                flush=True,
+            )
             for ow in obligation_warnings[:2]:
                 func_parts.insert(0, ow)
         except Exception as _ob_exc:
-            print(f"[GT_META] obligation_error: {type(_ob_exc).__name__}: {_ob_exc}", file=sys.stderr, flush=True)
+            print(
+                f"[GT_META] obligation_error: {type(_ob_exc).__name__}: {_ob_exc}",
+                file=sys.stderr,
+                flush=True,
+            )
         try:
             from groundtruth.evidence.mismatch import detect_stale_references
+
             mismatch_warnings = detect_stale_references(
-                db_path, file_path, func_name, diff_text or "", repo_root,
+                db_path,
+                file_path,
+                func_name,
+                diff_text or "",
+                repo_root,
             )
             for mw in mismatch_warnings[:2]:
                 func_parts.insert(0, mw)
@@ -3579,6 +3902,7 @@ def generate_improved_evidence(
             print(f"[GT_META] mismatch_error: {msg}", file=sys.stderr, flush=True)
         try:
             from groundtruth.evidence.format_contract import mine_return_shape
+
             fmt_lines = mine_return_shape(db_path, file_path, func_name, repo_root)
             func_parts.extend(fmt_lines[:2])
         except Exception as _fmt_exc:
@@ -3589,11 +3913,15 @@ def generate_improved_evidence(
         # --- Issue-text grounding: re-rank by issue relevance ---
         try:
             from groundtruth.evidence.issue_grounding import (
-                load_issue_anchors, score_evidence_line,
+                load_issue_anchors,
+                score_evidence_line,
             )
+
             _anchors_g = load_issue_anchors()
             if _anchors_g and len(func_parts) > 2:
-                scored = [(score_evidence_line(p, _anchors_g), i, p) for i, p in enumerate(func_parts)]
+                scored = [
+                    (score_evidence_line(p, _anchors_g), i, p) for i, p in enumerate(func_parts)
+                ]
                 scored.sort(key=lambda x: (-x[0], x[1]))
                 func_parts = [p for _, _, p in scored]
         except Exception as _ground_exc:
@@ -3646,11 +3974,14 @@ def generate_improved_evidence(
         if verify_line:
             output_parts.append(verify_line)
             if _evidence_accumulator is not None:
-                _evidence_accumulator.append({
-                    "kind": "l3_targeted_verification",
-                    "text": verify_line, "source": "graph_db",
-                    "reason": "targeted test for edited symbol",
-                })
+                _evidence_accumulator.append(
+                    {
+                        "kind": "l3_targeted_verification",
+                        "text": verify_line,
+                        "source": "graph_db",
+                        "reason": "targeted test for edited symbol",
+                    }
+                )
 
     # Change impact: PREPEND before existing evidence (TDAD 2026).
     # Shows what the edit impacts — verified callers only (>=0.9).
@@ -3658,6 +3989,7 @@ def generate_improved_evidence(
     if function_names and db_path:
         try:
             from groundtruth.graph.ego import change_impact
+
             for _fn in function_names[:1]:
                 _impact = change_impact(db_path, _fn, file_path, max_depth=2, min_confidence=0.9)
                 if _impact:
@@ -3673,7 +4005,9 @@ def generate_improved_evidence(
                         _imp_lines = ["Impact:"]
                         for _imp in _non_test_impact[:3]:
                             _hop = "direct" if _imp["hop"] == 1 else f"{_imp['hop']}-hop"
-                            _imp_lines.append(f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}")
+                            _imp_lines.append(
+                                f"  {_hop}: {_imp['name']}() in {os.path.basename(_imp['file'])}:{_imp['line']}"
+                            )
                         output_parts.insert(0, "\n".join(_imp_lines))
         except Exception:
             pass
@@ -3687,34 +4021,42 @@ def generate_improved_evidence(
     if db_path and repo_root:
         try:
             from groundtruth.hooks.contract_delta import compute_delta
+
             # Do NOT pass old_content here: main()'s recovery is fragment-prone
             # (str_replace window / partial diff). compute_delta recovers the FULL
             # pre-edit file from git HEAD itself (with task-dir prefix handling).
             _delta_lines = compute_delta(
-                db_path, file_path, repo_root=repo_root, diff_text=diff_text or "",
+                db_path,
+                file_path,
+                repo_root=repo_root,
+                diff_text=diff_text or "",
             )
             # Surface the delta outcome into the HOST-visible structured telemetry
             # (gt_layer_events.evidence_items). The hook's stderr is in-container and lost,
             # so this is the ONLY way to see WHY the delta was quiet in a live run.
             try:
                 import groundtruth.hooks.contract_delta as _cdmod
+
                 _cd_reason = getattr(_cdmod, "LAST_REASON", "")
             except Exception:
                 _cd_reason = ""
             if _evidence_accumulator is not None:
-                _evidence_accumulator.append({
-                    "family": "CONTRACT_DELTA_DIAG",
-                    "reason": _cd_reason,
-                    "delivered": bool(_delta_lines),
-                    "n_lines": len(_delta_lines),
-                    "repo_root": repo_root,
-                    "file": file_path,
-                })
+                _evidence_accumulator.append(
+                    {
+                        "family": "CONTRACT_DELTA_DIAG",
+                        "reason": _cd_reason,
+                        "delivered": bool(_delta_lines),
+                        "n_lines": len(_delta_lines),
+                        "repo_root": repo_root,
+                        "file": file_path,
+                    }
+                )
             if _delta_lines:
                 output_parts.insert(0, "\n".join(_delta_lines))
                 print(
                     f"[GT_DELIVERY] contract_delta: {len(_delta_lines)} lines file={file_path}",
-                    file=sys.stderr, flush=True,
+                    file=sys.stderr,
+                    flush=True,
                 )
         except Exception as _cd_exc:
             print(f"[GT_META] contract_delta_error: {_cd_exc}", file=sys.stderr, flush=True)
@@ -3740,13 +4082,15 @@ def generate_improved_evidence(
     _real_n, _meta_n = _l3_account_evidence(body.split("\n") if body else [])
     _emit_l3_accounting(file_path, _real_n, _meta_n, function_names=function_names)
     if _evidence_accumulator is not None:
-        _evidence_accumulator.append({
-            "kind": "l3_accounting",
-            "file_path": file_path,
-            "real_evidence_count": _real_n,
-            "metadata_only_count": _meta_n,
-            "source": "post_edit",
-        })
+        _evidence_accumulator.append(
+            {
+                "kind": "l3_accounting",
+                "file_path": file_path,
+                "real_evidence_count": _real_n,
+                "metadata_only_count": _meta_n,
+                "source": "post_edit",
+            }
+        )
 
     return full_output
 
@@ -4284,7 +4628,9 @@ def main() -> None:
     parser.add_argument("--max-items", type=int, default=3)
     parser.add_argument("--diff", default="", help="Path to unified diff text")
     parser.add_argument("--old-content", default="", help="Path to previous file content")
-    parser.add_argument("--mode", default="post_edit", choices=["post_edit", "post_failure", "late_repair"])
+    parser.add_argument(
+        "--mode", default="post_edit", choices=["post_edit", "post_failure", "late_repair"]
+    )
     parser.add_argument("--iteration-ratio", type=float, default=0.0)
     parser.add_argument("--structured-output", action="store_true")
     args = parser.parse_args()
@@ -4425,13 +4771,15 @@ def main() -> None:
             _accum: list[dict] | None = [] if args.structured_output else None
             if all_func_names and primary_file:
                 import sqlite3 as _sq_gate
+
                 _has_edges = None
                 try:
                     _gc = _sq_gate.connect(args.db)
                     _resolved_pf = _resolve_file_path(_gc, primary_file)
                     _has_edges = _gc.execute(
                         "SELECT 1 FROM edges e JOIN nodes n ON (e.target_id=n.id OR e.source_id=n.id) "
-                        "WHERE n.file_path = ? LIMIT 1", (_resolved_pf,)
+                        "WHERE n.file_path = ? LIMIT 1",
+                        (_resolved_pf,),
                     ).fetchone()
                     _gc.close()
                 except Exception as e:
@@ -4700,7 +5048,9 @@ def main() -> None:
         print(json.dumps(_legacy_accum))
     if output:
         print(output)
-        status = _status_line("success", f"{len(output_lines)}_items" if output_lines else "test_edit_advisory")
+        status = _status_line(
+            "success", f"{len(output_lines)}_items" if output_lines else "test_edit_advisory"
+        )
         print(status, file=sys.stderr, flush=True)
         _append_gt_log("status", status)
     else:

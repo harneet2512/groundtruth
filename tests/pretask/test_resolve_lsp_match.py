@@ -233,10 +233,8 @@ def test_not_indexed_file_window_miss_never_deletes(db):
     assert _edge_exists(conn), "not-indexed-file window miss must NEVER delete"
 
 
-def test_indexed_file_no_node_match_is_genuine_fp_delete(db):
-    """The ONLY delete-allowed case: the target file IS indexed (other.py has nodes)
-    yet NO node spans the call site (line 999). That is a genuine false positive →
-    delete. This proves the guard is not over-broad (real FPs are still removed)."""
+def test_indexed_file_no_node_match_preserves_auditable_tombstone(db):
+    """Partial node coverage cannot prove an edge false; preserve a demoted record."""
     conn = _conn(db)
     stats = _fresh_stats()
     out = _apply_lsp_resolution(
@@ -251,7 +249,11 @@ def test_indexed_file_no_node_match_is_genuine_fp_delete(db):
     conn.commit()
     assert out == "deleted"
     assert stats["deleted"] == 1
-    assert not _edge_exists(conn), "an indexed-file no-match edge IS a false positive"
+    assert _edge_exists(conn)
+    assert stats["window_miss"] == 1
+    assert tuple(
+        conn.execute("SELECT confidence, resolution_method FROM edges WHERE id=100").fetchone()
+    ) == (0.0, "lsp_window_miss")
 
 
 def test_null_end_line_node_still_matches_in_window(db):

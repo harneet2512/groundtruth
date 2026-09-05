@@ -1,4 +1,5 @@
 """Shared SQL gates for graph evidence consumers."""
+
 from __future__ import annotations
 
 import sqlite3

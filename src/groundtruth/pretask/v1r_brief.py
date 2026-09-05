@@ -37,6 +37,7 @@ from groundtruth.pretask.contract_map import (
     contract_line,
     edit_target_callee_contracts,
 )
+
 # Symbol-anchored multi-hop graph-witness localizer (the L1 core). This is the
 # deterministic graph TRAVERSAL that the old lexical-only candidate path lacked:
 # it anchors on issue SYMBOLS, walks graph.db CALLS/IMPORTS from those nodes, and
@@ -76,6 +77,7 @@ def _clip_body_line(line: str, limit: int = _MAX_BODY_LINE_CHARS) -> str:
     if len(line) <= limit:
         return line
     return line[: limit - 1].rstrip() + "…"
+
 
 _schema_cache: dict[str, bool] = {}
 
@@ -295,7 +297,8 @@ def _candidate_acquisition_sources(
     synthesized here: a single generation cannot prove ``determinism``.
     """
     methods = {
-        str(method).strip().lower() for method in resolution_methods
+        str(method).strip().lower()
+        for method in resolution_methods
         if isinstance(method, str) and str(method).strip()
     }
     deterministic = {str(m).strip().lower() for m in DETERMINISTIC_RESOLUTION_METHODS}
@@ -329,8 +332,10 @@ def _candidate_acquisition_sources(
             hash_cols = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(file_hashes)").fetchall()
             }
-            hash_col = "content_hash" if "content_hash" in hash_cols else (
-                "hash" if "hash" in hash_cols else ""
+            hash_col = (
+                "content_hash"
+                if "content_hash" in hash_cols
+                else ("hash" if "hash" in hash_cols else "")
             )
             candidate_revision_current = False
             if hash_col:
@@ -408,11 +413,13 @@ class V1RBriefResult:
     # as the numerator/denominator/distribution triple that gate 3b and the absorption
     # contract read. Their unqualified names invite the ACQUISITION reading; for that
     # question read ``acquired_*`` below, NEVER these.
-    graph_edge_count: int = 0        # DELIVERED candidates backed by >=1 real graph edge
-    semantic_signal_count: int = 0   # DELIVERED candidates with a nonzero semantic/ONNX score
-    structural_signal_count: int = 0 # DELIVERED candidates with a nonzero structural/graph-reach score
-    fts5_signal_count: int = 0       # DELIVERED candidates scored by / entering via FTS5/BM25
-    confidence_tier: str = "low"     # HIGH/MEDIUM/LOW from _localization_header
+    graph_edge_count: int = 0  # DELIVERED candidates backed by >=1 real graph edge
+    semantic_signal_count: int = 0  # DELIVERED candidates with a nonzero semantic/ONNX score
+    structural_signal_count: int = (
+        0  # DELIVERED candidates with a nonzero structural/graph-reach score
+    )
+    fts5_signal_count: int = 0  # DELIVERED candidates scored by / entering via FTS5/BM25
+    confidence_tier: str = "low"  # HIGH/MEDIUM/LOW from _localization_header
     # --- ACQUISITION counts (C15) — what the LEGS FOUND, independent of delivery ---
     # Counted over the RANKED set (``top_records``), so the brief reduction cannot zero
     # them. WHY THIS FAMILY EXISTS: under GT_BRIEF_MINIMAL + GT_LOC_RESLOT the reducer
@@ -449,10 +456,12 @@ class V1RBriefResult:
     # CONSUMED": a present-but-unconsumed embedder has effective_w_sem > 0 yet
     # semantic_signal_count == 0 / all-zero sem_components. Measured over the
     # RENDERED candidates (.files), so it reflects exactly what the agent saw.
-    effective_w_sem: float = 0.0          # W_SEM actually applied after all zeroing branches (from run_v74)
-    rendered_candidate_count: int = 0     # number of rendered/delivered candidates (== len(files))
-    k_sem_top: int = 0                    # the relative sem-component cap actually used (from run_v74)
-    sem_components: list[float] = field(default_factory=list)  # components['sem'] over rendered candidates
+    effective_w_sem: float = 0.0  # W_SEM actually applied after all zeroing branches (from run_v74)
+    rendered_candidate_count: int = 0  # number of rendered/delivered candidates (== len(files))
+    k_sem_top: int = 0  # the relative sem-component cap actually used (from run_v74)
+    sem_components: list[float] = field(
+        default_factory=list
+    )  # components['sem'] over rendered candidates
     # Per-rendered-candidate proof payload persisted to substrate ``brief_result.json``.
     # Observability only: lets Stage-1 audits explain why each delivered file ranked
     # where it did without changing the brief text or ranking behavior.
@@ -1161,15 +1170,17 @@ def _resolved_witnesses_for_file(
             code = _code_at(caller_file, line)
             if _is_stdlib_shadow(code, target_name or ""):
                 continue  # false caller: stdlib attr call name-matched to project symbol
-            out.append({
-                "relation": "CALLS",
-                "direction": "caller",
-                "file_path": caller_file,
-                "line": int(line) if line else 0,
-                "symbol": caller_name or "",
-                "target": target_name or "",
-                "code": code,
-            })
+            out.append(
+                {
+                    "relation": "CALLS",
+                    "direction": "caller",
+                    "file_path": caller_file,
+                    "line": int(line) if line else 0,
+                    "symbol": caller_name or "",
+                    "target": target_name or "",
+                    "code": code,
+                }
+            )
             if sum(1 for w in out if w["direction"] == "caller") >= max_each:
                 break
 
@@ -1197,7 +1208,15 @@ def _resolved_witnesses_for_file(
                 callee_sql.format(file_predicate="nsrc.file_path LIKE ?"),
                 ("%/" + _norm_fp, max_each * 4),
             ).fetchall()
-        for callee_file, source_line, callee_name, src_name, def_line, _slang, _tlang in callee_rows:
+        for (
+            callee_file,
+            source_line,
+            callee_name,
+            src_name,
+            def_line,
+            _slang,
+            _tlang,
+        ) in callee_rows:
             # `source_line` is the CALL SITE in THIS candidate file — use it ONLY for the
             # stdlib-shadow check on the call (`os.walk(` must be read at the call site).
             # The RENDERED location is the callee's DEFINITION line in callee_file
@@ -1226,15 +1245,17 @@ def _resolved_witnesses_for_file(
             _call_code = _code_at(file_path, source_line)
             if _is_stdlib_shadow(_call_code, callee_name or ""):
                 continue
-            out.append({
-                "relation": "CALLS",
-                "direction": "callee",
-                "file_path": callee_file,
-                "line": int(def_line) if def_line else 0,
-                "symbol": callee_name or "",
-                "target": src_name or "",
-                "code": _code_at(callee_file, def_line) if def_line else "",
-            })
+            out.append(
+                {
+                    "relation": "CALLS",
+                    "direction": "callee",
+                    "file_path": callee_file,
+                    "line": int(def_line) if def_line else 0,
+                    "symbol": callee_name or "",
+                    "target": src_name or "",
+                    "code": _code_at(callee_file, def_line) if def_line else "",
+                }
+            )
             if sum(1 for w in out if w["direction"] == "callee") >= max_each:
                 break
         return out
@@ -1297,15 +1318,21 @@ def _sibling_context(graph_db: str, file_path: str, func_names: list[str]) -> st
             "WHERE n.file_path = ? "
             "AND n.label IN ('Function','Method','Class','ImplBlock') AND n.is_test = 0 "
             "AND n.name NOT IN ({}) ORDER BY n.start_line LIMIT 8".format(
-                ",".join("?" * len(func_names))),
+                ",".join("?" * len(func_names))
+            ),
             (_norm_fp(file_path), *func_names),
         ).fetchall()
         conn.close()
         out: list[str] = []
         seen: set[str] = set()
         for name, sig in rows:
-            if (not name or len(name) <= 2 or name.startswith("_")
-                    or _is_builtin_shadow_name(name) or name in seen):
+            if (
+                not name
+                or len(name) <= 2
+                or name.startswith("_")
+                or _is_builtin_shadow_name(name)
+                or name in seen
+            ):
                 continue
             seen.add(name)
             csig = _compact_sig(sig)
@@ -1483,7 +1510,8 @@ def _co_change_from_table(graph_db: str, file_path: str, limit: int = 3) -> list
         # below the limit (the B6 lesson). This is the cochange path-emitter the
         # Class-A generalization missed.
         return [
-            r[0] for r in rows
+            r[0]
+            for r in rows
             if r[0] and not _is_test_or_demo(r[0]) and not _is_vendored_path(r[0])
         ][:limit]
     except sqlite3.Error:
@@ -1538,6 +1566,7 @@ def _get_tokenizer():
     tok = None
     try:
         from tokenizers import Tokenizer  # baked HF lib
+
         tok = Tokenizer.from_file(path)
     except Exception:
         tok = None
@@ -1586,8 +1615,14 @@ def _brief_native_on() -> bool:
     retains calibrated MEDIUM/LOW localization contention when singularizing it would
     overstate confidence."""
     import os as _os
+
     return (_os.environ.get("GT_BRIEF_NATIVE") or "").strip().lower() not in (
-        "", "0", "false", "no", "off")
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 def _ss_ack_form_on() -> bool:
@@ -1598,8 +1633,14 @@ def _ss_ack_form_on() -> bool:
     requirements checklist. Layering it ON TOP of GT_BRIEF_NATIVE keeps GT_BRIEF_NATIVE-alone
     byte-identical to today's plain-checklist arm. Strict ``== "1"``-family parse."""
     import os as _os
+
     return (_os.environ.get("GT_SS_ACK_FORM") or "").strip().lower() not in (
-        "", "0", "false", "no", "off")
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 # The ONLY path-bearing orientation note: the matched top-1 candidate line built in the
@@ -1630,20 +1671,35 @@ def _is_brief_boundary(line: str) -> bool:
     swallows the following block or the ``</gt-task-brief>`` close tag — blocks are
     not always blank-separated (a trailing steer note abuts the close tag)."""
     s = line.strip()
-    if s in ("<gt-task-brief>", "</gt-task-brief>", "<gt-obligations>",
-             "</gt-obligations>", "<gt-graph-map>", "</gt-graph-map>"):
+    if s in (
+        "<gt-task-brief>",
+        "</gt-task-brief>",
+        "<gt-obligations>",
+        "</gt-obligations>",
+        "<gt-graph-map>",
+        "</gt-graph-map>",
+    ):
         return True
-    if s == _OBLIGATION_NATIVE_HEADER:  # ITEM-5: the GT_BRIEF_NATIVE obligations header is a boundary
+    if (
+        s == _OBLIGATION_NATIVE_HEADER
+    ):  # ITEM-5: the GT_BRIEF_NATIVE obligations header is a boundary
         return True
     if s.startswith("<gt-localization") or s.startswith("</gt-localization"):
         return True
     if _re.match(r"^\d+\.\s", line):
         return True
-    return any(line.startswith(p) for p in (
-        "Expected behavior:", "EDIT-TARGET CONTRACTS", "Other candidates",
-        "Related files to inspect", "Likely multi-file scope", "Scope chain",
-        *_ORIENTATION_NOTE_PREFIXES,
-    ))
+    return any(
+        line.startswith(p)
+        for p in (
+            "Expected behavior:",
+            "EDIT-TARGET CONTRACTS",
+            "Other candidates",
+            "Related files to inspect",
+            "Likely multi-file scope",
+            "Scope chain",
+            *_ORIENTATION_NOTE_PREFIXES,
+        )
+    )
 
 
 def _segment_brief_blocks(text: str) -> list[dict]:
@@ -1656,7 +1712,9 @@ def _segment_brief_blocks(text: str) -> list[dict]:
     blocks: list[dict] = []
 
     def _add(pri: int, label: str, seg: list[str]) -> None:
-        blocks.append({"priority": pri, "label": label, "text": "\n".join(seg), "order": len(blocks)})
+        blocks.append(
+            {"priority": pri, "label": label, "text": "\n".join(seg), "order": len(blocks)}
+        )
 
     def _until_close(start: int, close_tag: str) -> int:
         j = start + 1
@@ -1686,44 +1744,70 @@ def _segment_brief_blocks(text: str) -> list[dict]:
             # edit) — kept high (contract tier), but BELOW the active obligation so a
             # tight budget preserves the behavioral spec over the confidence header.
             e = _until_close(i, "</gt-localization>")
-            _add(2, "localization-header", lines[i : e + 1]); i = e + 1; continue
+            _add(2, "localization-header", lines[i : e + 1])
+            i = e + 1
+            continue
         if s in ("<gt-task-brief>", "</gt-task-brief>"):
-            _add(-1, "scaffold", [ln]); i += 1; continue
+            _add(-1, "scaffold", [ln])
+            i += 1
+            continue
         if s == "<gt-graph-map>":
             e = _until_close(i, "</gt-graph-map>")
-            _add(6, "graph-map", lines[i : e + 1]); i = e + 1; continue
+            _add(6, "graph-map", lines[i : e + 1])
+            i = e + 1
+            continue
         if s == "<gt-obligations>":
             e = _until_close(i, "</gt-obligations>")
-            _add(1, "obligations", lines[i : e + 1]); i = e + 1; continue
+            _add(1, "obligations", lines[i : e + 1])
+            i = e + 1
+            continue
         if s == _OBLIGATION_NATIVE_HEADER:
             # ITEM-5: the GT_BRIEF_NATIVE obligations block (plain header + `- [ ] …` rows, no tag).
             # Label it ``obligations`` (priority 1) so the token rail protects it EXACTLY like the
             # tagged block and the minimal reducer keeps it — the header + its checklist rows run to
             # the next blank / boundary.
             e = _until_blank(i)
-            _add(1, "obligations", lines[i:e]); i = e; continue
+            _add(1, "obligations", lines[i:e])
+            i = e
+            continue
         if ln.startswith("Expected behavior:"):
             # softer issue-spec echo — kept in the contract/spec tier, strictly
             # BELOW the parsed <gt-obligations> block (the active obligation).
-            _add(2, "expected-behavior", [ln]); i += 1; continue
+            _add(2, "expected-behavior", [ln])
+            i += 1
+            continue
         if ln.startswith("EDIT-TARGET CONTRACTS"):
             e = _until_unindented(i)
-            _add(2, "edit-target-contracts", lines[i:e]); i = e; continue
+            _add(2, "edit-target-contracts", lines[i:e])
+            i = e
+            continue
         if _re.match(r"^\d+\.\s", ln):
             # All file entries share one priority band and are kept as a RANK-ORDERED
             # PREFIX by the enforcer (never file #2 without file #1) — document order
             # == localizer rank, so processing by order preserves the ranking.
             e = _until_unindented(i)
             _file_seen += 1
-            _add(3, f"file-entry-{_file_seen}", lines[i:e]); i = e; continue
-        if (ln.startswith("Other candidates") or ln.startswith("Related files")
-                or ln.startswith("Likely multi-file") or ln.startswith("Scope chain")):
+            _add(3, f"file-entry-{_file_seen}", lines[i:e])
+            i = e
+            continue
+        if (
+            ln.startswith("Other candidates")
+            or ln.startswith("Related files")
+            or ln.startswith("Likely multi-file")
+            or ln.startswith("Scope chain")
+        ):
             e = _until_blank(i)
-            _add(5, "companion", lines[i:e]); i = e; continue
+            _add(5, "companion", lines[i:e])
+            i = e
+            continue
         if any(ln.startswith(p) for p in _ORIENTATION_NOTE_PREFIXES):
-            _add(6, "orientation-note", [ln]); i += 1; continue
+            _add(6, "orientation-note", [ln])
+            i += 1
+            continue
         # blank / unknown line — cheap filler kept with its neighbors.
-        _add(5, "misc", [ln]); i += 1; continue
+        _add(5, "misc", [ln])
+        i += 1
+        continue
     return blocks
 
 
@@ -1753,13 +1837,17 @@ def _block_receipts_on() -> bool:
     neither present the metadata stays off. Brief bytes never depend on this.
     """
     import os as _os
+
     _flag = (
         _os.environ.get("GT_BLOCK_RECEIPTS")
         if "GT_BLOCK_RECEIPTS" in _os.environ
         else _os.environ.get("GT_INSEAM_METRICS")
     )
     return (_flag or "").strip().lower() not in (
-        "", "0", "false", "no",
+        "",
+        "0",
+        "false",
+        "no",
     )
 
 
@@ -1781,8 +1869,13 @@ def _loc_reslot_on() -> bool:
     ranked-localization delivery at the registered search boundary instead). Default
     OFF -> the MEDIUM/LOW retention branch below is byte-identical legacy behavior."""
     import os as _os
+
     return (_os.environ.get("GT_LOC_RESLOT") or "").strip().lower() not in (
-        "", "0", "false", "no", "off",
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -1793,8 +1886,13 @@ def _brief_minimal_on() -> bool:
     orientation; graph-map and contract narration are retired, while MEDIUM/LOW
     localization contention is retained as an indivisible calibrated fact."""
     import os as _os
+
     return (_os.environ.get("GT_BRIEF_MINIMAL") or "").strip().lower() not in (
-        "", "0", "false", "no", "off",
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -1807,8 +1905,7 @@ def _brief_minimal_on() -> bool:
 # 'which file' orientation), never dropped — handled specially in the reducer. The
 # scaffold (<gt-task-brief> tags), ``obligations``, and ``orientation-note`` are KEPT.
 _BRIEF_MINIMAL_DROP_LABELS: frozenset = frozenset(
-    {"localization-header", "graph-map", "edit-target-contracts",
-     "companion", "expected-behavior"}
+    {"localization-header", "graph-map", "edit-target-contracts", "companion", "expected-behavior"}
 )
 
 
@@ -1880,8 +1977,11 @@ def _reduce_brief_to_minimal(text: str) -> str:
                 kept.append(head)  # minimal orientation: the header, not the contract body
                 _kept_substantive = True
             continue
-        if (label == "orientation-note" and _loc_reslot_on()
-                and b["text"].startswith(_PATH_BEARING_ORIENTATION_PREFIX)):
+        if (
+            label == "orientation-note"
+            and _loc_reslot_on()
+            and b["text"].startswith(_PATH_BEARING_ORIENTATION_PREFIX)
+        ):
             # DELTA 3 (run-#3 pilot, 2026-07-20): under the localization RE-SLOT the minimal
             # brief ships NO localization narration. The path-bearing matched note
             # ("Highest-confidence candidate (…): <path>") NAMES a top-1 file, so leaving it
@@ -1935,10 +2035,7 @@ def _model_visible_localization_entries(
     """
     candidate_lines: list[str] = []
     for block in _segment_brief_blocks(brief_text or ""):
-        if (
-            block["label"] != "localization-header"
-            and not block["label"].startswith("file-entry")
-        ):
+        if block["label"] != "localization-header" and not block["label"].startswith("file-entry"):
             continue
         candidate_lines.extend(
             line.replace("\\", "/")
@@ -1975,6 +2072,7 @@ def _brief_minimal_participation(before: str, after: str) -> list[dict]:
             build_control_participation,
             participation_to_dict,
         )
+
         record = build_control_participation(
             feature_id="GT_BRIEF_MINIMAL",
             decision_site="pretask.v1r_brief.minimal_reduction",
@@ -1986,22 +2084,27 @@ def _brief_minimal_participation(before: str, after: str) -> list[dict]:
         return [participation_to_dict(record)]
     except Exception as exc:  # sidecar failure never changes brief bytes
         import hashlib as _hashlib
-        return [{
-            "schema": "gt.control_participation.v1",
-            "control_ref": {
-                "category": "CAP", "feature_id": "GT_BRIEF_MINIMAL",
-                "role": "eligibility",
-            },
-            "decision_site": "pretask.v1r_brief.minimal_reduction",
-            "decision": "ERROR",
-            "iteration": 0,
-            "candidate_chars": len(before),
-            "candidate_sha256_16": (
-                _hashlib.sha256(before.encode("utf-8", "surrogatepass"))
-                .hexdigest()[:16] if before else ""
-            ),
-            "reason": f"control_record_error:{type(exc).__name__}",
-        }]
+
+        return [
+            {
+                "schema": "gt.control_participation.v1",
+                "control_ref": {
+                    "category": "CAP",
+                    "feature_id": "GT_BRIEF_MINIMAL",
+                    "role": "eligibility",
+                },
+                "decision_site": "pretask.v1r_brief.minimal_reduction",
+                "decision": "ERROR",
+                "iteration": 0,
+                "candidate_chars": len(before),
+                "candidate_sha256_16": (
+                    _hashlib.sha256(before.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+                    if before
+                    else ""
+                ),
+                "reason": f"control_record_error:{type(exc).__name__}",
+            }
+        ]
 
 
 # The retired step-0 narration markers a minimal (SM-6 B) brief MUST NOT contain, and the
@@ -2054,16 +2157,17 @@ def brief_minimal_certificate(brief_text: str) -> dict:
     # localization narration remains retired because its one file-entry header is
     # sufficient orientation.
     if "<gt-localization" in text and _localization_confidence_tier(text) not in {
-        "medium", "low",
+        "medium",
+        "low",
     }:
         retired.append("<gt-localization")
     # ITEM-5: the obligations contract is retained under EITHER frame — the ``<gt-obligations>`` tag
     # (default) OR the GT_BRIEF_NATIVE plain checklist header — so a combined MINIMAL+NATIVE rebake
     # still certifies obligations_present (the native form has no tag to match).
     obligations_present = "<gt-obligations>" in text or _OBLIGATION_NATIVE_HEADER in text
-    orientation_present = bool(
-        _re.search(r"(?m)^\s*\d+\.\s+\S", text)
-    ) or "Localize with grep" in text
+    orientation_present = (
+        bool(_re.search(r"(?m)^\s*\d+\.\s+\S", text)) or "Localize with grep" in text
+    )
     return {
         "minimal": not retired,
         "retired_present": retired,
@@ -2111,20 +2215,17 @@ def _brief_block_receipts(
     Deterministic, LLM-free, no I/O. Scaffold (the <gt-task-brief> tags) and blank/
     unknown filler are not fact-bearing and get no receipt."""
     import hashlib as _hashlib
+
     if not brief_text:
         return []
     blocks = _segment_brief_blocks(brief_text)
     # Two-pass distinctness: count fact-bearing labels so a label seen once keeps its
     # bare name and a repeated label (e.g. two "companion" blocks) is disambiguated.
-    fact_labels = [
-        b["label"] for b in blocks if _fact_class_for_label(b["label"]) is not None
-    ]
+    fact_labels = [b["label"] for b in blocks if _fact_class_for_label(b["label"]) is not None]
     _label_total: dict[str, int] = {}
     for _lab in fact_labels:
         _label_total[_lab] = _label_total.get(_lab, 0) + 1
-    _has_file_entries = any(
-        block["label"].startswith("file-entry") for block in blocks
-    )
+    _has_file_entries = any(block["label"].startswith("file-entry") for block in blocks)
 
     receipts: list[dict] = []
     offset = 0
@@ -2142,30 +2243,32 @@ def _brief_block_receipts(
         k = _seen.get(label, 0)
         _seen[label] = k + 1
         block_id = label if _label_total.get(label, 0) <= 1 else f"{label}#{k}"
-        if (
-            label == "localization-header"
-            and not _has_file_entries
-            and localization_candidate_ids
-        ):
+        if label == "localization-header" and not _has_file_entries and localization_candidate_ids:
             # Minimal MEDIUM/LOW renders the whole contention set in this one
             # physical block and intentionally drops duplicate file-entry blocks.
             # Emit one logical candidate join per visible candidate, sealed to
             # that candidate's exact header line.  These subspans are metadata
             # inside one physical delivery, not multiple doses.
             for candidate_index, candidate_id in enumerate(
-                localization_candidate_ids, start=1,
+                localization_candidate_ids,
+                start=1,
             ):
                 prefix = "localization:"
                 candidate_path = (
-                    candidate_id[len(prefix):]
-                    if candidate_id.startswith(prefix) else ""
+                    candidate_id[len(prefix) :] if candidate_id.startswith(prefix) else ""
                 )
-                matches = list(_re.finditer(
-                    rf"(?m)^[ \t]*\d+\.[ \t]+(?:\./)*/?"
-                    rf"{_re.escape(candidate_path)}"
-                    rf"(?![A-Za-z0-9_./-])",
-                    seg.replace("\\", "/"),
-                )) if candidate_path else []
+                matches = (
+                    list(
+                        _re.finditer(
+                            rf"(?m)^[ \t]*\d+\.[ \t]+(?:\./)*/?"
+                            rf"{_re.escape(candidate_path)}"
+                            rf"(?![A-Za-z0-9_./-])",
+                            seg.replace("\\", "/"),
+                        )
+                    )
+                    if candidate_path
+                    else []
+                )
                 line_spans = {
                     (
                         seg.rfind("\n", 0, match.start()) + 1,
@@ -2181,16 +2284,18 @@ def _brief_block_receipts(
                     continue
                 line_start, line_end = next(iter(line_spans))
                 candidate_bytes = seg[line_start:line_end]
-                receipts.append({
-                    "block_id": f"{block_id}:candidate-{candidate_index}",
-                    "fact_class": fact_class,
-                    "label": label,
-                    "candidate_id": candidate_id,
-                    "char_span": [start + line_start, start + line_end],
-                    "content_hash": _hashlib.sha256(
-                        candidate_bytes.encode("utf-8")
-                    ).hexdigest(),
-                })
+                receipts.append(
+                    {
+                        "block_id": f"{block_id}:candidate-{candidate_index}",
+                        "fact_class": fact_class,
+                        "label": label,
+                        "candidate_id": candidate_id,
+                        "char_span": [start + line_start, start + line_end],
+                        "content_hash": _hashlib.sha256(
+                            candidate_bytes.encode("utf-8")
+                        ).hexdigest(),
+                    }
+                )
             continue
         if label.startswith("file-entry"):
             candidate_id = (
@@ -2202,14 +2307,16 @@ def _brief_block_receipts(
             _file_entry_index += 1
         else:
             candidate_id = f"brief:block:{block_id}"
-        receipts.append({
-            "block_id": block_id,
-            "fact_class": fact_class,
-            "label": label,
-            "candidate_id": candidate_id,
-            "char_span": [start, end],
-            "content_hash": _hashlib.sha256(seg.encode("utf-8")).hexdigest(),
-        })
+        receipts.append(
+            {
+                "block_id": block_id,
+                "fact_class": fact_class,
+                "label": label,
+                "candidate_id": candidate_id,
+                "char_span": [start, end],
+                "content_hash": _hashlib.sha256(seg.encode("utf-8")).hexdigest(),
+            }
+        )
     return receipts
 
 
@@ -2235,11 +2342,7 @@ def _candidate_local_contribution_sources(proof: dict) -> list[str]:
             return False
 
     witness = proof.get("witness")
-    if (
-        proof.get("witness_verified") is True
-        and isinstance(witness, str)
-        and witness.strip()
-    ):
+    if proof.get("witness_verified") is True and isinstance(witness, str) and witness.strip():
         found.append("graph_validity")
     if _pos(components.get("reach")):
         found.append("structural_depth")
@@ -2252,8 +2355,12 @@ def _candidate_local_contribution_sources(proof: dict) -> list[str]:
     sources = proof.get("acquisition_sources")
     if isinstance(sources, dict):
         for name in (
-            "resolution_honesty", "type_intelligence", "LSP",
-            "freshness_basis", "repo_scope", "determinism",
+            "resolution_honesty",
+            "type_intelligence",
+            "LSP",
+            "freshness_basis",
+            "repo_scope",
+            "determinism",
         ):
             if isinstance(sources.get(name), dict):
                 found.append(name)
@@ -2312,11 +2419,12 @@ def _attest_source_contributions(
             "sources": _candidate_local_contribution_sources(proof),
         }
         canonical = json.dumps(
-            attestation, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            attestation,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
         )
-        attestation["attestation_sha256"] = hashlib.sha256(
-            canonical.encode("utf-8")
-        ).hexdigest()
+        attestation["attestation_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         proof["contribution_attestation"] = attestation
 
 
@@ -2343,10 +2451,13 @@ def _build_obligations_record(
     # obligations fact class for ranking, but it is not clause extraction and
     # must never mint an obligations record or attestation.
     receipt = next(
-        (r for r in block_receipts
-         if isinstance(r, dict)
-         and r.get("fact_class") == "obligations"
-         and r.get("label") == "obligations"),
+        (
+            r
+            for r in block_receipts
+            if isinstance(r, dict)
+            and r.get("fact_class") == "obligations"
+            and r.get("label") == "obligations"
+        ),
         None,
     )
     if receipt is None:
@@ -2355,17 +2466,20 @@ def _build_obligations_record(
     content_hash = receipt.get("content_hash")
     span = receipt.get("char_span")
     if (
-        not isinstance(candidate_id, str) or not candidate_id
+        not isinstance(candidate_id, str)
+        or not candidate_id
         or not isinstance(content_hash, str)
         or _re.fullmatch(r"[0-9a-f]{64}", content_hash) is None
-        or not isinstance(span, list) or len(span) != 2
+        or not isinstance(span, list)
+        or len(span) != 2
         or not all(isinstance(n, int) and not isinstance(n, bool) for n in span)
-        or span[0] < 0 or span[0] >= span[1] or span[1] > len(brief_text)
+        or span[0] < 0
+        or span[0] >= span[1]
+        or span[1] > len(brief_text)
     ):
         return {}
-    block = brief_text[span[0]:span[1]]
-    if ("<gt-obligations>" not in block
-            and _OBLIGATION_NATIVE_HEADER not in block):
+    block = brief_text[span[0] : span[1]]
+    if "<gt-obligations>" not in block and _OBLIGATION_NATIVE_HEADER not in block:
         return {}
     digest = hashlib.sha256(block.encode("utf-8", "surrogatepass")).hexdigest()
     if digest != content_hash:
@@ -2393,8 +2507,9 @@ def _build_obligations_record(
     if not verbatims:
         return {}
     obligations_digest = hashlib.sha256(
-        json.dumps(verbatims, sort_keys=False, separators=(",", ":"),
-                   ensure_ascii=False).encode("utf-8")
+        json.dumps(verbatims, sort_keys=False, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
     ).hexdigest()
     return {
         "schema": "gt.obligations_record.v1",
@@ -2432,9 +2547,7 @@ def _terminal_pretask_mediator_participation(
     suppressed = set(budget_suppressed or ())
     content_ids = {_localization_candidate_id(p) for p in (content_paths or ())}
     anchor_ids = {_localization_candidate_id(p) for p in (semantic_anchor_paths or ())}
-    localizer_ids = {
-        _localization_candidate_id(p) for p in (semantic_localizer_paths or ())
-    }
+    localizer_ids = {_localization_candidate_id(p) for p in (semantic_localizer_paths or ())}
     receipts_by_id = {
         str(r.get("candidate_id", "")): r
         for r in block_receipts
@@ -2446,12 +2559,16 @@ def _terminal_pretask_mediator_participation(
             return ""
         span = receipt.get("char_span")
         if (
-            not isinstance(span, list) or len(span) != 2
-            or type(span[0]) is not int or type(span[1]) is not int
-            or span[0] < 0 or span[1] < span[0] or span[1] > len(brief_text)
+            not isinstance(span, list)
+            or len(span) != 2
+            or type(span[0]) is not int
+            or type(span[1]) is not int
+            or span[0] < 0
+            or span[1] < span[0]
+            or span[1] > len(brief_text)
         ):
             return ""
-        return brief_text[span[0]:span[1]]
+        return brief_text[span[0] : span[1]]
 
     rows: list[dict] = []
 
@@ -2469,58 +2586,80 @@ def _terminal_pretask_mediator_participation(
                 build_control_participation,
                 participation_to_dict,
             )
-            rows.append(participation_to_dict(build_control_participation(
-                feature_id=feature_id,
-                decision_site=decision_site,
-                decision=decision,
-                iteration=0,
-                candidate_bytes=candidate_bytes,
-                fact_class=fact_class,
-                candidate_id=candidate_id,
-                reason=reason,
-            )))
+
+            rows.append(
+                participation_to_dict(
+                    build_control_participation(
+                        feature_id=feature_id,
+                        decision_site=decision_site,
+                        decision=decision,
+                        iteration=0,
+                        candidate_bytes=candidate_bytes,
+                        fact_class=fact_class,
+                        candidate_id=candidate_id,
+                        reason=reason,
+                    )
+                )
+            )
         except Exception as exc:  # sidecar failure never changes delivered bytes
             seal = (
-                _hashlib.sha256(candidate_bytes.encode("utf-8", "surrogatepass"))
-                .hexdigest()[:16] if candidate_bytes else ""
+                _hashlib.sha256(candidate_bytes.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+                if candidate_bytes
+                else ""
             )
-            rows.append({
-                "schema": "gt.control_participation.v1",
-                "control_ref": {
-                    "category": "CAP", "feature_id": feature_id, "role": "mediator",
-                },
-                "decision_site": decision_site,
-                "decision": "ERROR",
-                "iteration": 0,
-                "candidate_chars": len(candidate_bytes),
-                "candidate_sha256_16": seal,
-                "fact_class": fact_class,
-                "candidate_id": candidate_id,
-                "reason": f"control_record_error:{type(exc).__name__}",
-            })
+            rows.append(
+                {
+                    "schema": "gt.control_participation.v1",
+                    "control_ref": {
+                        "category": "CAP",
+                        "feature_id": feature_id,
+                        "role": "mediator",
+                    },
+                    "decision_site": decision_site,
+                    "decision": "ERROR",
+                    "iteration": 0,
+                    "candidate_chars": len(candidate_bytes),
+                    "candidate_sha256_16": seal,
+                    "fact_class": fact_class,
+                    "candidate_id": candidate_id,
+                    "reason": f"control_record_error:{type(exc).__name__}",
+                }
+            )
 
     obligation = next(
-        (r for r in block_receipts
-         if isinstance(r, dict)
-         and r.get("fact_class") == "obligations"
-         and r.get("label") == "obligations"), None)
+        (
+            r
+            for r in block_receipts
+            if isinstance(r, dict)
+            and r.get("fact_class") == "obligations"
+            and r.get("label") == "obligations"
+        ),
+        None,
+    )
     obligation_bytes = _exact_bytes(obligation)
     obligation_id = (
-        str(obligation.get("candidate_id")) if obligation
-        else "brief:block:obligations:none"
+        str(obligation.get("candidate_id")) if obligation else "brief:block:obligations:none"
     )
     native_on = _brief_native_on()
-    native_terminal = bool(
-        obligation_bytes and _OBLIGATION_NATIVE_HEADER in obligation_bytes)
+    native_terminal = bool(obligation_bytes and _OBLIGATION_NATIVE_HEADER in obligation_bytes)
     if native_on:
-        native_decision = "APPLIED" if native_terminal else (
-            "SUPPRESSED" if "obligations" in suppressed else "NO_EFFECT")
+        native_decision = (
+            "APPLIED"
+            if native_terminal
+            else ("SUPPRESSED" if "obligations" in suppressed else "NO_EFFECT")
+        )
         _append(
-            "GT_BRIEF_NATIVE", "pretask.v1r_brief.native_render",
-            native_decision, "obligations", obligation_id, obligation_bytes,
-            "native_obligations_terminal" if native_terminal else (
-                "token_rail" if native_decision == "SUPPRESSED"
-                else "no_terminal_obligations_block"),
+            "GT_BRIEF_NATIVE",
+            "pretask.v1r_brief.native_render",
+            native_decision,
+            "obligations",
+            obligation_id,
+            obligation_bytes,
+            "native_obligations_terminal"
+            if native_terminal
+            else (
+                "token_rail" if native_decision == "SUPPRESSED" else "no_terminal_obligations_block"
+            ),
         )
 
     ack_on = _ss_ack_form_on()
@@ -2534,34 +2673,55 @@ def _terminal_pretask_mediator_participation(
         else:
             ack_decision, ack_reason = "NO_EFFECT", "no_imperative_obligation"
         _append(
-            "GT_SS_ACK_FORM", "pretask.v1r_brief.ack_requirement_filter",
-            ack_decision, "obligations", obligation_id, obligation_bytes, ack_reason,
+            "GT_SS_ACK_FORM",
+            "pretask.v1r_brief.ack_requirement_filter",
+            ack_decision,
+            "obligations",
+            obligation_id,
+            obligation_bytes,
+            ack_reason,
         )
 
     if (_os.environ.get("GT_CONTENT_LEG") or "").strip().lower() not in (
-        "", "0", "false", "no", "off",
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     ):
         surviving = sorted(content_ids & set(receipts_by_id))
         for candidate_id in surviving:
             _append(
-                "GT_CONTENT_LEG", "pretask.v1r_brief.content_bm25_rank",
-                "APPLIED", "localization", candidate_id,
-                _exact_bytes(receipts_by_id[candidate_id]), content_reason,
+                "GT_CONTENT_LEG",
+                "pretask.v1r_brief.content_bm25_rank",
+                "APPLIED",
+                "localization",
+                candidate_id,
+                _exact_bytes(receipts_by_id[candidate_id]),
+                content_reason,
             )
         if not surviving:
             terminal_decision = (
-                content_decision if content_decision in {"ERROR", "SUPPRESSED"}
-                else "NO_EFFECT"
+                content_decision if content_decision in {"ERROR", "SUPPRESSED"} else "NO_EFFECT"
             )
             _append(
-                "GT_CONTENT_LEG", "pretask.v1r_brief.content_bm25_rank",
-                terminal_decision, "localization", "localization:content:none", "",
-                content_reason if terminal_decision in {"ERROR", "SUPPRESSED"}
+                "GT_CONTENT_LEG",
+                "pretask.v1r_brief.content_bm25_rank",
+                terminal_decision,
+                "localization",
+                "localization:content:none",
+                "",
+                content_reason
+                if terminal_decision in {"ERROR", "SUPPRESSED"}
                 else "no_final_content_candidate",
             )
 
     if (_os.environ.get("GT_SEM_BODY") or "").strip().lower() not in (
-        "", "0", "false", "no", "off",
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     ):
         semantic_ids = anchor_ids | localizer_ids
         surviving = sorted(semantic_ids & set(receipts_by_id))
@@ -2569,18 +2729,29 @@ def _terminal_pretask_mediator_participation(
             in_anchor = candidate_id in anchor_ids
             in_localizer = candidate_id in localizer_ids
             reason = (
-                "anchor_and_localizer" if in_anchor and in_localizer
-                else "anchor_only" if in_anchor else "localizer_only"
+                "anchor_and_localizer"
+                if in_anchor and in_localizer
+                else "anchor_only"
+                if in_anchor
+                else "localizer_only"
             )
             _append(
-                "GT_SEM_BODY", "pretask.v1r_brief.semantic_body_rank",
-                "APPLIED", "localization", candidate_id,
-                _exact_bytes(receipts_by_id[candidate_id]), reason,
+                "GT_SEM_BODY",
+                "pretask.v1r_brief.semantic_body_rank",
+                "APPLIED",
+                "localization",
+                candidate_id,
+                _exact_bytes(receipts_by_id[candidate_id]),
+                reason,
             )
         if not surviving:
             _append(
-                "GT_SEM_BODY", "pretask.v1r_brief.semantic_body_rank",
-                "NO_EFFECT", "localization", "localization:semantic-body:none", "",
+                "GT_SEM_BODY",
+                "pretask.v1r_brief.semantic_body_rank",
+                "NO_EFFECT",
+                "localization",
+                "localization:semantic-body:none",
+                "",
                 "no_final_semantic_body_candidate",
             )
     return rows
@@ -2650,23 +2821,41 @@ def _enforce_token_rail(text: str, budget: int) -> tuple[str, list[str]]:
     # Lowest priority FIRST. Each op removes ONE unit; loop while still over.
     _passes = [
         ("graph-map", lambda: _drop_tagged("<gt-graph-map>", "</gt-graph-map>")),
-        ("orientation-note", lambda: _drop_until_blank(
-            lambda ln: any(ln.startswith(p) for p in _ORIENTATION_NOTE_PREFIXES))),
-        ("scope-chain", lambda: _drop_until_blank(
-            lambda ln: ln.startswith("Scope chain"))),
-        ("related-files", lambda: _drop_until_blank(
-            lambda ln: ln.startswith("Related files to inspect")
-            or ln.startswith("Likely multi-file scope"))),
-        ("companion-candidates", lambda: _drop_until_blank(
-            lambda ln: ln.startswith("Other candidates"))),
-        ("calls", lambda: _drop_lines(
-            lambda ln: ln.lstrip().startswith("Calls:")
-            or ln.lstrip().startswith("Also changes:"))),
-        ("context", lambda: _drop_lines(
-            lambda ln: ln.lstrip().startswith("Context:")
-            or ln.lstrip().startswith("Spec:"))),
-        ("callers", lambda: _drop_lines(
-            lambda ln: ln.lstrip().startswith("Callers:"))),
+        (
+            "orientation-note",
+            lambda: _drop_until_blank(
+                lambda ln: any(ln.startswith(p) for p in _ORIENTATION_NOTE_PREFIXES)
+            ),
+        ),
+        ("scope-chain", lambda: _drop_until_blank(lambda ln: ln.startswith("Scope chain"))),
+        (
+            "related-files",
+            lambda: _drop_until_blank(
+                lambda ln: (
+                    ln.startswith("Related files to inspect")
+                    or ln.startswith("Likely multi-file scope")
+                )
+            ),
+        ),
+        (
+            "companion-candidates",
+            lambda: _drop_until_blank(lambda ln: ln.startswith("Other candidates")),
+        ),
+        (
+            "calls",
+            lambda: _drop_lines(
+                lambda ln: (
+                    ln.lstrip().startswith("Calls:") or ln.lstrip().startswith("Also changes:")
+                )
+            ),
+        ),
+        (
+            "context",
+            lambda: _drop_lines(
+                lambda ln: ln.lstrip().startswith("Context:") or ln.lstrip().startswith("Spec:")
+            ),
+        ),
+        ("callers", lambda: _drop_lines(lambda ln: ln.lstrip().startswith("Callers:"))),
     ]
     for label, op in _passes:
         while _tok() > budget and op():
@@ -2837,11 +3026,7 @@ def _l1_acquisition_counts(
         entries.append(
             _RankedEntry(
                 path,
-                witness=(
-                    witness_by_file.get(path)
-                    or witness_by_file.get(normalized)
-                    or ""
-                ),
+                witness=(witness_by_file.get(path) or witness_by_file.get(normalized) or ""),
                 localizer_confidence=float(
                     localizer_confidence_by_file.get(path)
                     or localizer_confidence_by_file.get(normalized)
@@ -2883,23 +3068,20 @@ def _acquisition_proof_rows(
                 components[name] = float(raw_components.get(name, 0.0) or 0.0)
             except (TypeError, ValueError):
                 components[name] = 0.0
-        witness = (
-            witness_by_file.get(path)
-            or witness_by_file.get(normalized)
-            or ""
-        )
+        witness = witness_by_file.get(path) or witness_by_file.get(normalized) or ""
         witness_verified = bool(
-            witness_verified_by_file.get(path)
-            or witness_verified_by_file.get(normalized)
+            witness_verified_by_file.get(path) or witness_verified_by_file.get(normalized)
         )
-        proof.append({
-            "candidate_id": _localization_candidate_id(path),
-            "rank": rank,
-            "path": path,
-            "witness": witness,
-            "witness_verified": witness_verified,
-            "components": components,
-        })
+        proof.append(
+            {
+                "candidate_id": _localization_candidate_id(path),
+                "rank": rank,
+                "path": path,
+                "witness": witness,
+                "witness_verified": witness_verified,
+                "components": components,
+            }
+        )
     return proof
 
 
@@ -2944,9 +3126,11 @@ def _l1_signal_counts(
             fts5 += 1
 
         _reach = float(comps.get("reach", 0.0) or 0.0)
-        _witnessed = bool(getattr(entry, "witness", "")) or getattr(
-            entry, "localizer_confidence", 0.0
-        ) > 0.0 or float(comps.get("witness", 0.0) or 0.0) > 0.0
+        _witnessed = (
+            bool(getattr(entry, "witness", ""))
+            or getattr(entry, "localizer_confidence", 0.0) > 0.0
+            or float(comps.get("witness", 0.0) or 0.0) > 0.0
+        )
         if _reach > 0.0 or _witnessed:
             struct += 1
 
@@ -3034,16 +3218,15 @@ def _expand_via_cochange(
         if not symptom_paths:
             return
         for candidate in dict.fromkeys(current_files):
-            if (
-                candidate in symptom_files
-                or os.path.dirname(candidate) in symptom_dirs
-            ):
+            if candidate in symptom_files or os.path.dirname(candidate) in symptom_dirs:
                 continue
             cochange_counts[candidate] = cochange_counts.get(candidate, 0) + 1
-            cochange_rows.setdefault(candidate, []).append({
-                "commit": current_commit,
-                "symptom_paths": symptom_paths,
-            })
+            cochange_rows.setdefault(candidate, []).append(
+                {
+                    "commit": current_commit,
+                    "symptom_paths": symptom_paths,
+                }
+            )
 
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -3100,11 +3283,12 @@ def _cochange_evidence(
         "source_rows": source_rows,
     }
     canonical = json.dumps(
-        evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
-    evidence["source_identity_sha256"] = hashlib.sha256(
-        canonical.encode("utf-8")
-    ).hexdigest()
+    evidence["source_identity_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return evidence
 
 
@@ -3126,10 +3310,7 @@ def _primary_cochange_evidence(
     neighbour list is sorted, de-duplicated and never includes the candidate
     itself, so a downstream reader can prove the rows were not mutated.
     """
-    kept = sorted({
-        c for c in co_change_paths
-        if isinstance(c, str) and c and c != candidate_path
-    })
+    kept = sorted({c for c in co_change_paths if isinstance(c, str) and c and c != candidate_path})
     evidence: dict[str, object] = {
         "kind": "cochange_history",
         "source": "primary_path",
@@ -3138,11 +3319,12 @@ def _primary_cochange_evidence(
         "co_change_paths": kept,
     }
     canonical = json.dumps(
-        evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
-    evidence["source_identity_sha256"] = hashlib.sha256(
-        canonical.encode("utf-8")
-    ).hexdigest()
+    evidence["source_identity_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return evidence
 
 
@@ -3171,14 +3353,18 @@ def _primary_cochange_support(
     # Mirror the rendered "Also changes: …" filter exactly: drop test/demo paths
     # and the candidate itself, then de-duplicate. Only a NON-EMPTY real
     # neighbourhood mints a witness (never a hollow count-0 support row).
-    kept = sorted({
-        c for c in (entry_co_changes or [])
-        if isinstance(c, str) and c and c != candidate_path and not _is_test_path(c)
-    })
+    kept = sorted(
+        {
+            c
+            for c in (entry_co_changes or [])
+            if isinstance(c, str) and c and c != candidate_path and not _is_test_path(c)
+        }
+    )
     if not kept or float(components.get("cochange", 0.0) or 0.0) > 0.0:
         return bridge_evidence, None
     evidence = _primary_cochange_evidence(
-        candidate_path=candidate_path, co_change_paths=kept,
+        candidate_path=candidate_path,
+        co_change_paths=kept,
     )
     components["cochange"] = float(evidence["count"])
     return evidence, list(evidence["co_change_paths"])  # type: ignore[arg-type]
@@ -3328,10 +3514,7 @@ def _entry_confidence_tier(entry: FileEntry, issue_text: str = "") -> str:
         # names), language-invariant (filename specificity, not Python-specific).
         _stem = os.path.splitext(os.path.basename(entry.path or ""))[0].lower()
         _stem_specific = len(_stem) >= 5 or "_" in _stem
-        path_match = (
-            _stem_specific
-            and bool(_re.search(rf"\b{_re.escape(_stem)}\b", _it))
-        )
+        path_match = _stem_specific and bool(_re.search(rf"\b{_re.escape(_stem)}\b", _it))
 
     # A verified GRAPH-TRAVERSAL witness (graph_localizer): the file is connected
     # to an issue-anchored symbol by a DETERMINISTIC CALLS/IMPORTS edge. This is
@@ -3385,8 +3568,12 @@ def _graph_map_demand_on() -> bool:
     (``_with_graph_map`` returns the brief unchanged). Robust truthy parse, parity
     with ``_obligations_v2_on``."""
     import os as _os
+
     return (_os.environ.get("GT_GRAPH_MAP_DEMAND") or "").strip().lower() not in (
-        "", "0", "false", "no",
+        "",
+        "0",
+        "false",
+        "no",
     )
 
 
@@ -3422,7 +3609,11 @@ def _with_graph_map(
     import os as _os
 
     gateway_on = (_os.environ.get("GT_GATEWAY") or "").strip().lower() not in (
-        "", "0", "false", "no", "off",
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
     if gateway_on or not _graph_map_demand_on():
         return brief
@@ -3560,6 +3751,7 @@ def _obligations_v2_on() -> bool:
     or unreceipted feature flag is introduced.
     """
     import os as _os
+
     _raw = _os.environ.get("GT_OBLIGATIONS_V2")
     if _raw is not None and _raw.strip():
         return _raw.strip().lower() not in ("0", "false", "no", "off")
@@ -3571,6 +3763,7 @@ def _dynamic_obligation_budget(n_clauses: int) -> int:
     n<=12 keeps today's dose (4); a 25-clause spec renders 9; ceiling 10 bounds
     the block at <=10x200 chars inside the existing brief token rail."""
     import math as _math
+
     return max(_OBLIGATION_BUDGET, min(10, _math.ceil(max(0, n_clauses) / 3)))
 
 
@@ -3605,16 +3798,19 @@ def _write_obligations_v2_artifact(
         import hashlib as _hashlib_v2
         import json as _j
         import os as _os
+
         target_dir = _os.path.dirname(_anchors_path(for_write=True)) or "/tmp"
         clean = [{k: v for k, v in o.items() if not k.startswith("_")} for o in rows]
-        md = ["# GT obligations checklist — every requirement extracted from the issue",
-              "# Verify each before submitting; tick what you have EXERCISED with a test.",
-              ""]
+        md = [
+            "# GT obligations checklist — every requirement extracted from the issue",
+            "# Verify each before submitting; tick what you have EXERCISED with a test.",
+            "",
+        ]
         for o in clean:
             verb = " ".join((o.get("verbatim_text") or "").split())
             md.append(
-                f"- [ ] ({o.get('clause_id','')}, {o.get('kind','')}, "
-                f"{o.get('modality','')}) \"{verb}\""
+                f"- [ ] ({o.get('clause_id', '')}, {o.get('kind', '')}, "
+                f'{o.get("modality", "")}) "{verb}"'
             )
         md_text = "\n".join(md) + "\n"
         payload = {
@@ -3638,9 +3834,7 @@ def _write_obligations_v2_artifact(
                 import tempfile as _tempfile_v2
 
                 def _atomic_text(_path: str, _text: str) -> None:
-                    _fd, _tmp = _tempfile_v2.mkstemp(
-                        prefix=f".{_os.path.basename(_path)}.", dir=_d
-                    )
+                    _fd, _tmp = _tempfile_v2.mkstemp(prefix=f".{_os.path.basename(_path)}.", dir=_d)
                     try:
                         with _os.fdopen(_fd, "w", encoding="utf-8", newline="") as _f:
                             _f.write(_text)
@@ -3669,6 +3863,8 @@ def _write_obligations_v2_artifact(
                 continue
     except Exception:
         pass
+
+
 _F2P_TOKEN_RE = _re.compile(r"\b(?:FAIL_TO_PASS|PASS_TO_PASS|fail_to_pass|pass_to_pass)\b")
 # LEAK LAW — the test-identifier + assertion + test-path screens are SINGLE-SOURCED with the seam
 # (Fable-LIPI round-2, 2026-07-11). Round-1 tuned the brief's screen and the seam's prose screen
@@ -3698,10 +3894,10 @@ def _obligation_is_leaky(verbatim: str, symbols, gold_path_tokens: set[str]) -> 
     legs run HERE so every caller (the ``<gt-obligations>`` block AND the B-1
     Expected-Behavior spec) obeys the SAME leak law (Brief-F2 asymmetry closed).
     """
-    low = (verbatim or "")
+    low = verbatim or ""
     if _F2P_TOKEN_RE.search(low) or _prose_leaks_test_identity(low):
         return True
-    for s in (symbols or set()):
+    for s in symbols or set():
         sl = str(s)
         if _prose_leaks_test_identity(sl) or _F2P_TOKEN_RE.search(sl):
             return True
@@ -3830,12 +4026,12 @@ def _obligations_section(rendered: list[str]) -> list[str]:
     header."""
     if _brief_native_on():
         if _ss_ack_form_on():
-            kept = [r for r in rendered
-                    if _obligation_is_imperative(*_parse_obligation_row(r))]
+            kept = [r for r in rendered if _obligation_is_imperative(*_parse_obligation_row(r))]
             if not kept:
                 return []
             return ["", _OBLIGATION_NATIVE_HEADER] + [
-                _obligation_checklist_row(r, strip_kind=True) for r in kept]
+                _obligation_checklist_row(r, strip_kind=True) for r in kept
+            ]
         return ["", _OBLIGATION_NATIVE_HEADER] + [_obligation_checklist_row(r) for r in rendered]
     return ["", "<gt-obligations>"] + rendered + ["</gt-obligations>"]
 
@@ -3879,6 +4075,7 @@ def _render_obligations_block(
             identifier_tokens as _id_tokens,
             passes_relevance_gate as _rel_gate,
         )
+
         # Row-11 fix (gt_math_oh 2026-06-25): read the ALREADY-PERSISTED structured
         # obligations from /tmp/gt_issue_anchors.json (written by generate_v1r_brief
         # at :3342 via spec.to_serializable()). The DeepSWE path reads these via
@@ -3887,6 +4084,7 @@ def _render_obligations_block(
         spec = None
         try:
             import json as _obl_json
+
             with open(_anchors_path(), encoding="utf-8") as _obl_f:
                 _obl_data = _obl_json.load(_obl_f)
             _persisted = _obl_data.get("obligations") or []
@@ -3895,9 +4093,8 @@ def _render_obligations_block(
                 # outlive its producer; version alone cannot prevent a valid
                 # artifact from another issue being laundered into this brief.
                 import hashlib as _obl_hashlib
-                _issue_sha = _obl_hashlib.sha256(
-                    issue_text.encode("utf-8")
-                ).hexdigest()
+
+                _issue_sha = _obl_hashlib.sha256(issue_text.encode("utf-8")).hexdigest()
                 if (
                     _obl_data.get("obligations_version") != 2
                     or _obl_data.get("issue_sha256") != _issue_sha
@@ -3905,29 +4102,38 @@ def _render_obligations_block(
                     _persisted = []
             if _persisted:
                 from groundtruth.pretask.spec import Obligation, IssueSpec
+
                 if _obligations_v2_on():
                     # v2 bridge: carry ALL fields (the v1 two-field reconstruction
                     # silently dropped symbols/keywords — weakening the symbol leg
                     # of the leak check). Flag-gated so flag-off bytes are stable.
-                    _obls = [Obligation(
-                        verbatim_text=o.get("verbatim_text", ""),
-                        kind=o.get("kind", "behavior"),
-                        symbols=frozenset(o.get("symbols") or ()),
-                        keywords=frozenset(o.get("keywords") or ()),
-                        checkable_forms=frozenset(o.get("checkable_forms") or ()),
-                        clause_id=o.get("clause_id", ""),
-                        modality=o.get("modality", ""),
-                        modality_strength=int(o.get("modality_strength") or 0),
-                        subject_symbols=frozenset(o.get("subject_symbols") or ()),
-                        parent_id=o.get("parent_id", ""),
-                        part_index=int(o.get("part_index") or 0),
-                        region=o.get("region", "normative"),
-                    ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
+                    _obls = [
+                        Obligation(
+                            verbatim_text=o.get("verbatim_text", ""),
+                            kind=o.get("kind", "behavior"),
+                            symbols=frozenset(o.get("symbols") or ()),
+                            keywords=frozenset(o.get("keywords") or ()),
+                            checkable_forms=frozenset(o.get("checkable_forms") or ()),
+                            clause_id=o.get("clause_id", ""),
+                            modality=o.get("modality", ""),
+                            modality_strength=int(o.get("modality_strength") or 0),
+                            subject_symbols=frozenset(o.get("subject_symbols") or ()),
+                            parent_id=o.get("parent_id", ""),
+                            part_index=int(o.get("part_index") or 0),
+                            region=o.get("region", "normative"),
+                        )
+                        for o in _persisted
+                        if isinstance(o, dict) and o.get("verbatim_text")
+                    ]
                 else:
-                    _obls = [Obligation(
-                        verbatim_text=o.get("verbatim_text", ""),
-                        kind=o.get("kind", "behavior"),
-                    ) for o in _persisted if isinstance(o, dict) and o.get("verbatim_text")]
+                    _obls = [
+                        Obligation(
+                            verbatim_text=o.get("verbatim_text", ""),
+                            kind=o.get("kind", "behavior"),
+                        )
+                        for o in _persisted
+                        if isinstance(o, dict) and o.get("verbatim_text")
+                    ]
                 if _obls:
                     spec = IssueSpec(obligations=_obls)
         except Exception:
@@ -3935,6 +4141,7 @@ def _render_obligations_block(
         if spec is None:
             if _obligations_v2_on():
                 from groundtruth.pretask.spec import extract_spec_v2 as _extract_spec_v2
+
                 spec = _extract_spec_v2(issue_text)
             else:
                 spec = _extract_spec(issue_text)
@@ -3957,9 +4164,8 @@ def _render_obligations_block(
     for f in files:
         # bare names (function_names) are the focus anchor; `functions` holds
         # signatures ("def foo(...)") whose tokens we also harvest as a fallback.
-        for fn in (
-            list(getattr(f, "function_names", []) or [])
-            + list(getattr(f, "functions", []) or [])
+        for fn in list(getattr(f, "function_names", []) or []) + list(
+            getattr(f, "functions", []) or []
         ):
             fn_tokens |= _id_tokens(fn)
         # gold-path tokens for the leakage guard — a rendered candidate's path
@@ -3974,7 +4180,7 @@ def _render_obligations_block(
     # obligation relevance anchor is consistent, not a new heuristic. They are NOT
     # added to gold_path_tokens, so the leakage guard is unaffected (an anchor
     # symbol that coincides with a gold-path segment is still caught there).
-    for s in (anchor_symbols or set()):
+    for s in anchor_symbols or set():
         fn_tokens |= _id_tokens(str(s))
     if not fn_tokens and require_anchor:
         return []  # no anchor to gate against — stay quiet
@@ -3999,13 +4205,14 @@ def _render_obligations_block(
         # audit/provenance. Only normative rows are requirements that may enter
         # the model observation; process/evidence rows are never completion
         # obligations, even when their text overlaps the localized symbols.
-        deliverable = [
-            o for o in rows if o.get("region", "normative") == "normative"
-        ]
-        gated = deliverable if not require_anchor else [
-            o for o in deliverable
-            if _rel_gate((o.get("verbatim_text") or ""), None, fn_tokens)
-        ]
+        deliverable = [o for o in rows if o.get("region", "normative") == "normative"]
+        gated = (
+            deliverable
+            if not require_anchor
+            else [
+                o for o in deliverable if _rel_gate((o.get("verbatim_text") or ""), None, fn_tokens)
+            ]
+        )
         gated.sort(key=_v2_order_key)
         k = _dynamic_obligation_budget(len(deliverable))
         rendered_v2: list[str] = []
@@ -4080,6 +4287,7 @@ def render_brief(
 ) -> str:
     if not files:
         return "<gt-task-brief>\n</gt-task-brief>"
+
     # D1: per-body-line char cap. The budget-enforcement loop in
     # generate_v1r_brief tightens this (not the file LIST) when the brief is over
     # the token rail — trimming DETAIL, never which files the agent is told to
@@ -4269,13 +4477,14 @@ def render_brief(
     if False and graph_db and files:
         try:
             import sqlite3 as _asq
+
             _aconn = _asq.connect(graph_db)
             _all_spec_lines: list[str] = []
             _total_verify_budget = 5  # total assertion lines across all files
             for _verify_file in files:
                 if len(_all_spec_lines) >= _total_verify_budget:
                     break
-                _vf_path = _verify_file.path if hasattr(_verify_file, 'path') else str(_verify_file)
+                _vf_path = _verify_file.path if hasattr(_verify_file, "path") else str(_verify_file)
                 _vf_base = os.path.basename(_vf_path)
                 _per_file_limit = max(2, _total_verify_budget - len(_all_spec_lines))
                 # Two queries: first try linked assertions (target_node_id > 0),
@@ -4310,7 +4519,7 @@ def render_brief(
                         # Collapse whitespace so multi-line assertions render on one line
                         _expr_clean = " ".join((expr or "").split())[:80].strip()
                         if _expr_clean:
-                            _tname_short = (tname or "?")
+                            _tname_short = tname or "?"
                             _line = f"  {_tname_short}: {_expr_clean}"
                             if expected and expected.strip():
                                 _line += f" == {expected.strip()[:50]}"
@@ -4361,9 +4570,7 @@ def render_brief(
         _deliverable_scope = [
             f
             for f in scope_files
-            if not _is_vendored_path(f)
-            and not _is_test_path(f)
-            and not _is_test_or_demo(f)
+            if not _is_vendored_path(f) and not _is_test_path(f) and not _is_test_or_demo(f)
         ]
         scope_names = [os.path.basename(f) for f in _deliverable_scope[:3]]
         if scope_names and scope_confidence == "high":
@@ -4389,18 +4596,16 @@ def render_brief(
             _chain_src = [
                 f
                 for f in chain_files
-                if not _is_test_path(f)
-                and not _is_vendored_path(f)
-                and not _is_test_or_demo(f)
+                if not _is_test_path(f) and not _is_vendored_path(f) and not _is_test_or_demo(f)
             ]
             if len(_chain_src) >= 2 and chain_conf >= 0.5:
                 chain_basenames = [os.path.basename(f) for f in _chain_src]
                 # D1: cap the basename chain (many "→"-joined files run long). The
                 # leading "\n" is preserved so the blank-line separator survives.
                 lines.append(
-                    "\n" + _cap(
-                        "Scope chain (graph-connected, check ALL): "
-                        f"{' → '.join(chain_basenames)}"
+                    "\n"
+                    + _cap(
+                        f"Scope chain (graph-connected, check ALL): {' → '.join(chain_basenames)}"
                     )
                 )
                 if chain_desc:
@@ -4726,17 +4931,19 @@ def _high_func_support(witnesses, func: str) -> int:
     identity so two views of one edge don't double-count. Pure; no graph read.
     """
     fl = (func or "").lower()
-    return len({
-        (
-            getattr(w, "direction", ""),
-            getattr(w, "src_symbol", ""),
-            getattr(w, "dst_symbol", ""),
-            getattr(w, "edge_type", ""),
-        )
-        for w in (witnesses or [])
-        if (getattr(w, "anchor", "") or "").lower() == fl
-        and getattr(w, "direction", "") != "defines_anchor"
-    })
+    return len(
+        {
+            (
+                getattr(w, "direction", ""),
+                getattr(w, "src_symbol", ""),
+                getattr(w, "dst_symbol", ""),
+                getattr(w, "edge_type", ""),
+            )
+            for w in (witnesses or [])
+            if (getattr(w, "anchor", "") or "").lower() == fl
+            and getattr(w, "direction", "") != "defines_anchor"
+        }
+    )
 
 
 def _resolved_witness_tail(graph_db: str, file_path: str) -> str:
@@ -4797,7 +5004,8 @@ def _fts5_symbol_rank(graph_db: str, file_path: str, terms: set[str]) -> list[st
         conn = sqlite3.connect(graph_db)
         try:
             tables = {
-                r[0] for r in conn.execute(
+                r[0]
+                for r in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
@@ -4896,7 +5104,7 @@ def _semantic_leaf_names(
             return True  # >=2 agreeing signals
         if in_sem and sem_rank[nm] == 0:
             return True  # graded-relevance top match may stand alone
-        return False     # lexical-only (or non-top sem-only) -> correct-or-quiet
+        return False  # lexical-only (or non-top sem-only) -> correct-or-quiet
 
     qualified = [nm for nm in names if _qualifies(nm)]
     if not qualified:
@@ -4961,8 +5169,11 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # It MUST be whitelisted (Fable #6): else the receipt drops it while the HIGH-
         # eligibility gate counts the unfiltered leg, so the header would claim an
         # agreement the receipt denies. Rendered from the SAME filtered basis the gate uses.
-        legs = [l for l in _signals_map.get(_gl_normalize(fp), [])
-                if l in ("grep", "content", "structural", "semantic")]
+        legs = [
+            l
+            for l in _signals_map.get(_gl_normalize(fp), [])
+            if l in ("grep", "content", "structural", "semantic")
+        ]
         if legs:
             return f"{len(legs)}/3 signals agree ({', '.join(legs)})"
         return "0/3 signals agree"
@@ -4970,13 +5181,15 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     def _issue_edges(c):
         # verified, non-DEFINES (structural edge) witnesses descended from an issue anchor
         return [
-            w for w in c.witnesses
+            w
+            for w in c.witnesses
             if getattr(w, "verified", False)
             and getattr(w, "direction", "") != "defines_anchor"
             and (getattr(w, "anchor", "") or "").lower() in anchors
         ]
 
     import statistics as _st
+
     top = cands[0]
     top_edges = _issue_edges(top)
     struct_cands = [c for c in cands if _issue_edges(c)]
@@ -5025,14 +5238,11 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # ad-hoc list. Correct-or-quiet: keep the original set if the filter would empty
     # it (a vendored-only candidate set still gets a region-level option list).
     _kept = [
-        c for c in cands
-        if not _is_test_or_demo(c.file_path) and not _is_vendored_path(c.file_path)
+        c for c in cands if not _is_test_or_demo(c.file_path) and not _is_vendored_path(c.file_path)
     ]
     if _kept:
         cands = _kept
-    _evidenced = sum(
-        1 for c in cands if getattr(c, "relevance_grade", "") == "VERIFIED"
-    ) or 3
+    _evidenced = sum(1 for c in cands if getattr(c, "relevance_grade", "") == "VERIFIED") or 3
     K = min(max(3, _evidenced), 6, len(cands))
     shown = cands[:K]
 
@@ -5088,7 +5298,8 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # them) WITHOUT losing real help: observed good outcomes came from the MEDIUM path,
     # not HIGH. Shared localizer -> fixes both the OH and DeepSWE pipelines at the source.
     _high_elig = [
-        c for c in cands
+        c
+        for c in cands
         if _issue_edges(c)
         and int(_agree_map.get(_gl_normalize(c.file_path), 0)) >= 2
         and _distinct_issue_anchors(c) >= 2
@@ -5114,9 +5325,11 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
         # a confident-wrong steer is the single worst failure mode). Unreadable
         # graph -> (inf, ->0) -> permissive (prior behavior).
         _sym_hub_thr, _fanin_of = _symbol_fanin_fn(graph_db)
-        if (_defines_func_in_file(graph_db, tgt.file_path, func)
-                and _high_func_support(tgt.witnesses, func) >= 2
-                and _fanin_of(func) <= _sym_hub_thr):
+        if (
+            _defines_func_in_file(graph_db, tgt.file_path, func)
+            and _high_func_support(tgt.witnesses, func) >= 2
+            and _fanin_of(func) <= _sym_hub_thr
+        ):
             line_txt, line_no = _edit_target_guard(graph_db, tgt.file_path, func)
             # FORM-only (GT_CONSENSUS_LEDGER): the imperative "Edit target:" verdict
             # becomes a fact-ledger head ("file :: func — N/3 signals agree (...)") and
@@ -5170,8 +5383,10 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     region = _common_region([c.file_path for c in shown])
     region_informative = region.count("/") >= 1  # >=2 path components
     if _low_tier and region_informative and len({os.path.dirname(c.file_path) for c in shown}) > 1:
-        out = ['<gt-localization confidence="low">',
-               f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):"]
+        out = [
+            '<gt-localization confidence="low">',
+            f"Region: {region}/ — candidate edit targets (reason over these, confirm with grep):",
+        ]
         for i, c in enumerate(shown, 1):
             # FORM-only (GT_CONSENSUS_LEDGER): append the per-file N/3 receipt. Flag
             # off => "" => byte-identical to today. SAME lines, SAME order.
@@ -5190,8 +5405,10 @@ def _localization_header(loc, graph_db: str, issue_text: str) -> tuple[str, str]
     # nearly every real issue hits (all 4 measured live shapes render MEDIUM here), and
     # at 0.67 top-1 precision the agent must re-confirm the target, not treat it as fact
     # (ALREADY_BUILT.md; the LOW-region branch above already carries the same hedge).
-    out = [f'<gt-localization confidence="{_tier_label}">',
-           "Candidate edit targets (reason over these — confirm the edit target with grep):"]
+    out = [
+        f'<gt-localization confidence="{_tier_label}">',
+        "Candidate edit targets (reason over these — confirm the edit target with grep):",
+    ]
     for i, c in enumerate(shown, 1):
         fs = _defines_funcs(c)
         # R1 leaf-naming bridge: defines_anchor named NOTHING (behavior-described
@@ -5234,7 +5451,8 @@ def _localization_header_for_entries(
     terminal_rank = {_gl_normalize(entry.path): index for index, entry in enumerate(entries)}
     original_rank = {id(candidate): index for index, candidate in enumerate(loc.candidates)}
     shared = [
-        candidate for candidate in loc.candidates
+        candidate
+        for candidate in loc.candidates
         if _gl_normalize(candidate.file_path) in terminal_rank
     ]
     if not shared:
@@ -5262,12 +5480,44 @@ def _localization_header_for_entries(
 # _NL_FUNCTION_WORDS English-function-word filter — a LANGUAGE invariant, NOT a per-task blocklist;
 # no domain words). loguru-1297: 'print' (a builtin with a caller edge) corroborated _error_interceptor
 # and flanked the gold — this drops it at the source so only specific names seed.
-_GENERIC_CODE_NAMES: frozenset[str] = frozenset({
-    "print", "format", "sorted", "range", "input", "repr", "round", "bytes", "bytearray",
-    "frozenset", "isinstance", "hasattr", "getattr", "setattr", "delattr", "super", "object",
-    "property", "staticmethod", "classmethod", "append", "extend", "insert", "remove",
-    "items", "keys", "values", "update", "split", "strip", "join", "replace", "encode", "decode",
-})
+_GENERIC_CODE_NAMES: frozenset[str] = frozenset(
+    {
+        "print",
+        "format",
+        "sorted",
+        "range",
+        "input",
+        "repr",
+        "round",
+        "bytes",
+        "bytearray",
+        "frozenset",
+        "isinstance",
+        "hasattr",
+        "getattr",
+        "setattr",
+        "delattr",
+        "super",
+        "object",
+        "property",
+        "staticmethod",
+        "classmethod",
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "items",
+        "keys",
+        "values",
+        "update",
+        "split",
+        "strip",
+        "join",
+        "replace",
+        "encode",
+        "decode",
+    }
+)
 
 
 def _exact_issue_named_files(
@@ -5300,11 +5550,12 @@ def _exact_issue_named_files(
         collision — it bypasses the shape skip ONLY (still subject to the dunder / generic /
         ambiguity gates: confidence-gated, never a free pass).
     """
-    import re as _re
     import sqlite3 as _sq
+
     if issue_anchors is None:
         try:
             from groundtruth.pretask.anchors import extract_issue_anchors
+
             issue_anchors = extract_issue_anchors(issue_text, graph_db)
         except Exception:
             issue_anchors = None
@@ -5341,8 +5592,7 @@ def _exact_issue_named_files(
         # protect prose-derived stems.  Confirm membership against the graph so a
         # nonexistent/scratch path is still correct-or-quiet.
         for (fp,) in c.execute(
-            "SELECT DISTINCT file_path FROM nodes "
-            "WHERE is_test=0 AND file_path IS NOT NULL"
+            "SELECT DISTINCT file_path FROM nodes WHERE is_test=0 AND file_path IS NOT NULL"
         ):
             if fp and _gl_normalize(str(fp)) in explicit_paths:
                 stem = os.path.splitext(os.path.basename(str(fp).replace("\\", "/")))[0]
@@ -5357,18 +5607,18 @@ def _exact_issue_named_files(
         ):
             if not name or not fp:
                 continue
-            if name.startswith("__") and name.endswith("__"):   # dunders are never anchors
+            if name.startswith("__") and name.endswith("__"):  # dunders are never anchors
                 continue
-            if name.lower() in _GENERIC_CODE_NAMES:             # language builtins are never anchors
+            if name.lower() in _GENERIC_CODE_NAMES:  # language builtins are never anchors
                 continue
             if len(name) < 5 and "_" not in name and name not in _prov:
                 continue  # short generic names: only reporter-confirmed provenance admits them
             if name in toks or name.lower() in toks:
                 _name_files.setdefault(name, set()).add(fp)
         for name, files in _name_files.items():
-            if len(files) > _MAX_FILES_PER_NAME:                # generic name -> not a specific anchor
+            if len(files) > _MAX_FILES_PER_NAME:  # generic name -> not a specific anchor
                 continue
-            for fp in sorted(files):                            # DETERMINISM (B5-4): `files` is a set
+            for fp in sorted(files):  # DETERMINISM (B5-4): `files` is a set
                 out.setdefault(fp, [])
                 if name not in out[fp]:
                     out[fp].append(name)
@@ -5387,9 +5637,9 @@ def _exact_issue_named_files(
             if not fp:
                 continue
             stem = os.path.splitext(os.path.basename(str(fp).replace("\\", "/")))[0].lower()
-            if len(stem) < 5:                                   # short stems collide with prose
+            if len(stem) < 5:  # short stems collide with prose
                 continue
-            if stem in _GENERIC_CODE_NAMES:                     # generic module names are never anchors
+            if stem in _GENERIC_CODE_NAMES:  # generic module names are never anchors
                 continue
             # SELECTIVE: fire ONLY when the issue references the stem AS A MODULE/FILE
             # (dotted path "plugins.chzzk", "<stem>.py", or "<stem> plugin/module"), NOT
@@ -5399,7 +5649,7 @@ def _exact_issue_named_files(
             if _gl_normalize(str(fp)) in explicit_paths:
                 _stem_files.setdefault(stem, set()).add(fp)
         for stem, files in _stem_files.items():
-            if len(files) > _MAX_FILES_PER_NAME:                # ambiguous stem -> not a specific anchor
+            if len(files) > _MAX_FILES_PER_NAME:  # ambiguous stem -> not a specific anchor
                 continue
             for fp in files:
                 out.setdefault(fp, [])
@@ -5571,9 +5821,9 @@ def _apply_evidence_rrf(
 
         def _loc_rank(rec: dict) -> int:
             try:
-                return int(rec.get("_loc_rank", 10 ** 6))
+                return int(rec.get("_loc_rank", 10**6))
             except (TypeError, ValueError):
-                return 10 ** 6
+                return 10**6
 
         for cls in ("lexical", "semantic", "structural", "path", "historical"):
             ranked = []
@@ -5581,11 +5831,7 @@ def _apply_evidence_rrf(
                 val = _positive_evidence_classes(rec).get(cls, 0.0)
                 if val > 0.0:
                     ranked.append((idx, rec, val))
-            ranked.sort(
-                key=lambda item: (
-                    -item[2], _loc_rank(item[1]), _path(item[1]), item[0]
-                )
-            )
+            ranked.sort(key=lambda item: (-item[2], _loc_rank(item[1]), _path(item[1]), item[0]))
             for rank, (_idx, rec, _val) in enumerate(ranked, start=1):
                 scores[id(rec)] += 1.0 / float(60 + rank)
         return scores
@@ -5612,8 +5858,7 @@ def _apply_evidence_rrf(
 
     _with_order = list(enumerate(records))
     _evidence_records = [
-        (idx, _ensure_entered_via(rec), _issue_evidence_strength(rec))
-        for idx, rec in _with_order
+        (idx, _ensure_entered_via(rec), _issue_evidence_strength(rec)) for idx, rec in _with_order
     ]
     _supported = [
         (idx, rec, strength)
@@ -5624,10 +5869,11 @@ def _apply_evidence_rrf(
         _rrf = _rrf_evidence_scores([rec for _, rec, _ in _supported])
         _supported.sort(
             key=lambda item: (
+                -int(bool(item[1].get("witness_verified", False))),
                 -_rrf.get(id(item[1]), 0.0),
                 -_class_count(item[1]),
                 -item[2],
-                int(item[1].get("_loc_rank", 10 ** 6)),
+                int(item[1].get("_loc_rank", 10**6)),
                 _gl_normalize(str(item[1].get("path", "") or "")),
                 item[0],
             )
@@ -5747,8 +5993,7 @@ def generate_v1r_brief(
         if _brief_minimal_on():
             _nm_before_minimal = _nm_brief
             _nm_brief = _reduce_brief_to_minimal(_nm_brief)
-            _nm_control_participation = _brief_minimal_participation(
-                _nm_before_minimal, _nm_brief)
+            _nm_control_participation = _brief_minimal_participation(_nm_before_minimal, _nm_brief)
         # Brief-F7: B-6 per-block receipts also cover the fact-bearing no-match brief
         # (its <gt-obligations> block). Same PURE read as the matched path; brief bytes
         # unchanged. Empty unless receipt/in-seam instrumentation is enabled.
@@ -5821,6 +6066,7 @@ def generate_v1r_brief(
     if graph_db:
         try:
             from groundtruth.pretask.anchors import extract_issue_anchors as _eia_h
+
             _anchors_obj = _eia_h(issue_text, graph_db)
         except Exception:
             _anchors_obj = None
@@ -5832,8 +6078,14 @@ def generate_v1r_brief(
     # caller, was ranked below lexical stats.py and dropped from the top-5.)
     _issue_named = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _issue_named:
+
         def _rf(r):
-            return (r.get("path") or r.get("file") or r.get("file_path") or "").replace("\\", "/").lstrip("/")
+            return (
+                (r.get("path") or r.get("file") or r.get("file_path") or "")
+                .replace("\\", "/")
+                .lstrip("/")
+            )
+
         _named = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _issue_named.items()}
         _have = {_rf(r) for r in top_records}
         _by_path = {_rf(r): r for r in v74.ranked_full}
@@ -5842,16 +6094,20 @@ def generate_v1r_brief(
         for fp in sorted(_named):
             if fp in _have:
                 continue
-            if fp in _by_path:                       # retrieved-but-cut -> pull to front
+            if fp in _by_path:  # retrieved-but-cut -> pull to front
                 _rec = dict(_by_path[fp])
-                _rec["_exact_issue_named"] = True    # survive the localize re-rank at :3397
+                _rec["_exact_issue_named"] = True  # survive the localize re-rank at :3397
                 _promote.append(_rec)
-            else:                                    # recall miss -> synthesize a top record
-                _promote.append({
-                    "path": fp, "score": _top_score + 0.01,
-                    "functions": _named[fp][:3], "witnesses": [],
-                    "_exact_issue_named": True,
-                })
+            else:  # recall miss -> synthesize a top record
+                _promote.append(
+                    {
+                        "path": fp,
+                        "score": _top_score + 0.01,
+                        "functions": _named[fp][:3],
+                        "witnesses": [],
+                        "_exact_issue_named": True,
+                    }
+                )
         if _promote:
             top_records = _promote[:3] + top_records
 
@@ -5990,8 +6246,10 @@ def generate_v1r_brief(
             # cycler/validate_marker). This runs in-container AFTER the wrapper's
             # upload, so its write is authoritative for every downstream consumer.
             import json as _json_anch
+
             if _anchors_obj is None:  # hoisted single-source extraction (2026-06-10)
                 from groundtruth.pretask.anchors import extract_issue_anchors as _eia
+
                 _anchors_obj = _eia(issue_text, graph_db)
             # Oracle Stage 1: the issue-as-SPEC obligations + unresolved_code_symbols
             # (F2) ride the SAME already-shipped artifact. The spec extractor is a
@@ -6001,10 +6259,12 @@ def generate_v1r_brief(
             try:
                 if _obligations_v2_on():
                     from groundtruth.pretask.spec import extract_spec_v2 as _extract_spec
+
                     _spec = _extract_spec(issue_text)
                     _obligations = _spec.to_serializable(version=2)
                 else:
                     from groundtruth.pretask.spec import extract_spec as _extract_spec
+
                     _spec = _extract_spec(issue_text)
                     _obligations = _spec.to_serializable()
             except Exception:
@@ -6016,13 +6276,14 @@ def generate_v1r_brief(
                 "title_symbols": sorted(getattr(_anchors_obj, "title_symbols", set())),
                 "code_symbols": sorted(getattr(_anchors_obj, "code_symbols", set())),
                 "unresolved_code_symbols": sorted(
-                    getattr(_anchors_obj, "unresolved_code_symbols", set())),
-                "symbol_provenance": dict(sorted(
-                    (getattr(_anchors_obj, "symbol_provenance", {}) or {}).items()
-                )),
-                "path_provenance": dict(sorted(
-                    (getattr(_anchors_obj, "path_provenance", {}) or {}).items()
-                )),
+                    getattr(_anchors_obj, "unresolved_code_symbols", set())
+                ),
+                "symbol_provenance": dict(
+                    sorted((getattr(_anchors_obj, "symbol_provenance", {}) or {}).items())
+                ),
+                "path_provenance": dict(
+                    sorted((getattr(_anchors_obj, "path_provenance", {}) or {}).items())
+                ),
                 "obligations": _obligations,
             }
             # Every anchors artifact is task-bound, regardless of whether the
@@ -6030,6 +6291,7 @@ def generate_v1r_brief(
             # this identity to reject a stale canonical filename from another
             # issue; obligations_version remains the conditional schema marker.
             import hashlib as _hashlib_anch
+
             _anch_payload["issue_sha256"] = _hashlib_anch.sha256(
                 issue_text.encode("utf-8")
             ).hexdigest()
@@ -6047,6 +6309,7 @@ def generate_v1r_brief(
             for _ap in _anch_targets:
                 try:
                     import tempfile as _tempfile_anch
+
                     _ad = os.path.dirname(_ap) or "."
                     _afd, _atmp = _tempfile_anch.mkstemp(
                         prefix=f".{os.path.basename(_ap)}.", dir=_ad
@@ -6071,8 +6334,9 @@ def generate_v1r_brief(
                     break
                 except OSError:
                     continue
-            _loc = localize(issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj,
-                           repo_root=repo_root)
+            _loc = localize(
+                issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj, repo_root=repo_root
+            )
         except Exception:
             _loc = None
     if _loc and _loc.candidates:
@@ -6083,9 +6347,7 @@ def generate_v1r_brief(
             cf = cand.file_path
             _relevance = str(getattr(cand, "relevance_grade", "INFO") or "INFO")
             _relevance_by_file[cf] = _relevance
-            _witness_by_file[cf] = (
-                cand.render_witness() if _relevance == "VERIFIED" else ""
-            )
+            _witness_by_file[cf] = cand.render_witness() if _relevance == "VERIFIED" else ""
             _witness_verified_by_file[cf] = _relevance == "VERIFIED"
             _resolution_methods_by_file[cf] = frozenset(
                 str(getattr(witness, "resolution_method", "") or "").strip().lower()
@@ -6112,12 +6374,11 @@ def generate_v1r_brief(
         # lexical hard-negatives, then keep the original lexical order after them.
         # Only verified witnesses jump the queue (correct-or-quiet); name_match
         # witnesses are added but not promoted ahead of lexical winners.
-        _verified_promoted = [
-            p for p in _promoted if _witness_verified_by_file.get(p["path"])
-        ]
+        _verified_promoted = [p for p in _promoted if _witness_verified_by_file.get(p["path"])]
         _unverified_promoted = [
             p for p in _promoted if not _witness_verified_by_file.get(p["path"])
         ]
+
         # Also reorder EXISTING records: a lexical record that the localizer
         # verified-witnessed should sort ahead of a witness-less one.
         def _is_verified_witnessed(rec: dict) -> bool:
@@ -6127,9 +6388,7 @@ def generate_v1r_brief(
                 return True
             p = str(rec.get("path", ""))
             pn = p.replace("\\", "/").lstrip("./").lstrip("/")
-            return bool(
-                _witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn)
-            )
+            return bool(_witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn))
 
         _existing_verified = [r for r in top_records if _is_verified_witnessed(r)]
         _existing_rest = [r for r in top_records if not _is_verified_witnessed(r)]
@@ -6148,9 +6407,7 @@ def generate_v1r_brief(
                 r = _loc_rank_by_file.get(pn)
             return r if r is not None else 10**6
 
-        _all_verified = sorted(
-            _verified_promoted + _existing_verified, key=_loc_rank
-        )
+        _all_verified = sorted(_verified_promoted + _existing_verified, key=_loc_rank)
         top_records = _all_verified + _existing_rest + _unverified_promoted
 
         # GUARANTEE: every verified-witnessed localizer candidate appears in
@@ -6159,7 +6416,7 @@ def generate_v1r_brief(
         # file. GT curates the graph map; the agent navigates.
         # If a verified candidate is in the localizer but ranked below
         # MAX_FILES in top_records, inject it into the top set.
-        _rendered_paths = {str(r.get("path", "")) for r in top_records[:max(max_files, 5)]}
+        _rendered_paths = {str(r.get("path", "")) for r in top_records[: max(max_files, 5)]}
         _rendered_norm = {p.replace("\\", "/").lstrip("./").lstrip("/") for p in _rendered_paths}
         for _ci, cand in enumerate(_loc.candidates[:6]):
             if not cand.has_verified_witness:
@@ -6193,7 +6450,8 @@ def generate_v1r_brief(
             float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0 for r in _rendered_now
         ):
             _sem_pool = [
-                r for r in v74.ranked_full
+                r
+                for r in v74.ranked_full
                 if str(r.get("path", "")) not in {str(x.get("path", "")) for x in top_records}
                 and float(r.get("components", {}).get("sem", 0.0) or 0.0) > 0.0
             ]
@@ -6331,9 +6589,11 @@ def generate_v1r_brief(
     # not dropped). Membership only; ordering of the rest is untouched.
     if top_records and v74 and getattr(v74, "ranked_full", None):
         _exact = [
-            r for r in v74.ranked_full
+            r
+            for r in v74.ranked_full
             if float((r.get("components") or {}).get("path", 0.0) or 0.0) >= 0.999
-            and str(r.get("path", "")) and not _is_non_source_candidate_path(str(r.get("path", "")))
+            and str(r.get("path", ""))
+            and not _is_non_source_candidate_path(str(r.get("path", "")))
         ]
         if _exact:
             _win = {str(r.get("path", "")) for r in top_records[:max_files]}
@@ -6425,10 +6685,11 @@ def generate_v1r_brief(
             def _verified_key(rec: dict) -> int:
                 p = str(rec.get("path", ""))
                 pn = p.replace("\\", "/").lstrip("./").lstrip("/")
-                return 0 if (
-                    _witness_verified_by_file.get(p)
-                    or _witness_verified_by_file.get(pn)
-                ) else 1
+                return (
+                    0
+                    if (_witness_verified_by_file.get(p) or _witness_verified_by_file.get(pn))
+                    else 1
+                )
 
             # Among verified-witnessed files, the LOCALIZER's rank is authoritative
             # and MUST dominate keyword count — otherwise a hub (plugins.py) with
@@ -6476,8 +6737,10 @@ def generate_v1r_brief(
     # SWERank ICLR 2025 (verified witness hard-negative), §4 (content + gate, not reach).
     _ein = _exact_issue_named_files(issue_text, graph_db, issue_anchors=_anchors_obj)
     if _ein:
+
         def _rfp(r):
             return (r.get("path") or r.get("file") or "").replace("\\", "/").lstrip("/")
+
         _ein_n = {f.replace("\\", "/").lstrip("/"): fns for f, fns in _ein.items()}
         _bp = {_rfp(r): r for r in v74.ranked_full}
         # Native retrieval rank by normalized path (0 = retrieval's #1). Used to detect
@@ -6501,9 +6764,9 @@ def generate_v1r_brief(
                 return True
             return False
 
-        _front: list[dict] = []   # corroborated -> keep front-promotion
-        _back: list[dict] = []    # coincidence -> append below native top, capped
-        for _fp in sorted(_ein_n):                               # DETERMINISM (B5-4): dict-from-set order
+        _front: list[dict] = []  # corroborated -> keep front-promotion
+        _back: list[dict] = []  # coincidence -> append below native top, capped
+        for _fp in sorted(_ein_n):  # DETERMINISM (B5-4): dict-from-set order
             if _fp in _in_top:
                 # Preserve the trusted exact-name provenance on an already-present
                 # record. Later vendor filtering can remove its stronger sibling;
@@ -6513,8 +6776,13 @@ def generate_v1r_brief(
                     if _rfp(_existing_record) == _fp:
                         _existing_record["_exact_issue_named"] = True
                 continue
-            _r = _bp.get(_fp) or {"path": _fp, "score": _topsc + 0.01,
-                                  "functions": _ein_n[_fp][:3], "witnesses": [], "_exact_issue_named": True}
+            _r = _bp.get(_fp) or {
+                "path": _fp,
+                "score": _topsc + 0.01,
+                "functions": _ein_n[_fp][:3],
+                "witnesses": [],
+                "_exact_issue_named": True,
+            }
             if _is_corroborated(_fp, _ein_n[_fp]):
                 _front.append(_r)
             else:
@@ -6530,12 +6798,14 @@ def generate_v1r_brief(
             top_records = _front + top_records + _back[:_MAX_COINCIDENCE_INJ]
         else:
             top_records = _front + top_records
-        _seen = set(); _dedup = []
+        _seen = set()
+        _dedup = []
         for _r in top_records:
             _k = _rfp(_r)
             if _k in _seen:
                 continue
-            _seen.add(_k); _dedup.append(_r)
+            _seen.add(_k)
+            _dedup.append(_r)
         top_records = _dedup
     # VENDORED / DEMO demote (root cause C, 2026-06-17) — FAIL-CLOSED chokepoint.
     # The upstream candidate filter drops test/demo paths, but the LATER injection
@@ -6550,7 +6820,8 @@ def generate_v1r_brief(
     # keep the pre-filter records (never collapse to a blank brief), mirroring the
     # upstream candidate-filter fallback.
     _kept = [
-        r for r in top_records
+        r
+        for r in top_records
         if not _is_non_source_candidate_path(r.get("path", "") or "")
         and not _is_test_or_demo(r.get("path", "") or "")
         and not _is_vendored_path(r.get("path", "") or "")
@@ -6579,7 +6850,9 @@ def generate_v1r_brief(
             repo_root,
             _words,
         )
-        func_names = _top_function_names(graph_db, path, issue_terms=_words, code_symbols=_code_syms)
+        func_names = _top_function_names(
+            graph_db, path, issue_terms=_words, code_symbols=_code_syms
+        )
         contract = _caller_contract_for_file(graph_db, path, repo_root, func_names)
         contract_props = contract_line(graph_db, path, func_names)
         siblings = _sibling_context(graph_db, path, func_names)
@@ -6597,9 +6870,7 @@ def generate_v1r_brief(
         # carry either depending on which stage admitted the candidate.
         _pn = path.replace("\\", "/").lstrip("./").lstrip("/")
         _wit = _witness_by_file.get(path) or _witness_by_file.get(_pn) or ""
-        _wit_ver = bool(
-            _witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn)
-        )
+        _wit_ver = bool(_witness_verified_by_file.get(path) or _witness_verified_by_file.get(_pn))
         _wit_conf = _loc_conf_by_file.get(path) or _loc_conf_by_file.get(_pn) or 0.0
         _relevance = _relevance_by_file.get(path) or _relevance_by_file.get(_pn) or ""
         if not _relevance:
@@ -6624,16 +6895,14 @@ def generate_v1r_brief(
                     "historical": float(_comps.get("frame", 0.0) or 0.0),
                 }
                 _relevance = (
-                    "WARNING" if sum(value > 0 for value in _classes.values()) >= 2
-                    else "INFO"
+                    "WARNING" if sum(value > 0 for value in _classes.values()) >= 2 else "INFO"
                 )
         # v74 anchor proximity for this candidate (edge-independent issue-subject
         # signal) — carried onto the FileEntry so _entry_confidence_tier can keep an
         # anchor-matched file out of the [INFO] drop (BUG-3). Records are dicts with a
         # `components` sub-dict; fall back to a flat key, then 0.0.
         _aprox = float(
-            (rec.get("components") or {}).get("anchor_prox", rec.get("anchor_prox", 0.0))
-            or 0.0
+            (rec.get("components") or {}).get("anchor_prox", rec.get("anchor_prox", 0.0)) or 0.0
         )
         entries.append(
             FileEntry(
@@ -6668,13 +6937,18 @@ def generate_v1r_brief(
         # outside `.files`/localization_proof.
         entries = entries[:max_files]
         _loc_header, _loc_primary, _loc_tier = _localization_header_for_entries(
-            _loc, graph_db, issue_text, entries,
+            _loc,
+            graph_db,
+            issue_text,
+            entries,
         )
     else:
         # Preserve the historical full renderer exactly when the kill-switch is
         # off. Candidate-population alignment is a Profile-2/minimal behavior.
         _loc_header, _loc_primary = _localization_header(
-            _loc, graph_db, issue_text,
+            _loc,
+            graph_db,
+            issue_text,
         )
         _loc_tier = _localization_confidence_tier(_loc_header)
     if _loc_tier == "high" and _loc_header and _loc_primary and entries:
@@ -6692,13 +6966,19 @@ def generate_v1r_brief(
     # issue) vs a tier/plumbing bug. stderr → captured to gt_brief_stderr.log.
     try:
         import sys as _sys
-        _ap_cov = sum(1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR)
+
+        _ap_cov = sum(
+            1 for e in entries if getattr(e, "anchor_prox", 0.0) >= _ANCHOR_PROX_WARN_FLOOR
+        )
         _ap_dump = ", ".join(
-            f"{os.path.basename(e.path)}:ap={getattr(e,'anchor_prox',0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
+            f"{os.path.basename(e.path)}:ap={getattr(e, 'anchor_prox', 0.0):.3f}:tier={_entry_confidence_tier(e, issue_text)}"
             for e in entries[:8]
         )
-        print(f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
-              file=_sys.stderr, flush=True)
+        print(
+            f"[GT_META] BUG3_ANCHOR_PROX entries={len(entries)} ap_ge_floor={_ap_cov} | {_ap_dump}",
+            file=_sys.stderr,
+            flush=True,
+        )
     except Exception:
         pass
 
@@ -6713,12 +6993,14 @@ def generate_v1r_brief(
     # content, so no BRIEFING measurement obligation.
     try:
         import sys as _sys_nc
+
         _nc = int(getattr(_loc, "n_components", 0) or 0)
         _nc_chains = len(getattr(_loc, "scope_chains", None) or [])
         print(
             f"[GT_META] SCOPE_COMPONENTS n_components={_nc:.8f} "
             f"rendered_chains={_nc_chains:.8f} fragmented={1.0 if _nc > 1 else 0.0:.8f}",
-            file=_sys_nc.stderr, flush=True,
+            file=_sys_nc.stderr,
+            flush=True,
         )
     except Exception:
         pass
@@ -6945,10 +7227,10 @@ def generate_v1r_brief(
     if _brief_minimal_on():
         _before_minimal = brief_text
         _delivered_pre_reduction = len(
-            _model_visible_localization_entries(_before_minimal, _loc_files))
+            _model_visible_localization_entries(_before_minimal, _loc_files)
+        )
         brief_text = _reduce_brief_to_minimal(brief_text)
-        _control_participation = _brief_minimal_participation(
-            _before_minimal, brief_text)
+        _control_participation = _brief_minimal_participation(_before_minimal, brief_text)
 
     # --- L1 signal-provenance counts (observability; no ranking effect) ---
     # Count over the DELIVERED candidate set (final-byte joined; identical to `.files`).
@@ -6964,17 +7246,30 @@ def generate_v1r_brief(
     _aligned_records = [_rec_by_path.get(e.path, {}) for e in _delivered]
     if os.environ.get("GT_DEBUG_L1") == "1":
         import sys as _sys_dbg
-        _comp = [(str(_r.get("path", ""))[-44:], {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()})
-                 for _r in top_records[:5]]
-        _join = [(getattr(e, "path", "")[-44:], "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS")
-                 for e in _delivered[:8]]
+
+        _comp = [
+            (
+                str(_r.get("path", ""))[-44:],
+                {k: round(float(v), 3) for k, v in (_r.get("components") or {}).items()},
+            )
+            for _r in top_records[:5]
+        ]
+        _join = [
+            (
+                getattr(e, "path", "")[-44:],
+                "MATCH" if getattr(e, "path", "") in _rec_by_path else "MISS",
+            )
+            for e in _delivered[:8]
+        ]
         print(f"[GT_DEBUG_L1] ranked_full_components={_comp}", file=_sys_dbg.stderr, flush=True)
         print(f"[GT_DEBUG_L1] delivered_vs_record_join={_join}", file=_sys_dbg.stderr, flush=True)
-        print(f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER','?')}", file=_sys_dbg.stderr, flush=True)
-    try:
-        _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(
-            graph_db, _delivered, _aligned_records
+        print(
+            f"[GT_DEBUG_L1] n_top_records={len(top_records)} n_delivered={len(_delivered)} embedder={os.environ.get('GT_FORCE_ONNX_EMBEDDER', '?')}",
+            file=_sys_dbg.stderr,
+            flush=True,
         )
+    try:
+        _ge, _sem_c, _struct_c, _fts5_c = _l1_signal_counts(graph_db, _delivered, _aligned_records)
     except Exception:
         _ge = _sem_c = _struct_c = _fts5_c = 0
 
@@ -7035,7 +7330,9 @@ def generate_v1r_brief(
                 continue
         _proof_path = str(getattr(_e, "path", "") or "")
         _components = _terminal_acquisition_components(
-            _components, _proof_path, body_paths=_terminal_body_paths,
+            _components,
+            _proof_path,
+            body_paths=_terminal_body_paths,
         )
         # ACQ SOURCE-5 (cochange_history) + INFLUENCE-5 (cochange_prior): the
         # candidate's mined co-change neighbours (its "Also changes: …" line) are
@@ -7043,50 +7340,52 @@ def generate_v1r_brief(
         # proof — so both features sat dark on every ordinary localization
         # candidate. Stamp components["cochange"] and a self-sealed primary-path
         # witness here (bridge candidates keep their own sealed witness untouched).
-        _bridge_cochange_ev = (
-            _r.get("cochange_evidence") if isinstance(_r, dict) else None
-        )
+        _bridge_cochange_ev = _r.get("cochange_evidence") if isinstance(_r, dict) else None
         _cochange_ev, _cc_for_proof = _primary_cochange_support(
             candidate_path=_proof_path,
             entry_co_changes=getattr(_e, "co_changes", None),
             components=_components,
             bridge_evidence=_bridge_cochange_ev,
         )
-        _localization_proof.append({
-            "candidate_id": _localization_candidate_id(
-                _proof_path),
-            "rank": _i,
-            "path": _proof_path,
-            "score": float(getattr(_e, "score", 0.0) or 0.0),
-            "function_names": list(getattr(_e, "function_names", []) or [])[:8],
-            "witness": getattr(_e, "witness", "") or "",
-            "witness_verified": bool(getattr(_e, "witness_verified", False)),
-            "relevance_grade": str(getattr(_e, "relevance_grade", "INFO") or "INFO"),
-            "localizer_confidence": float(getattr(_e, "localizer_confidence", 0.0) or 0.0),
-            "anchor_prox": float(getattr(_e, "anchor_prox", 0.0) or 0.0),
-            "components": _components,
-            "semantic_component": float(_components.get("sem", 0.0) or 0.0),
-            "lex_component": float(_components.get("lex", 0.0) or 0.0),
-            "reach_component": float(_components.get("reach", 0.0) or 0.0),
-            "path_component": float(_components.get("path", 0.0) or 0.0),
-            "witness_component": float(_components.get("witness", 0.0) or 0.0),
-            "entered_via": str(_r.get("entered_via", "") if isinstance(_r, dict) else ""),
-            "cochange_evidence": (
-                _cochange_ev if _components.get("cochange", 0.0) > 0.0 else None
-            ),
-            "acquisition_sources": _candidate_acquisition_sources(
-                graph_db,
-                repo_root,
-                str(getattr(_e, "path", "") or ""),
-                _resolution_methods_by_file.get(
+        _localization_proof.append(
+            {
+                "candidate_id": _localization_candidate_id(_proof_path),
+                "rank": _i,
+                "path": _proof_path,
+                "score": float(getattr(_e, "score", 0.0) or 0.0),
+                "function_names": list(getattr(_e, "function_names", []) or [])[:8],
+                "witness": getattr(_e, "witness", "") or "",
+                "witness_verified": bool(getattr(_e, "witness_verified", False)),
+                "relevance_grade": str(getattr(_e, "relevance_grade", "INFO") or "INFO"),
+                "localizer_confidence": float(getattr(_e, "localizer_confidence", 0.0) or 0.0),
+                "anchor_prox": float(getattr(_e, "anchor_prox", 0.0) or 0.0),
+                "components": _components,
+                "semantic_component": float(_components.get("sem", 0.0) or 0.0),
+                "lex_component": float(_components.get("lex", 0.0) or 0.0),
+                "reach_component": float(_components.get("reach", 0.0) or 0.0),
+                "path_component": float(_components.get("path", 0.0) or 0.0),
+                "witness_component": float(_components.get("witness", 0.0) or 0.0),
+                "entered_via": str(_r.get("entered_via", "") if isinstance(_r, dict) else ""),
+                "cochange_evidence": (
+                    _cochange_ev if _components.get("cochange", 0.0) > 0.0 else None
+                ),
+                "acquisition_sources": _candidate_acquisition_sources(
+                    graph_db,
+                    repo_root,
                     str(getattr(_e, "path", "") or ""),
                     _resolution_methods_by_file.get(
-                        str(getattr(_e, "path", "") or "").replace("\\", "/").lstrip("./").lstrip("/"),
-                        frozenset(),
+                        str(getattr(_e, "path", "") or ""),
+                        _resolution_methods_by_file.get(
+                            str(getattr(_e, "path", "") or "")
+                            .replace("\\", "/")
+                            .lstrip("./")
+                            .lstrip("/"),
+                            frozenset(),
+                        ),
                     ),
                 ),
-            ),
-        })
+            }
+        )
         # Data-lineage pointer for the primary-path co-change witness only. Bridge
         # candidates (``_cc_for_proof is None``) keep their exact prior proof shape.
         if _cc_for_proof is not None:
@@ -7115,31 +7414,44 @@ def generate_v1r_brief(
             for _i, _e in enumerate(_delivered):
                 _np = _norm_p(getattr(_e, "path", ""))
                 _live_sem = float(_sem_components[_i]) if _i < len(_sem_components) else 0.0
-                _cons_sem = float((_norm_rec.get(_np, {}).get("components", {}) or {}).get("sem", 0.0) or 0.0)
+                _cons_sem = float(
+                    (_norm_rec.get(_np, {}).get("components", {}) or {}).get("sem", 0.0) or 0.0
+                )
                 _routes = list(getattr(_e, "routes", []) or [])
                 _ev = getattr(_e, "entered_via", "") or ""
                 if _ev and _ev not in _routes:
                     _routes.append(_ev)
-                _rendered_snap.append({
-                    "candidate_id": f"{_np}:{getattr(_e, 'start_line', 0) or 0}:"
-                                    f"{getattr(_e, 'symbol', '') or os.path.basename(_np)}",
-                    "path": getattr(_e, "path", ""),
-                    "live_join": "MATCH" if getattr(_e, "path", "") in _rec_by_path else "MISS",
-                    "live_sem": _live_sem,
-                    "consistent_sem": _cons_sem,
-                    "routes": _routes,
-                })
-            _sem_snap = [{
-                "candidate_id": f"{_norm_p(_r.get('path', ''))}:0:"
-                                f"{os.path.basename(_norm_p(_r.get('path', '')))}",
-                "path": _r.get("path", ""),
-                "sem": float((_r.get("components", {}) or {}).get("sem", 0.0) or 0.0),
-                "components": _r.get("components", {}),
-            } for _r in top_records]
+                _rendered_snap.append(
+                    {
+                        "candidate_id": f"{_np}:{getattr(_e, 'start_line', 0) or 0}:"
+                        f"{getattr(_e, 'symbol', '') or os.path.basename(_np)}",
+                        "path": getattr(_e, "path", ""),
+                        "live_join": "MATCH" if getattr(_e, "path", "") in _rec_by_path else "MISS",
+                        "live_sem": _live_sem,
+                        "consistent_sem": _cons_sem,
+                        "routes": _routes,
+                    }
+                )
+            _sem_snap = [
+                {
+                    "candidate_id": f"{_norm_p(_r.get('path', ''))}:0:"
+                    f"{os.path.basename(_norm_p(_r.get('path', '')))}",
+                    "path": _r.get("path", ""),
+                    "sem": float((_r.get("components", {}) or {}).get("sem", 0.0) or 0.0),
+                    "components": _r.get("components", {}),
+                }
+                for _r in top_records
+            ]
             os.makedirs(_audit_dir, exist_ok=True)
-            with open(os.path.join(_audit_dir, "10_candidates_rendered.json"), "w", encoding="utf-8") as _f:
+            with open(
+                os.path.join(_audit_dir, "10_candidates_rendered.json"), "w", encoding="utf-8"
+            ) as _f:
                 _json_a.dump(_rendered_snap, _f, indent=2, default=str)
-            with open(os.path.join(_audit_dir, "08_candidates_semantic_scored.json"), "w", encoding="utf-8") as _f:
+            with open(
+                os.path.join(_audit_dir, "08_candidates_semantic_scored.json"),
+                "w",
+                encoding="utf-8",
+            ) as _f:
                 _json_a.dump(_sem_snap, _f, indent=2, default=str)
         except Exception:
             pass  # audit snapshot must never affect the brief
@@ -7149,15 +7461,15 @@ def generate_v1r_brief(
     # sees. A PURE READ — brief_text is NOT modified, so the delivered brief bytes are
     # byte-identical whether or not receipts are populated.
     _rendered_candidate_ids = [
-        _localization_candidate_id(str(getattr(_e, "path", "") or ""))
-        for _e in _delivered
+        _localization_candidate_id(str(getattr(_e, "path", "") or "")) for _e in _delivered
     ]
     _block_receipts = (
         _brief_block_receipts(
             brief_text,
             localization_candidate_ids=_rendered_candidate_ids,
         )
-        if _block_receipts_on() else []
+        if _block_receipts_on()
+        else []
     )
     # B-ACQ: seal each rendered candidate's ACQ source contribution to its exact
     # delivered block bytes. PURE metadata mutation on _localization_proof (already a
@@ -7169,7 +7481,8 @@ def generate_v1r_brief(
     # block or no persisted extraction (fail-closed -> obligations attestation UNMEASURED).
     _obligations_record = (
         _build_obligations_record(brief_text, _block_receipts, issue_text)
-        if _block_receipts else {}
+        if _block_receipts
+        else {}
     )
     _control_participation.extend(
         _terminal_pretask_mediator_participation(
@@ -7177,14 +7490,13 @@ def generate_v1r_brief(
             _block_receipts,
             budget_suppressed=_budget_suppressed,
             content_paths=set(getattr(_loc, "content_leg_paths", frozenset()) or ()),
-            content_decision=str(
-                getattr(_loc, "content_leg_decision", "NO_EFFECT") or "NO_EFFECT"),
+            content_decision=str(getattr(_loc, "content_leg_decision", "NO_EFFECT") or "NO_EFFECT"),
             content_reason=str(
                 getattr(_loc, "content_leg_reason", "no_content_candidate")
-                or "no_content_candidate"),
+                or "no_content_candidate"
+            ),
             semantic_anchor_paths=_semantic_anchor_paths,
-            semantic_localizer_paths=set(
-                getattr(_loc, "semantic_body_paths", frozenset()) or ()),
+            semantic_localizer_paths=set(getattr(_loc, "semantic_body_paths", frozenset()) or ()),
         )
     )
 
@@ -7234,9 +7546,7 @@ def generate_v1r_brief(
                 # candidate (importer.py) now reports its real structural
                 # confidence instead of the lexical 0.0.
                 _conf = (
-                    entry.localizer_confidence
-                    if entry.localizer_confidence > 0
-                    else entry.score
+                    entry.localizer_confidence if entry.localizer_confidence > 0 else entry.score
                 )
                 _reason = (
                     f"graph_witness={entry.witness}"
@@ -7276,45 +7586,47 @@ def generate_v1r_brief(
                 except Exception:
                     _wits = []
                 for _w in _wits:
-                    l1_items.append({
-                        "kind": "l1_graph_edge",
-                        "file_path": entry.path,            # the CANDIDATE this edge confirms
-                        "source": "CALLS",
-                        "direction": _w.get("direction"),   # caller | callee
-                        "symbol": _w.get("symbol", ""),
-                        "edge_file": _w.get("file_path", ""),
-                        "line": _w.get("line", 0),
-                        "confidence": 1.0,                  # deterministic edge = fact
-                        "reason": "resolved CALLS edge (deterministic provenance)",
-                    })
+                    l1_items.append(
+                        {
+                            "kind": "l1_graph_edge",
+                            "file_path": entry.path,  # the CANDIDATE this edge confirms
+                            "source": "CALLS",
+                            "direction": _w.get("direction"),  # caller | callee
+                            "symbol": _w.get("symbol", ""),
+                            "edge_file": _w.get("file_path", ""),
+                            "line": _w.get("line", 0),
+                            "confidence": 1.0,  # deterministic edge = fact
+                            "reason": "resolved CALLS edge (deterministic provenance)",
+                        }
+                    )
                 # The PRIMARY confirming witness for this candidate is its first
                 # resolved CALLER (a caller proves the candidate's symbol is a real,
                 # used target — the strongest confirmation). Emit ONE per task: the
                 # first candidate that carries a resolved caller.
                 if not _primary_emitted:
-                    _caller = next(
-                        (w for w in _wits if w.get("direction") == "caller"), None
-                    )
+                    _caller = next((w for w in _wits if w.get("direction") == "caller"), None)
                     if _caller is not None:
-                        l1_items.append({
-                            "kind": "l1_confirming_edge",
-                            "file_path": entry.path,
-                            "symbol": _caller.get("symbol", ""),
-                            "source": "CALLS",
-                            "edge_file": _caller.get("file_path", ""),
-                            "line": _caller.get("line", 0),
-                            "confidence": 1.0,
-                            "reason": "resolved cross-file caller (deterministic)",
-                        })
+                        l1_items.append(
+                            {
+                                "kind": "l1_confirming_edge",
+                                "file_path": entry.path,
+                                "symbol": _caller.get("symbol", ""),
+                                "source": "CALLS",
+                                "edge_file": _caller.get("file_path", ""),
+                                "line": _caller.get("line", 0),
+                                "confidence": 1.0,
+                                "reason": "resolved cross-file caller (deterministic)",
+                            }
+                        )
                         _primary_emitted = True
 
             _call_edge_count = sum(
-                1 for it in l1_items
+                1
+                for it in l1_items
                 if it.get("kind") == "l1_graph_edge" and it.get("source") == "CALLS"
             )
             _confirming = next(
-                (it.get("file_path") for it in l1_items
-                 if it.get("kind") == "l1_confirming_edge"),
+                (it.get("file_path") for it in l1_items if it.get("kind") == "l1_confirming_edge"),
                 None,
             )
             structured = {
@@ -7340,7 +7652,9 @@ def generate_v1r_brief(
                 "acquisition_proof": _acquisition_proof,
                 "delivered_graph_edge_count": _NOT_EVALUABLE if _d_ge is None else _d_ge,
                 "delivered_semantic_signal_count": _NOT_EVALUABLE if _d_sem is None else _d_sem,
-                "delivered_structural_signal_count": _NOT_EVALUABLE if _d_struct is None else _d_struct,
+                "delivered_structural_signal_count": _NOT_EVALUABLE
+                if _d_struct is None
+                else _d_struct,
                 "delivered_fts5_signal_count": _NOT_EVALUABLE if _d_fts5 is None else _d_fts5,
                 "delivered_candidate_count": _NOT_EVALUABLE if _d_count is None else _d_count,
                 # Embedder-CONSUMPTION metrics (same definitions as the

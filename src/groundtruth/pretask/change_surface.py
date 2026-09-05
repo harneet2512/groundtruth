@@ -97,49 +97,138 @@ _ROLE_ORDER = (ROLE_IMPLEMENTATION, ROLE_CONFIG, ROLE_REGISTRATION, ROLE_TEST)
 
 # Non-negotiable gates (the mutation-check targets).
 _MIN_SIBLINGS = 2  # a "convention" needs >=2 parallel siblings
-_MIN_SIGNALS = 2   # every emitted fact needs >=2 independent evidence signals
+_MIN_SIGNALS = 2  # every emitted fact needs >=2 independent evidence signals
 
 _MIN_ENTITY_LEN = 3
-_MAX_WALK_FILES = 20000    # safety cap on the tree walk
-_MAX_REGISTRY_SCAN = 800   # bound registry content scanning
-_MAX_FILE_BYTES = 262144   # 256 KiB read cap per file
+_MAX_WALK_FILES = 20000  # safety cap on the tree walk
+_MAX_REGISTRY_SCAN = 800  # bound registry content scanning
+_MAX_FILE_BYTES = 262144  # 256 KiB read cap per file
 _MAX_EVIDENCE_LINES = 6
 
 # Source-language extensions -> an implementation surface. Deliberately broad and
 # language-agnostic (mirrors the anchors path-extension set).
-_SOURCE_EXTS: frozenset[str] = frozenset({
-    "py", "pyi", "js", "jsx", "ts", "tsx", "go", "rs", "java", "kt", "kts",
-    "rb", "php", "cs", "swift", "scala", "clj", "ex", "exs", "lua", "m", "mm",
-    "c", "h", "cc", "hh", "cpp", "hpp", "cxx",
-})
+_SOURCE_EXTS: frozenset[str] = frozenset(
+    {
+        "py",
+        "pyi",
+        "js",
+        "jsx",
+        "ts",
+        "tsx",
+        "go",
+        "rs",
+        "java",
+        "kt",
+        "kts",
+        "rb",
+        "php",
+        "cs",
+        "swift",
+        "scala",
+        "clj",
+        "ex",
+        "exs",
+        "lua",
+        "m",
+        "mm",
+        "c",
+        "h",
+        "cc",
+        "hh",
+        "cpp",
+        "hpp",
+        "cxx",
+    }
+)
 # Data/config extensions -> a config/schema surface.
-_DATA_EXTS: frozenset[str] = frozenset({
-    "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "properties", "xml", "env",
-})
+_DATA_EXTS: frozenset[str] = frozenset(
+    {
+        "json",
+        "yaml",
+        "yml",
+        "toml",
+        "ini",
+        "cfg",
+        "conf",
+        "properties",
+        "xml",
+        "env",
+    }
+)
 _TEXT_EXTS = _SOURCE_EXTS | _DATA_EXTS
 
 # Generic structural path tokens -> a config/schema role when they are the FIXED
 # (non-varying) part of a slot. Conventions, not framework names.
-_CONFIG_TOKENS: frozenset[str] = frozenset({
-    "config", "configs", "conf", "settings", "setting", "schema", "schemas",
-    "defaults", "default",
-})
+_CONFIG_TOKENS: frozenset[str] = frozenset(
+    {
+        "config",
+        "configs",
+        "conf",
+        "settings",
+        "setting",
+        "schema",
+        "schemas",
+        "defaults",
+        "default",
+    }
+)
 # Test-shaped path tokens.
-_TEST_TOKENS: frozenset[str] = frozenset({
-    "test", "tests", "spec", "specs", "testing", "__tests__",
-})
+_TEST_TOKENS: frozenset[str] = frozenset(
+    {
+        "test",
+        "tests",
+        "spec",
+        "specs",
+        "testing",
+        "__tests__",
+    }
+)
 # Structural filename tokens that are never the feature ENTITY (registry/module
 # scaffolding). Dropped from member sets so they never masquerade as a sibling.
-_NON_ENTITY_TOKENS: frozenset[str] = frozenset({
-    "init", "__init__", "index", "main", "mod", "lib", "base", "common",
-    "utils", "util", "core", "package", "registry", "factory", "__main__",
-})
+_NON_ENTITY_TOKENS: frozenset[str] = frozenset(
+    {
+        "init",
+        "__init__",
+        "index",
+        "main",
+        "mod",
+        "lib",
+        "base",
+        "common",
+        "utils",
+        "util",
+        "core",
+        "package",
+        "registry",
+        "factory",
+        "__main__",
+    }
+)
 # Directories never worth walking.
-_SKIP_DIRS: frozenset[str] = frozenset({
-    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
-    "env", ".env", "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
-    ".idea", ".vscode", "vendor", "target", ".eggs", "site-packages",
-})
+_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "env",
+        ".env",
+        "dist",
+        "build",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".idea",
+        ".vscode",
+        "vendor",
+        "target",
+        ".eggs",
+        "site-packages",
+    }
+)
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SUBSEP_RE = re.compile(r"[_\-.]+")
@@ -159,20 +248,76 @@ _ENTITY_BLOCKLIST: frozenset[str] = (
 # that actually EXISTS as a sibling member (a repo genuinely shipping a
 # ``custom``/``mock``/``default`` member) is admitted through the
 # ``existing_sibling_member`` signal instead — data always beats the blocklist.
-_GENERIC_DESCRIPTORS: frozenset[str] = frozenset({
-    "additional", "another", "extra", "further",
-    "custom", "customized", "customizable", "dedicated", "separate",
-    "alternative", "alternate", "different", "similar", "corresponding",
-    "equivalent", "matching", "related", "generic", "special", "specific",
-    "particular", "proper", "appropriate", "suitable", "arbitrary",
-    "optional", "configurable", "pluggable", "extensible", "reusable",
-    "flexible", "better", "improved", "enhanced", "simple", "simpler",
-    "basic", "minimal", "lightweight", "modern", "legacy", "internal",
-    "external", "initial", "final", "temporary", "permanent", "second",
-    "third", "single", "multiple", "shared", "standalone", "unified",
-    "updated", "upgraded", "default", "standard", "dummy", "fake", "mock",
-    "stub", "sample", "experimental", "native", "builtin",
-})
+_GENERIC_DESCRIPTORS: frozenset[str] = frozenset(
+    {
+        "additional",
+        "another",
+        "extra",
+        "further",
+        "custom",
+        "customized",
+        "customizable",
+        "dedicated",
+        "separate",
+        "alternative",
+        "alternate",
+        "different",
+        "similar",
+        "corresponding",
+        "equivalent",
+        "matching",
+        "related",
+        "generic",
+        "special",
+        "specific",
+        "particular",
+        "proper",
+        "appropriate",
+        "suitable",
+        "arbitrary",
+        "optional",
+        "configurable",
+        "pluggable",
+        "extensible",
+        "reusable",
+        "flexible",
+        "better",
+        "improved",
+        "enhanced",
+        "simple",
+        "simpler",
+        "basic",
+        "minimal",
+        "lightweight",
+        "modern",
+        "legacy",
+        "internal",
+        "external",
+        "initial",
+        "final",
+        "temporary",
+        "permanent",
+        "second",
+        "third",
+        "single",
+        "multiple",
+        "shared",
+        "standalone",
+        "unified",
+        "updated",
+        "upgraded",
+        "default",
+        "standard",
+        "dummy",
+        "fake",
+        "mock",
+        "stub",
+        "sample",
+        "experimental",
+        "native",
+        "builtin",
+    }
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -252,8 +397,8 @@ class _Slot:
 
     ext: str
     position: int
-    constants: tuple[str, ...]          # the fixed (non-member) tokens
-    members: dict[str, str]             # member token -> rel path (sorted-first wins)
+    constants: tuple[str, ...]  # the fixed (non-member) tokens
+    members: dict[str, str]  # member token -> rel path (sorted-first wins)
     role: str = ""
 
     @property
@@ -275,7 +420,11 @@ class _Group:
 # --------------------------------------------------------------------------- #
 def _flag_enabled() -> bool:
     return os.environ.get("GT_CHANGE_SURFACE", "").strip().lower() not in (
-        "", "0", "false", "no", "off",
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -336,7 +485,9 @@ def _walk_repo(repo_root: str) -> list[str]:
         return []
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".git"))
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".git")
+        )
         for fn in sorted(filenames):
             _, ext = _split_ext(fn)
             if ext not in _TEXT_EXTS:
@@ -407,9 +558,7 @@ def _graph_facts(
     finally:
         conn.close()
     witnesses = {
-        file_path: tuple(sorted(set(rows), key=lambda row: (
-            row.line, row.identity, row.kind
-        )))
+        file_path: tuple(sorted(set(rows), key=lambda row: (row.line, row.identity, row.kind)))
         for file_path, rows in impl_witness_rows.items()
     }
     return names, impl_files, test_files, witnesses
@@ -435,10 +584,7 @@ def _cochange_coupling(
         return 0
     try:
         try:
-            tbls = {
-                r[0] for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'")
-            }
+            tbls = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if "cochanges" not in tbls:
                 return 0
             t = _posix(str(target_rel)).lstrip("./")
@@ -472,7 +618,7 @@ def _build_slots(files: list[str]) -> list[_Slot]:
         if not tokens:
             continue
         for i, tok in enumerate(tokens):
-            blanked = tuple(tokens[:i]) + (None,) + tuple(tokens[i + 1:])
+            blanked = tuple(tokens[:i]) + (None,) + tuple(tokens[i + 1 :])
             key = (ext, i, blanked)
             member_map = buckets.setdefault(key, {})
             # deterministic: first path wins for a given (slot, member) pair
@@ -489,8 +635,9 @@ def _build_slots(files: list[str]) -> list[_Slot]:
     return slots
 
 
-def _classify_slot(slot: _Slot, impl_files: set[str], test_files: set[str],
-                   have_graph: bool) -> str | None:
+def _classify_slot(
+    slot: _Slot, impl_files: set[str], test_files: set[str], have_graph: bool
+) -> str | None:
     """test_shape > config_schema > implementation. None if not a change surface."""
     const_set = set(slot.constants)
     member_files = set(slot.members.values())
@@ -569,8 +716,8 @@ def _ref_pattern(token: str) -> re.Pattern[str]:
     cap = re.escape(token[:1].upper() + token[1:].lower())
     up = re.escape(token.upper())
     branches = [
-        rf"(?<![A-Za-z0-9]){low}(?![a-z0-9])",    # aws | aws_config | 'aws':
-        rf"(?<![A-Z0-9]){cap}(?![a-z0-9])",       # AwsProvider | handleAwsRequest
+        rf"(?<![A-Za-z0-9]){low}(?![a-z0-9])",  # aws | aws_config | 'aws':
+        rf"(?<![A-Z0-9]){cap}(?![a-z0-9])",  # AwsProvider | handleAwsRequest
         rf"(?<![A-Za-z0-9]){up}(?![A-Za-z0-9])",  # AWS_REGION (strict)
     ]
     return re.compile("|".join(dict.fromkeys(branches)))
@@ -640,8 +787,9 @@ def _code_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def _detect_registry(group: _Group, files: list[str], repo_root: str,
-                     graph_db: "str | None" = None) -> None:
+def _detect_registry(
+    group: _Group, files: list[str], repo_root: str, graph_db: "str | None" = None
+) -> None:
     """Populate group.registry_file / registry_refs: the file whose CODE lines
     cross-reference the MOST distinct group members (>=2). Test-shaped files
     (incl. ``conftest``) are excluded; docstring/comment/prose mentions never
@@ -655,9 +803,13 @@ def _detect_registry(group: _Group, files: list[str], repo_root: str,
         return
     patterns = {m: _ref_pattern(m) for m in members}
     # WS-4b co-change tie-break (doctrine: internal ranking prior, never a delivered fact).
-    _cc_on = os.environ.get(
-        "GT_CHANGE_SURFACE_COCHANGE", "").strip().lower() not in (
-        "", "0", "false", "no", "off")
+    _cc_on = os.environ.get("GT_CHANGE_SURFACE_COCHANGE", "").strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
     _member_paths = {f for s in group.slots for f in s.members.values()} if _cc_on else set()
     best: "tuple[int, int, int, str] | None" = None  # (distinct, n_ref_lines, cc, rel)
     best_refs: dict[str, list[tuple[int, str]]] = {}
@@ -708,8 +860,10 @@ def _is_test_path(rel: str) -> bool:
     base = _posix(rel).rsplit("/", 1)[-1].lower()
     stem, _ext = _split_ext(base)
     return (
-        base.startswith("test_") or base.endswith("_test")
-        or ".test." in base or ".spec." in base
+        base.startswith("test_")
+        or base.endswith("_test")
+        or ".test." in base
+        or ".spec." in base
         or stem == "conftest"  # pytest plumbing imports many siblings — never a registry
     )
 
@@ -718,8 +872,7 @@ def _issue_word_seq(issue_text: str) -> list[str]:
     return [m.group(0).lower() for m in _IDENT_RE.finditer(issue_text or "")]
 
 
-def _entity_candidates(issue_text: str, graph_db: str | None,
-                       known_tokens: set[str]) -> list[str]:
+def _entity_candidates(issue_text: str, graph_db: str | None, known_tokens: set[str]) -> list[str]:
     """Issue tokens admissible as a new-capability entity.
 
     Admitted iff identifier-shaped, >= _MIN_ENTITY_LEN, not English/keyword/verb
@@ -776,8 +929,7 @@ def _entity_links_group(entity: str, word_seq: list[str], group: _Group) -> bool
     return False
 
 
-def _entity_second_signal(entity: str, group: _Group,
-                          known_tokens: set[str]) -> str | None:
+def _entity_second_signal(entity: str, group: _Group, known_tokens: set[str]) -> str | None:
     """The INDEPENDENT second signal an entity needs on top of issue adjacency
     (the F2 two-signal law — adjacency alone is ONE signal and never mints):
 
@@ -804,8 +956,11 @@ def _group_overlap(group: _Group, norm_issue_words: set[str]) -> int:
 
 
 def _issue_span(issue_text: str, entity: str) -> str:
-    m = re.search(r"(?<![A-Za-z0-9])" + re.escape(entity) + r"(?![A-Za-z0-9])",
-                  issue_text or "", re.IGNORECASE)
+    m = re.search(
+        r"(?<![A-Za-z0-9])" + re.escape(entity) + r"(?![A-Za-z0-9])",
+        issue_text or "",
+        re.IGNORECASE,
+    )
     if not m:
         return ""
     lo, hi = max(0, m.start() - 24), min(len(issue_text), m.end() + 24)
@@ -840,8 +995,9 @@ def _role_members(slots: list[_Slot], registry_file: str | None) -> tuple[set[st
     return members, sorted(set(files))
 
 
-def _pick_template(impl_slots: list[_Slot], registry_file: str | None,
-                   impl_files: set[str]) -> tuple[str, str, str] | None:
+def _pick_template(
+    impl_slots: list[_Slot], registry_file: str | None, impl_files: set[str]
+) -> tuple[str, str, str] | None:
     """Choose (directory, template_file, member_token) for the destination.
 
     Directory = the impl dir with the most members; a TIE between directories is
@@ -860,10 +1016,12 @@ def _pick_template(impl_slots: list[_Slot], registry_file: str | None,
     if len(ranked) >= 2 and len(ranked[0][1]) == len(ranked[1][1]):
         return None  # conflicting destination directories -> abstain
     directory, members = ranked[0]
+
     # richest template: prefer a file the graph confirms defines symbols, then lex
     def tkey(item: tuple[str, str]) -> tuple[int, str]:
         _m, f = item
         return (0 if f in impl_files else 1, f)
+
     member_token, template_file = sorted(members.items(), key=tkey)[0]
     return directory, template_file, member_token
 
@@ -926,13 +1084,15 @@ def detect_change_surface(
     for g in groups:
         rs = _role_slots(g)
         tmpl_dirs = sorted({_posix_dir(f) for s in g.slots for f in s.members.values()})
-        result.sibling_groups.append({
-            "members": sorted(g.members),
-            "fixed_tokens": sorted(g.fixed_tokens),
-            "roles": sorted(rs.keys()) + ([ROLE_REGISTRATION] if g.registry_file else []),
-            "directories": tmpl_dirs,
-            "registry_file": g.registry_file,
-        })
+        result.sibling_groups.append(
+            {
+                "members": sorted(g.members),
+                "fixed_tokens": sorted(g.fixed_tokens),
+                "roles": sorted(rs.keys()) + ([ROLE_REGISTRATION] if g.registry_file else []),
+                "directories": tmpl_dirs,
+                "registry_file": g.registry_file,
+            }
+        )
 
     emitted_entities: set[str] = set()
     conflict = False
@@ -955,8 +1115,10 @@ def detect_change_surface(
         matched.sort(key=lambda t: (-t[0], -len(t[1].members), sorted(t[1].fixed_tokens)))
         if len(matched) >= 2:
             (o0, g0), (o1, g1) = matched[0], matched[1]
-            if o0 == o1 and len(g0.members) == len(g1.members) and (
-                sorted(g0.fixed_tokens) != sorted(g1.fixed_tokens)
+            if (
+                o0 == o1
+                and len(g0.members) == len(g1.members)
+                and (sorted(g0.fixed_tokens) != sorted(g1.fixed_tokens))
             ):
                 conflict = True
                 continue
@@ -993,8 +1155,9 @@ def detect_change_surface(
             emitted_entities.add(entity)
 
     result.entities = sorted(emitted_entities)
-    result.missing_roles.sort(key=lambda m: (m.entity, _ROLE_ORDER.index(m.role)
-                                             if m.role in _ROLE_ORDER else 99))
+    result.missing_roles.sort(
+        key=lambda m: (m.entity, _ROLE_ORDER.index(m.role) if m.role in _ROLE_ORDER else 99)
+    )
     result.destinations.sort(key=lambda d: (d.entity, d.suggested_path))
 
     if result.missing_roles or result.destinations:
@@ -1006,8 +1169,7 @@ def detect_change_surface(
     return result
 
 
-def _needs_destination_but_conflicted(entity: str, group: _Group,
-                                      impl_files: set[str]) -> bool:
+def _needs_destination_but_conflicted(entity: str, group: _Group, impl_files: set[str]) -> bool:
     """True when the entity lacks an implementation (so a destination is owed) but
     the destination directory is ambiguous (conflicting convention)."""
     rs = _role_slots(group)
@@ -1020,11 +1182,15 @@ def _needs_destination_but_conflicted(entity: str, group: _Group,
     return _pick_template(impl_slots, group.registry_file, impl_files) is None
 
 
-def _entity_holes(entity: str, group: _Group, issue_text: str,
-                  ent_signals: list[str], impl_files: set[str],
-                  impl_witness_rows: dict[str, tuple[RepositoryWitness, ...]],
-                  repo_root: str,
-                  ) -> tuple[list[MissingRole], NewFileDestination | None]:
+def _entity_holes(
+    entity: str,
+    group: _Group,
+    issue_text: str,
+    ent_signals: list[str],
+    impl_files: set[str],
+    impl_witness_rows: dict[str, tuple[RepositoryWitness, ...]],
+    repo_root: str,
+) -> tuple[list[MissingRole], NewFileDestination | None]:
     """Diff the entity against the group's role template -> MissingRoles (+dest).
 
     ``ent_signals`` are the caller-DERIVED entity admission signals (adjacency +
@@ -1060,10 +1226,17 @@ def _entity_holes(entity: str, group: _Group, issue_text: str,
             f"{len(sibs)} siblings define {role}: " + ", ".join(sibs),
             f"issue names new entity '{entity}' in this family: '{span}'",
         ]
-        out.append(MissingRole(
-            role=role, entity=entity, sibling_files=sibs, issue_span=span,
-            signals=signals, evidence=ev, trust_tier=TRUST_HYPOTHESIS,
-        ))
+        out.append(
+            MissingRole(
+                role=role,
+                entity=entity,
+                sibling_files=sibs,
+                issue_span=span,
+                signals=signals,
+                evidence=ev,
+                trust_tier=TRUST_HYPOTHESIS,
+            )
+        )
 
     # registration — REQUIRES the detected mechanism on top of the entity
     # signals: a registry file whose CODE lines cross-reference >=2 siblings.
@@ -1072,7 +1245,8 @@ def _entity_holes(entity: str, group: _Group, issue_text: str,
     if has_mechanism:
         entity_registered = any(
             _ref_pattern(entity).search(t)
-            for lines in group.registry_refs.values() for _, t in lines
+            for lines in group.registry_refs.values()
+            for _, t in lines
         )
         if not entity_registered:
             signals = [*ent_signals, "registration_mechanism"]
@@ -1087,13 +1261,19 @@ def _entity_holes(entity: str, group: _Group, issue_text: str,
                     f"{len(group.registry_refs)} siblings but not '{entity}'",
                 ]
                 ev += [f"line {ln}: {txt}" for ln, txt in reg_lines]
-                out.append(MissingRole(
-                    role=ROLE_REGISTRATION, entity=entity,
-                    sibling_files=[reg_file],
-                    registration_file=reg_file,
-                    registration_lines=reg_lines, issue_span=span,
-                    signals=signals, evidence=ev, trust_tier=TRUST_HYPOTHESIS,
-                ))
+                out.append(
+                    MissingRole(
+                        role=ROLE_REGISTRATION,
+                        entity=entity,
+                        sibling_files=[reg_file],
+                        registration_file=reg_file,
+                        registration_lines=reg_lines,
+                        issue_span=span,
+                        signals=signals,
+                        evidence=ev,
+                        trust_tier=TRUST_HYPOTHESIS,
+                    )
+                )
 
     # destination — only when the implementation surface is the hole
     dest: NewFileDestination | None = None
@@ -1128,16 +1308,16 @@ def _entity_holes(entity: str, group: _Group, issue_text: str,
                     # becomes a fake ``:1`` citation; if the member is absent
                     # from source, this substrate stays quiet.
                     member_pattern = _ref_pattern(member_token)
-                    for line, source_text in _code_lines(
-                        _read_text(repo_root, template_rel)
-                    ):
+                    for line, source_text in _code_lines(_read_text(repo_root, template_rel)):
                         if member_pattern.search(source_text):
-                            witnesses.append(RepositoryWitness(
-                                file=template_rel,
-                                line=line,
-                                kind="template_lexical_reference",
-                                identity=member_token,
-                            ))
+                            witnesses.append(
+                                RepositoryWitness(
+                                    file=template_rel,
+                                    line=line,
+                                    kind="template_lexical_reference",
+                                    identity=member_token,
+                                )
+                            )
                             break
                 if group.registry_file:
                     registry_rel = _posix(group.registry_file)
@@ -1146,23 +1326,25 @@ def _entity_holes(entity: str, group: _Group, issue_text: str,
                         if not rows:
                             continue
                         line, _text = rows[0]
-                        if (
-                            isinstance(line, int)
-                            and not isinstance(line, bool)
-                            and line > 0
-                        ):
-                            witnesses.append(RepositoryWitness(
-                                file=registry_rel,
-                                line=line,
-                                kind="registration_reference",
-                                identity=member,
-                            ))
+                        if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+                            witnesses.append(
+                                RepositoryWitness(
+                                    file=registry_rel,
+                                    line=line,
+                                    kind="registration_reference",
+                                    identity=member,
+                                )
+                            )
                 witnesses = sorted(set(witnesses))
                 dest = NewFileDestination(
-                    entity=entity, suggested_path=_posix(suggested),
-                    directory=directory, template_file=_posix(template_file),
+                    entity=entity,
+                    suggested_path=_posix(suggested),
+                    directory=directory,
+                    template_file=_posix(template_file),
                     registration_file=_posix(group.registry_file) if group.registry_file else None,
-                    sibling_files=impl_sibs, issue_span=span, evidence=ev,
+                    sibling_files=impl_sibs,
+                    issue_span=span,
+                    evidence=ev,
                     repository_witnesses=witnesses,
                     trust_tier=TRUST_HYPOTHESIS,
                 )

@@ -4,6 +4,7 @@ The objects in this module are deliberately independent of every model-visible
 renderer.  They are safe to persist as a shadow artifact and stable enough to
 compare across processes and revisions.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -318,7 +319,9 @@ def _to_primitive(value: Any) -> Any:
             if not f.name.startswith("_")
         }
     if isinstance(value, Mapping):
-        return {str(k): _to_primitive(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+        return {
+            str(k): _to_primitive(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+        }
     if isinstance(value, (tuple, list, set, frozenset)):
         return [_to_primitive(v) for v in value]
     return value

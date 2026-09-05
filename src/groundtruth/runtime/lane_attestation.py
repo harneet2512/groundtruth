@@ -134,14 +134,16 @@ def build_covering_candidate_input(
         if not isinstance(raw_bytes, bytes):
             raise TypeError("edited source content must be bytes")
         path = str(raw_path).replace("\\", "/")
-        sources.append(EditedSourceInput(
-            path=path,
-            sha256=_sha(raw_bytes),
-            bytes_length=len(raw_bytes),
-            revision=str(revision or ""),
-            artifact_id=_path_artifact_id("edited-source", path),
-            raw_bytes=raw_bytes,
-        ))
+        sources.append(
+            EditedSourceInput(
+                path=path,
+                sha256=_sha(raw_bytes),
+                bytes_length=len(raw_bytes),
+                revision=str(revision or ""),
+                artifact_id=_path_artifact_id("edited-source", path),
+                raw_bytes=raw_bytes,
+            )
+        )
     rendered = rendered_block.encode("utf-8", "surrogatepass")
     return CoveringCandidateInput(
         attribution=attribution,
@@ -156,9 +158,7 @@ def build_covering_candidate_input(
     )
 
 
-def _artifact(
-    artifact_id: str, data: bytes, *, kind: str, revision: str
-) -> ArtifactRef:
+def _artifact(artifact_id: str, data: bytes, *, kind: str, revision: str) -> ArtifactRef:
     return ArtifactRef(kind, artifact_id, _sha(data), revision)
 
 
@@ -248,24 +248,36 @@ def finalize_syntax_attestation(
         ("shipped-suffix.bin", shipped_bytes),
         (source_id, source_bytes),
     )
-    refs = tuple(sorted((
-        _artifact(
-            "syntax-observation.json", observation_bytes,
-            kind="syntax_observation", revision=f"edit:{observation.source_sha256}",
-        ),
-        _artifact(
-            "producer-candidate.bin", rendered_bytes,
-            kind="producer_candidate", revision=f"candidate:{candidate_id}",
-        ),
-        _artifact(
-            "shipped-suffix.bin", shipped_bytes,
-            kind="shipped_suffix", revision=f"seal:{delivery_seal}",
-        ),
-        _artifact(
-            source_id, source_bytes,
-            kind="edited_source", revision=f"edit:{_sha(source_bytes)}",
-        ),
-    )))
+    refs = tuple(
+        sorted(
+            (
+                _artifact(
+                    "syntax-observation.json",
+                    observation_bytes,
+                    kind="syntax_observation",
+                    revision=f"edit:{observation.source_sha256}",
+                ),
+                _artifact(
+                    "producer-candidate.bin",
+                    rendered_bytes,
+                    kind="producer_candidate",
+                    revision=f"candidate:{candidate_id}",
+                ),
+                _artifact(
+                    "shipped-suffix.bin",
+                    shipped_bytes,
+                    kind="shipped_suffix",
+                    revision=f"seal:{delivery_seal}",
+                ),
+                _artifact(
+                    source_id,
+                    source_bytes,
+                    kind="edited_source",
+                    revision=f"edit:{_sha(source_bytes)}",
+                ),
+            )
+        )
+    )
     by_id = {ref.artifact_id: ref for ref in refs}
     complete = (
         observation.verdict == "syntax_error"
@@ -281,9 +293,7 @@ def finalize_syntax_attestation(
         and shipped_bytes in (rendered_bytes, b"\n" + rendered_bytes)
         and delivery_seal == _sha(shipped_bytes)[:16]
         and target.replace("\\", "/") == observation.file_path.replace("\\", "/")
-        and candidate_id == lane_delivery_candidate_id(
-            "edit.syntax", target, shipped_suffix
-        )
+        and candidate_id == lane_delivery_candidate_id("edit.syntax", target, shipped_suffix)
     )
     return _final(
         evidence_type="syntax_result",
@@ -326,30 +336,40 @@ def finalize_covering_attestation(
     ]
     refs: list[ArtifactRef] = [
         _artifact(
-            "covering-input.json", input_bytes,
-            kind="covering_input", revision=f"candidate:{candidate_id}",
+            "covering-input.json",
+            input_bytes,
+            kind="covering_input",
+            revision=f"candidate:{candidate_id}",
         ),
         _artifact(
-            "current-result.json", candidate.current_result_bytes,
-            kind="test_result", revision=f"result:{candidate.current_result_sha256}",
+            "current-result.json",
+            candidate.current_result_bytes,
+            kind="test_result",
+            revision=f"result:{candidate.current_result_sha256}",
         ),
         _artifact(
-            "producer-candidate.bin", rendered_bytes,
-            kind="producer_candidate", revision=f"candidate:{candidate_id}",
+            "producer-candidate.bin",
+            rendered_bytes,
+            kind="producer_candidate",
+            revision=f"candidate:{candidate_id}",
         ),
         _artifact(
-            "shipped-suffix.bin", shipped_bytes,
-            kind="shipped_suffix", revision=f"seal:{delivery_seal}",
+            "shipped-suffix.bin",
+            shipped_bytes,
+            kind="shipped_suffix",
+            revision=f"seal:{delivery_seal}",
         ),
     ]
     for source in candidate.edited_sources:
         artifact_rows.append((source.artifact_id, source.raw_bytes))
-        refs.append(_artifact(
-            source.artifact_id,
-            source.raw_bytes,
-            kind="edited_source",
-            revision=source.revision,
-        ))
+        refs.append(
+            _artifact(
+                source.artifact_id,
+                source.raw_bytes,
+                kind="edited_source",
+                revision=source.revision,
+            )
+        )
     refs_tuple = tuple(sorted(refs))
     by_id = {ref.artifact_id: ref for ref in refs_tuple}
     try:
@@ -382,9 +402,8 @@ def finalize_covering_attestation(
         and shipped_bytes in (rendered_bytes, b"\n" + rendered_bytes)
         and delivery_seal == _sha(shipped_bytes)[:16]
         and target.replace("\\", "/") in source_paths
-        and candidate_id == lane_delivery_candidate_id(
-            "verify.horizon.executed", target, shipped_suffix
-        )
+        and candidate_id
+        == lane_delivery_candidate_id("verify.horizon.executed", target, shipped_suffix)
     )
     source_proofs = tuple(
         ProofRef("source_revision", by_id[source.artifact_id], "$")

@@ -21,6 +21,7 @@ Flag: ``GT_REPRO_SYNTH`` (default off => :func:`synthesize_repro` abstains => by
 nothing in the seam calls it yet). Pure / deterministic / LLM-free at this layer (the draft step,
 when built, is the ONLY model-touching leg and lands behind its own sub-flag).
 """
+
 from __future__ import annotations
 
 import os
@@ -33,8 +34,8 @@ _FENCE_RE = re.compile(
     r"```[ \t]*(?:python|py|pycon|text)?[ \t]*\r?\n(.*?)```",
     re.DOTALL | re.IGNORECASE,
 )
-_REPRO_MARKER = "GT_REPRO_PASS"          # Agentless stdout-marker oracle (printed iff no bug)
-_MAX_REPRO_CANDIDATES = 5                # Otter-style small ensemble (K=5), never Agentless's 40
+_REPRO_MARKER = "GT_REPRO_PASS"  # Agentless stdout-marker oracle (printed iff no bug)
+_MAX_REPRO_CANDIDATES = 5  # Otter-style small ensemble (K=5), never Agentless's 40
 
 __all__ = [
     "ForbiddenSynthesisInput",
@@ -54,10 +55,21 @@ __all__ = [
 # cannot slip past. This is deliberately broad: a false abort is a loud, fixable bug; a false allow
 # is a silent benchmark leak.
 _FORBIDDEN_INPUT_SUBSTRINGS: tuple[str, ...] = (
-    "fail_to_pass", "pass_to_pass", "f2p", "p2p",
-    "gold", "oracle", "solution_patch", "reference_patch",
-    "hidden_test", "hidden", "expected_patch",
-    "task_id", "instance_id", "task-id", "instance-id",
+    "fail_to_pass",
+    "pass_to_pass",
+    "f2p",
+    "p2p",
+    "gold",
+    "oracle",
+    "solution_patch",
+    "reference_patch",
+    "hidden_test",
+    "hidden",
+    "expected_patch",
+    "task_id",
+    "instance_id",
+    "task-id",
+    "instance-id",
 )
 
 
@@ -71,8 +83,8 @@ class ForbiddenSynthesisInput(RuntimeError):
 class ReproCandidate:
     """One synthesized reproduction candidate. HYPOTHESIS-tier."""
 
-    source: str                       # the self-checking repro program text
-    oracle_marker: str = ""           # stdout marker the pass/fail verdict keys on (Agentless)
+    source: str  # the self-checking repro program text
+    oracle_marker: str = ""  # stdout marker the pass/fail verdict keys on (Agentless)
     pre_edit_red: bool | None = None  # confirmed FAIL on the pre-edit tree for the issue's reason
     change_covering: bool | None = None  # RED executes the agent's edited lines (SWT-Bench)
 
@@ -88,7 +100,12 @@ class ReproSynthResult:
 
 def _synth_enabled() -> bool:
     return os.environ.get("GT_REPRO_SYNTH", "").strip().lower() not in (
-        "", "0", "false", "no", "off")
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 def assert_inputs_allowed(inputs: "dict[str, object]") -> None:
@@ -106,17 +123,18 @@ def assert_inputs_allowed(inputs: "dict[str, object]") -> None:
             if bad in low:
                 raise ForbiddenSynthesisInput(
                     f"synthesis input {key!r} carries oracle signal ({bad!r}); "
-                    f"repro synthesis must read issue/obligations/repo/exec/diff ONLY")
+                    f"repro synthesis must read issue/obligations/repo/exec/diff ONLY"
+                )
 
 
 @dataclass
 class ReproVerdict:
     """Deterministic verdict over a GIVEN candidate repro (LLM-free — GT's actual job)."""
 
-    pre_edit_red: bool | None = None      # candidate FAILS on the pre-edit tree (a real repro)
-    change_covering: bool | None = None   # the RED executes the agent's edited lines (SWT-Bench)
-    post_edit_green: bool | None = None    # candidate PASSES after the edit (fix confirmed)
-    refuse_submit: bool = False            # RED->still-RED after edit = the ONLY refusal trigger
+    pre_edit_red: bool | None = None  # candidate FAILS on the pre-edit tree (a real repro)
+    change_covering: bool | None = None  # the RED executes the agent's edited lines (SWT-Bench)
+    post_edit_green: bool | None = None  # candidate PASSES after the edit (fix confirmed)
+    refuse_submit: bool = False  # RED->still-RED after edit = the ONLY refusal trigger
     reason: str = "not_implemented"
 
 
@@ -161,9 +179,9 @@ def verify_candidate(
 
     marker = candidate.oracle_marker
     if not marker:
-        return ReproVerdict(reason="no_oracle_marker")           # cannot verify without a self-check
+        return ReproVerdict(reason="no_oracle_marker")  # cannot verify without a self-check
     if "pre_edit_stdout" not in inputs:
-        return ReproVerdict(reason="no_pre_edit_run")            # seam has not run it yet
+        return ReproVerdict(reason="no_pre_edit_run")  # seam has not run it yet
 
     pre_red = not _run_is_green(inputs.get("pre_edit_stdout"), marker)
     covers = _lines_overlap(inputs.get("executed_lines"), inputs.get("edited_lines"))
@@ -183,7 +201,7 @@ def verify_candidate(
         pre_edit_red=True,
         change_covering=True,
         post_edit_green=post_green,
-        refuse_submit=not post_green,   # RED -> still-RED after the edit = the ONLY refusal
+        refuse_submit=not post_green,  # RED -> still-RED after the edit = the ONLY refusal
         reason="fix_confirmed" if post_green else "red_survived_edit",
     )
 
@@ -225,7 +243,9 @@ def _wrap_with_oracle(snippet: str) -> ReproCandidate:
     source = (
         "# GT-synthesized reproduction harness (deterministic; issue snippet + stdout-marker oracle)\n"
         + snippet.rstrip("\n")
-        + "\nprint(" + repr(_REPRO_MARKER) + ")\n"
+        + "\nprint("
+        + repr(_REPRO_MARKER)
+        + ")\n"
     )
     return ReproCandidate(source=source, oracle_marker=_REPRO_MARKER)
 
@@ -254,14 +274,17 @@ def run_submit_check(
             post_out, post_lines = run_candidate(cand, False)
         except Exception:  # noqa: BLE001 — an execution fault must never refuse a submit
             continue
-        verdict = verify_candidate(cand, {
-            "issue_text": issue_text,
-            "repo_root": repo_root,
-            "pre_edit_stdout": pre_out,
-            "post_edit_stdout": post_out,
-            "executed_lines": post_lines,
-            "edited_lines": edited_lines,
-        })
+        verdict = verify_candidate(
+            cand,
+            {
+                "issue_text": issue_text,
+                "repo_root": repo_root,
+                "pre_edit_stdout": pre_out,
+                "post_edit_stdout": post_out,
+                "executed_lines": post_lines,
+                "edited_lines": edited_lines,
+            },
+        )
         if verdict.refuse_submit:
             return verdict
     return None

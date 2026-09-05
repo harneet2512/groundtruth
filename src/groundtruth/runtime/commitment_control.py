@@ -146,13 +146,9 @@ class CommitmentEvidence:
             raise ValueError("evidence_id and decision_id are required")
         if not self.material_action_ids:
             raise ValueError("material_action_ids must be non-empty")
-        if len(set(self.material_action_ids)) != len(
-            self.material_action_ids
-        ):
+        if len(set(self.material_action_ids)) != len(self.material_action_ids):
             raise ValueError("material_action_ids must be unique")
-        if len(set(self.visible_to_model_call_ids)) != len(
-            self.visible_to_model_call_ids
-        ):
+        if len(set(self.visible_to_model_call_ids)) != len(self.visible_to_model_call_ids):
             raise ValueError("visible_to_model_call_ids must be unique")
         for field_name in (
             "fresh",
@@ -192,29 +188,18 @@ class CommitmentControlContext:
             raise ValueError("action identities must be unique within a batch")
         evidence_ids = tuple(item.evidence_id for item in self.evidence)
         if len(set(evidence_ids)) != len(evidence_ids):
-            raise ValueError(
-                "evidence identities must be unique within a decision"
-            )
+            raise ValueError("evidence identities must be unique within a decision")
         if not self.active_decision_id:
             raise ValueError("active_decision_id is required")
         if not self.proposing_model_call_id:
             raise ValueError("proposing_model_call_id is required")
-        if (
-            self.failure_state.attempt_id == ""
-            or not self.failure_state.native_path_enabled
-        ):
-            raise ValueError(
-                "commitment control requires an enabled native action path"
-            )
+        if self.failure_state.attempt_id == "" or not self.failure_state.native_path_enabled:
+            raise ValueError("commitment control requires an enabled native action path")
         if type(self.epistemic_prefix_may_change_decision) is not bool:
-            raise TypeError(
-                "epistemic_prefix_may_change_decision must be bool"
-            )
+            raise TypeError("epistemic_prefix_may_change_decision must be bool")
         if type(self.certificate_requirements_met) is not bool:
             raise TypeError("certificate_requirements_met must be bool")
-        if len(set(self.consumed_interruption_keys)) != len(
-            self.consumed_interruption_keys
-        ):
+        if len(set(self.consumed_interruption_keys)) != len(self.consumed_interruption_keys):
             raise ValueError("consumed_interruption_keys must be unique")
 
 
@@ -243,12 +228,8 @@ class CommitmentControlPlan:
             raise ValueError("reason_code is required")
         if not self.native_path_preserved:
             raise ValueError("native action path must remain preserved")
-        execute_ids = tuple(
-            intent.action.action_id for intent in self.execute_now
-        )
-        deferred_ids = tuple(
-            intent.action.action_id for intent in self.deferred
-        )
+        execute_ids = tuple(intent.action.action_id for intent in self.execute_now)
+        deferred_ids = tuple(intent.action.action_id for intent in self.deferred)
         if set(execute_ids).intersection(deferred_ids):
             raise ValueError("execute_now and deferred must be disjoint")
         if self.decision is CommitmentDecision.PAUSE and (
@@ -256,32 +237,21 @@ class CommitmentControlPlan:
             or self.execute_now != self.epistemic_prefix
             or not self.deferred
         ):
-            raise ValueError(
-                "PAUSE must execute a non-empty epistemic prefix and defer work"
-            )
+            raise ValueError("PAUSE must execute a non-empty epistemic prefix and defer work")
         if self.decision is CommitmentDecision.FRESH_INFERENCE and (
             self.execute_now
             or not self.deferred
             or not self.qualifying_evidence_ids
             or not self.fresh_inference_required
         ):
-            raise ValueError(
-                "FRESH_INFERENCE requires qualifying evidence and deferred work"
-            )
+            raise ValueError("FRESH_INFERENCE requires qualifying evidence and deferred work")
         if (
             self.decision is not CommitmentDecision.FRESH_INFERENCE
             and self.fresh_inference_required
         ):
-            raise ValueError(
-                "fresh_inference_required contradicts commitment decision"
-            )
-        if (
-            self.decision is not CommitmentDecision.ALLOW
-            and self.gt_certificate_allowed
-        ):
-            raise ValueError(
-                "only an ALLOW decision may permit GT certification"
-            )
+            raise ValueError("fresh_inference_required contradicts commitment decision")
+        if self.decision is not CommitmentDecision.ALLOW and self.gt_certificate_allowed:
+            raise ValueError("only an ALLOW decision may permit GT certification")
 
 
 def classify_action(intent: CommitmentIntent) -> ActionAssuranceClass:
@@ -317,9 +287,7 @@ def _epistemic_prefix(
 
 def _has_terminal(intents: tuple[CommitmentIntent, ...]) -> bool:
     return any(
-        classify_action(intent)
-        is ActionAssuranceClass.TERMINAL_COMMITMENT
-        for intent in intents
+        classify_action(intent) is ActionAssuranceClass.TERMINAL_COMMITMENT for intent in intents
     )
 
 
@@ -342,15 +310,9 @@ def _qualifying_evidence(
                 and not evidence.superseded
                 and evidence.release_allowed
                 and evidence.staged_for_next_inference
-                and evidence.lifecycle
-                in _EVIDENCE_LIFECYCLES_ELIGIBLE_FOR_INTERVENTION
-                and context.proposing_model_call_id
-                not in evidence.visible_to_model_call_ids
-                and bool(
-                    commitment_action_ids.intersection(
-                        evidence.material_action_ids
-                    )
-                )
+                and evidence.lifecycle in _EVIDENCE_LIFECYCLES_ELIGIBLE_FOR_INTERVENTION
+                and context.proposing_model_call_id not in evidence.visible_to_model_call_ids
+                and bool(commitment_action_ids.intersection(evidence.material_action_ids))
             ),
             key=lambda item: item.evidence_id,
         )
@@ -471,17 +433,14 @@ def decide_commitment_control(
             decision=CommitmentDecision.FRESH_INFERENCE,
             execute_now=(),
             deferred=intents,
-            qualifying_evidence_ids=tuple(
-                item.evidence_id for item in qualifying
-            ),
+            qualifying_evidence_ids=tuple(item.evidence_id for item in qualifying),
             fresh_inference_required=True,
             reason_code="VERIFIED_UNSEEN_MATERIAL_EVIDENCE",
             interruption_key=interruption_key,
         )
 
     certificate_allowed = (
-        context.failure_state.gt_certification_enabled
-        and context.certificate_requirements_met
+        context.failure_state.gt_certification_enabled and context.certificate_requirements_met
     )
     if terminal and not certificate_allowed:
         return _plan(

@@ -8,6 +8,7 @@ Three numbers replace fake preflight checks:
 All computed post-run by comparing GT injections against the gold patch diff.
 No LLM involved — pure string matching + graph.db validation.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,6 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from pathlib import Path
 
 
 @dataclass
@@ -95,20 +95,32 @@ def parse_injections(gt_log_path: str) -> list[InjectionRecord]:
                 obj = json.loads(line)
                 markers = []
                 content = obj.get("rendered_text", "") or obj.get("text", "")
-                for m in ("[SIGNATURE]", "[TEST]", "[BEHAVIORAL CONTRACT]",
-                          "[CONTRACT]", "[PEER]", "[OVERRIDE]", "[PATTERN]",
-                          "[SIMILAR]", "[COMPLETENESS]", "PRESERVE:", "MUTATES:"):
+                for m in (
+                    "[SIGNATURE]",
+                    "[TEST]",
+                    "[BEHAVIORAL CONTRACT]",
+                    "[CONTRACT]",
+                    "[PEER]",
+                    "[OVERRIDE]",
+                    "[PATTERN]",
+                    "[SIMILAR]",
+                    "[COMPLETENESS]",
+                    "PRESERVE:",
+                    "MUTATES:",
+                ):
                     if m in content:
                         markers.append(m)
-                records.append(InjectionRecord(
-                    layer=obj.get("layer", ""),
-                    file_path=obj.get("file_path", "") or obj.get("file", ""),
-                    content=content,
-                    markers=markers,
-                    char_count=len(content),
-                    target_function=obj.get("symbol", "") or obj.get("function", ""),
-                    confidence=float(obj.get("confidence", 0.0)),
-                ))
+                records.append(
+                    InjectionRecord(
+                        layer=obj.get("layer", ""),
+                        file_path=obj.get("file_path", "") or obj.get("file", ""),
+                        content=content,
+                        markers=markers,
+                        char_count=len(content),
+                        target_function=obj.get("symbol", "") or obj.get("function", ""),
+                        confidence=float(obj.get("confidence", 0.0)),
+                    )
+                )
             except (json.JSONDecodeError, KeyError, ValueError):
                 continue
     return records
@@ -131,11 +143,13 @@ def compute_precision(
             continue
         total += 1
         inj_norm = inj.file_path.replace("\\", "/").lstrip("/")
+
         def _path_suffix_match(a: str, b: str) -> bool:
             pa, pb = a.split("/"), b.split("/")
             shorter = pa if len(pa) <= len(pb) else pb
             longer = pb if len(pa) <= len(pb) else pa
-            return longer[-len(shorter):] == shorter if shorter else False
+            return longer[-len(shorter) :] == shorter if shorter else False
+
         file_match = any(_path_suffix_match(inj_norm, gf) for gf in gold_file_set)
         func_match = inj.target_function in gold_func_set if inj.target_function else False
 
@@ -156,11 +170,15 @@ def compute_precision(
 
         if is_correct:
             correct += 1
-        details.append({
-            "layer": inj.layer, "file": inj.file_path,
-            "function": inj.target_function,
-            "correct": is_correct, "markers": inj.markers,
-        })
+        details.append(
+            {
+                "layer": inj.layer,
+                "file": inj.file_path,
+                "function": inj.target_function,
+                "correct": is_correct,
+                "markers": inj.markers,
+            }
+        )
     return correct, total, details
 
 
@@ -171,11 +189,11 @@ def compute_recall(
     """Recall: how many gold-patch files/functions did GT deliver context for?"""
     delivered_files = {
         inj.file_path.replace("\\", "/").lstrip("/").split("/")[-1]
-        for inj in injections if inj.content.strip()
+        for inj in injections
+        if inj.content.strip()
     }
     delivered_funcs = {
-        inj.target_function for inj in injections
-        if inj.target_function and inj.content.strip()
+        inj.target_function for inj in injections if inj.target_function and inj.content.strip()
     }
 
     needed = 0
@@ -273,6 +291,7 @@ def score_run(
 def _find_first_match(directory: str, *patterns: str) -> str:
     """Return the first existing file matching any of the given glob patterns."""
     import glob
+
     for pattern in patterns:
         full = os.path.join(directory, pattern)
         # Try exact name first (no glob chars)
@@ -322,6 +341,7 @@ def score_run_from_artifacts(run_dir: str) -> EvidenceScore | None:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Score GT evidence quality for a run")
     parser.add_argument("run_dir", help="Directory containing run artifacts")
     args = parser.parse_args()
@@ -331,14 +351,19 @@ if __name__ == "__main__":
         print("Missing artifacts (need gt_interaction_log.jsonl + gold_patch.diff)")
     else:
         print(result.summary())
-        print(json.dumps({
-            "precision": result.precision,
-            "recall": result.recall,
-            "uptake": result.uptake,
-            "total_injections": result.total_injections,
-            "correct_injections": result.correct_injections,
-            "gold_contexts_needed": result.gold_contexts_needed,
-            "gold_contexts_delivered": result.gold_contexts_delivered,
-            "uptake_opportunities": result.uptake_opportunities,
-            "uptake_hits": result.uptake_hits,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "precision": result.precision,
+                    "recall": result.recall,
+                    "uptake": result.uptake,
+                    "total_injections": result.total_injections,
+                    "correct_injections": result.correct_injections,
+                    "gold_contexts_needed": result.gold_contexts_needed,
+                    "gold_contexts_delivered": result.gold_contexts_delivered,
+                    "uptake_opportunities": result.uptake_opportunities,
+                    "uptake_hits": result.uptake_hits,
+                },
+                indent=2,
+            )
+        )

@@ -3,6 +3,7 @@
 Pure regex extraction. No LLM, no embeddings, no graph DB lookup. Track B
 consumes the QueryObject and performs the cross-check against graph.db.
 """
+
 from __future__ import annotations
 
 import os
@@ -16,7 +17,7 @@ from groundtruth.pretask.anchors import (
     _extract_raw_identifiers,
     _looks_like_natural_word,
 )
-from groundtruth.pretask.traces import parse_stack_traces
+from groundtruth.pretask.traces import extract_stack_frames
 from groundtruth.pretask.v2_types import (
     HighSignalToken,
     QueryObject,
@@ -90,9 +91,9 @@ def preprocess(issue_text: str) -> QueryObject:
     tokens = _TokenAccumulator()
     seen_in_traces_or_backtick: set[str] = set()
 
-    # 1. Stack traces. Use "." as repo_root so the relative-path fallback in
-    # traces._is_in_repo accepts repo-relative paths like "src/foo.py".
-    frames = parse_stack_traces(issue_text, repo_root=".")
+    # Raw hints only. Track B verifies repository membership against its graph;
+    # preprocessing must not depend on files in the caller's working directory.
+    frames = extract_stack_frames(issue_text)
     for frame in frames:
         if frame.file:
             file_hints.append(frame.file)

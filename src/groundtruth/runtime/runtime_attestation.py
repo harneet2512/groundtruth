@@ -54,20 +54,14 @@ _ALLOWED_NEXT = {
     "SELECTED": frozenset({"COMPILED"}),
     "COMPILED": frozenset({"JOINED", "JOIN_FAILED"}),
     "JOINED": frozenset({"DISPATCHED"}),
-    "DISPATCHED": frozenset(
-        {"PROVIDER_ACCEPTED", "DISPATCH_FAILED", "PROVIDER_REJECTED"}
-    ),
+    "DISPATCHED": frozenset({"PROVIDER_ACCEPTED", "DISPATCH_FAILED", "PROVIDER_REJECTED"}),
     "PROVIDER_ACCEPTED": frozenset(
         {"DELIVERED", "INFERENCE_FAILED", "CANCELLED", "PARTIAL_OUTPUT"}
     ),
     "DELIVERED": frozenset({"RESPONSE_COMMITTED", "RESPONSE_DISCARDED"}),
 }
-_TERMINAL_KINDS = frozenset(
-    {"COMPLETED", "INCOMPLETE", "TOOL_USE", "REFUSAL"}
-)
-_DELIVERED_EVIDENCE_STATES = frozenset(
-    {"DELIVERED", "ACTIVE", "SATISFIED", "SUPERSEDED"}
-)
+_TERMINAL_KINDS = frozenset({"COMPLETED", "INCOMPLETE", "TOOL_USE", "REFUSAL"})
+_DELIVERED_EVIDENCE_STATES = frozenset({"DELIVERED", "ACTIVE", "SATISFIED", "SUPERSEDED"})
 
 
 class AttestationIntegrityError(ValueError):
@@ -242,8 +236,7 @@ def _owners_are_authorized(
             return False
         authority = CAP_BYTE_OWNER_MECHANISMS.get(owner)
         if authority is None or not any(
-            binding.fact_class == feature_id
-            for binding in authority.bindings
+            binding.fact_class == feature_id for binding in authority.bindings
         ):
             return False
     return True
@@ -269,11 +262,10 @@ def _evidence_history_is_valid(
             reason = EvidenceTransitionReason(transition["reason_code"])
         except (KeyError, TypeError, ValueError):
             return False
-        if (
-            index == 0
-            and from_state
-            not in {EvidenceLifecycle.DISCOVERED, EvidenceLifecycle.PENDING}
-        ):
+        if index == 0 and from_state not in {
+            EvidenceLifecycle.DISCOVERED,
+            EvidenceLifecycle.PENDING,
+        }:
             return False
         if previous_to and from_state.value != previous_to:
             return False
@@ -393,9 +385,7 @@ def _validate_delivery_rows(
             if observation_id and current_observation != observation_id:
                 raise _Reject("DELIVERY_OBSERVATION_REWRITTEN")
             observation_id = current_observation
-        current_payload_hash = str(
-            payload.get("provider_payload_hash", "")
-        )
+        current_payload_hash = str(payload.get("provider_payload_hash", ""))
         if state in {
             "JOINED",
             "DISPATCHED",
@@ -409,21 +399,14 @@ def _validate_delivery_rows(
             "PARTIAL_OUTPUT",
             "RESPONSE_DISCARDED",
         }:
-            if (
-                payload.get("joined_capsule_hash")
-                != payload.get("capsule_hash")
-                or not _valid_sha256(current_payload_hash)
-            ):
+            if payload.get("joined_capsule_hash") != payload.get(
+                "capsule_hash"
+            ) or not _valid_sha256(current_payload_hash):
                 raise _Reject("JOINED_IDENTITY_INVALID")
-            if (
-                joined_payload_hash
-                and current_payload_hash != joined_payload_hash
-            ):
+            if joined_payload_hash and current_payload_hash != joined_payload_hash:
                 raise _Reject("PROVIDER_PAYLOAD_IDENTITY_REWRITTEN")
             joined_payload_hash = current_payload_hash
-        current_response_id = str(
-            payload.get("provider_response_id", "")
-        )
+        current_response_id = str(payload.get("provider_response_id", ""))
         if state in {
             "PROVIDER_ACCEPTED",
             "DELIVERED",
@@ -435,10 +418,7 @@ def _validate_delivery_rows(
         }:
             if not current_response_id:
                 raise _Reject("PROVIDER_RESPONSE_ID_ABSENT")
-            if (
-                provider_response_id
-                and current_response_id != provider_response_id
-            ):
+            if provider_response_id and current_response_id != provider_response_id:
                 raise _Reject("PROVIDER_RESPONSE_ID_REWRITTEN")
             provider_response_id = current_response_id
         states.append(state)
@@ -468,13 +448,10 @@ def _validate_structural_binding(
         or binding.get("capsule_hash") != delivery.get("capsule_hash")
         or binding.get("model_call_id") != delivery.get("model_call_id")
         or binding.get("observation_id") != delivery.get("observation_id")
-        or binding.get("decision_id", "")
-        != compilation.get("decision_id", "")
-        or binding.get("decision_context")
-        != compilation.get("decision_context")
+        or binding.get("decision_id", "") != compilation.get("decision_id", "")
+        or binding.get("decision_context") != compilation.get("decision_context")
         or binding.get("evidence_ids") != compilation.get("evidence_ids")
-        or binding.get("evidence_manifest_hash")
-        != compilation.get("evidence_manifest_hash")
+        or binding.get("evidence_manifest_hash") != compilation.get("evidence_manifest_hash")
     ):
         raise _Reject("JOIN_BINDING_HASH_MISMATCH")
     messages = payload.get("messages") if isinstance(payload, dict) else None
@@ -656,10 +633,7 @@ def _load_evidence_ownership(
                 row[2],
                 "EVIDENCE_STATE_HASH_INVALID",
             )
-            if (
-                payload.get("evidence_id") != evidence_id
-                or payload.get("lifecycle") != str(row[1])
-            ):
+            if payload.get("evidence_id") != evidence_id or payload.get("lifecycle") != str(row[1]):
                 raise _Reject("EVIDENCE_COLUMN_CANONICAL_MISMATCH")
             owners = payload.get("owner_feature_ids", ())
             feature_id = payload.get("feature_id")
@@ -667,9 +641,7 @@ def _load_evidence_ownership(
                 not isinstance(owners, list)
                 or owners != sorted(set(owners))
                 or any(
-                    not isinstance(owner, str)
-                    or not owner.startswith("GT_")
-                    for owner in owners
+                    not isinstance(owner, str) or not owner.startswith("GT_") for owner in owners
                 )
                 or not _owners_are_authorized(feature_id, owners)
             ):
@@ -682,18 +654,12 @@ def _load_evidence_ownership(
             if latest is not None:
                 if feature_id != latest.get("feature_id"):
                     raise _Reject("EVIDENCE_OWNERSHIP_REWRITTEN")
-                if (
-                    previous_owners is None
-                    or not set(previous_owners).issubset(owners)
-                ):
+                if previous_owners is None or not set(previous_owners).issubset(owners):
                     raise _Reject("EVIDENCE_OWNERSHIP_REWRITTEN")
             history = payload.get("transition_history")
-            if (
-                not isinstance(history, list)
-                or not _evidence_history_is_valid(
-                    history,
-                    payload.get("lifecycle"),
-                )
+            if not isinstance(history, list) or not _evidence_history_is_valid(
+                history,
+                payload.get("lifecycle"),
             ):
                 raise _Reject("EVIDENCE_TRANSITION_HISTORY_INVALID")
             if previous_history is not None:
@@ -701,10 +667,8 @@ def _load_evidence_ownership(
                     len(history) != len(previous_history) + 1
                     or history[:-1] != previous_history
                     or not isinstance(history[-1], dict)
-                    or history[-1].get("from_state")
-                    != previous_lifecycle
-                    or history[-1].get("to_state")
-                    != payload.get("lifecycle")
+                    or history[-1].get("from_state") != previous_lifecycle
+                    or history[-1].get("to_state") != payload.get("lifecycle")
                 )
                 owner_enrichment = (
                     history == previous_history
@@ -738,15 +702,9 @@ def _load_evidence_ownership(
                     and previous_window == ""
                     and window.startswith("GT-W-")
                 )
-                if (
-                    lifecycle_transition
-                    and not owner_enrichment
-                    and not window_assignment
-                ):
+                if lifecycle_transition and not owner_enrichment and not window_assignment:
                     raise _Reject("EVIDENCE_TRANSITION_HISTORY_INVALID")
-            previous_window = str(
-                payload.get("decision_window_generation") or ""
-            )
+            previous_window = str(payload.get("decision_window_generation") or "")
             previous_history = history
             previous_lifecycle = str(payload.get("lifecycle", ""))
             previous_owners = owners
@@ -761,8 +719,7 @@ def _load_evidence_ownership(
             isinstance(transition, dict)
             and transition.get("from_state") == "RELEASED"
             and transition.get("to_state") == "DELIVERED"
-            and transition.get("reason_code")
-            == "PROVIDER_TERMINAL_DELIVERY_PROVEN"
+            and transition.get("reason_code") == "PROVIDER_TERMINAL_DELIVERY_PROVEN"
             for transition in latest.get("transition_history", ())
         ):
             raise _Reject("DELIVERY_EVIDENCE_TRANSITION_UNPROVEN")
@@ -799,9 +756,7 @@ def _build_attestation(
         connection,
         delivery_attempt_id,
     )
-    delivery_payloads, states, delivery_hashes = _validate_delivery_rows(
-        delivery_rows
-    )
+    delivery_payloads, states, delivery_hashes = _validate_delivery_rows(delivery_rows)
     latest_delivery = delivery_payloads[-1]
     if latest_delivery.get("model_call_id") != expected_model_call_id:
         raise _Reject("DELIVERY_ATTEMPT_IDENTITY_MISMATCH")
@@ -833,9 +788,7 @@ def _build_attestation(
         require_delivered=delivery_proven,
     )
     response_committed = states[-1] == "RESPONSE_COMMITTED"
-    if response_committed and not _valid_sha256(
-        latest_delivery.get("response_hash")
-    ):
+    if response_committed and not _valid_sha256(latest_delivery.get("response_hash")):
         raise _Reject("RESPONSE_COMMIT_HASH_INVALID")
     provider_hash = str(latest_delivery.get("provider_payload_hash", ""))
     if delivery_proven and not _valid_sha256(provider_hash):
@@ -856,9 +809,7 @@ def _build_attestation(
         "model_call_id": str(latest_delivery.get("model_call_id", "")),
         "observation_id": str(latest_delivery.get("observation_id", "")),
         "decision_id": str(latest_compilation.get("decision_id", "")),
-        "decision_context": str(
-            latest_compilation.get("decision_context", "")
-        ),
+        "decision_context": str(latest_compilation.get("decision_context", "")),
         "lifecycle_states": list(states),
         "evidence": [item.as_dict() for item in evidence],
         "capsule_hash": str(latest_delivery.get("capsule_hash", "")),
@@ -949,10 +900,7 @@ def load_runtime_attestations(
                     ),
                 ),
             )
-        query = (
-            "SELECT delivery_attempt_id, model_call_id, attempt_id "
-            "FROM delivery_attempts"
-        )
+        query = "SELECT delivery_attempt_id, model_call_id, attempt_id FROM delivery_attempts"
         params: tuple[object, ...] = ()
         if attempt_id is not None:
             query += " WHERE attempt_id = ?"
@@ -990,24 +938,16 @@ def load_runtime_attestations(
                         connection,
                         attempt_id=owner,
                         delivery_attempt_id=delivery_id,
-                        expected_model_call_id=str(
-                            expected_model_call_id
-                        ),
+                        expected_model_call_id=str(expected_model_call_id),
                     )
                 )
             except (_Reject, sqlite3.Error) as exc:
-                reason = (
-                    exc.reason
-                    if isinstance(exc, _Reject)
-                    else "JOURNAL_QUERY_FAILED"
-                )
+                reason = exc.reason if isinstance(exc, _Reject) else "JOURNAL_QUERY_FAILED"
                 rejected.append(RejectedRuntimeProof(delivery_id, reason))
         return RuntimeAttestationLoad(
             journal_present=True,
             integrity_ok=not rejected,
-            attestations=(
-                tuple(attestations) if not rejected else ()
-            ),
+            attestations=(tuple(attestations) if not rejected else ()),
             rejected=tuple(rejected),
         )
 
@@ -1067,21 +1007,15 @@ def _record_from_dict(raw: Mapping[str, Any]) -> CanonicalDeliveryAttestation:
             type(raw.get("delivery_proven")) is not bool
             or type(raw.get("response_committed")) is not bool
         ):
-            raise AttestationIntegrityError(
-                "attestation boolean shape invalid"
-            )
+            raise AttestationIntegrityError("attestation boolean shape invalid")
         evidence_raw = raw.get("evidence")
         if not isinstance(evidence_raw, list):
-            raise AttestationIntegrityError(
-                "attestation evidence shape invalid"
-            )
+            raise AttestationIntegrityError("attestation evidence shape invalid")
         evidence = tuple(
             EvidenceOwnership(
                 evidence_id=str(item["evidence_id"]),
                 feature_id=str(item["feature_id"]),
-                owner_feature_ids=tuple(
-                    item.get("owner_feature_ids", ())
-                ),
+                owner_feature_ids=tuple(item.get("owner_feature_ids", ())),
                 lifecycle=str(item["lifecycle"]),
                 evidence_state_hash=str(item["evidence_state_hash"]),
             )
@@ -1089,9 +1023,7 @@ def _record_from_dict(raw: Mapping[str, Any]) -> CanonicalDeliveryAttestation:
             if isinstance(item, dict)
         )
         if len(evidence) != len(evidence_raw):
-            raise AttestationIntegrityError(
-                "attestation evidence shape invalid"
-            )
+            raise AttestationIntegrityError("attestation evidence shape invalid")
         record = CanonicalDeliveryAttestation(
             attempt_id=str(raw["attempt_id"]),
             delivery_attempt_id=str(raw["delivery_attempt_id"]),
@@ -1103,43 +1035,37 @@ def _record_from_dict(raw: Mapping[str, Any]) -> CanonicalDeliveryAttestation:
             evidence=evidence,
             capsule_hash=str(raw["capsule_hash"]),
             provider_payload_hash=str(raw["provider_payload_hash"]),
-            provider_response_id_hash=str(
-                raw["provider_response_id_hash"]
-            ),
+            provider_response_id_hash=str(raw["provider_response_id_hash"]),
             response_hash=str(raw["response_hash"]),
             terminal_kind=str(raw["terminal_kind"]),
             delivery_proven=bool(raw["delivery_proven"]),
             response_committed=bool(raw["response_committed"]),
             source_chain_hash=str(raw["source_chain_hash"]),
             record_sha256=str(raw["record_sha256"]),
-            explicit_acknowledgment=str(
-                raw["explicit_acknowledgment"]
-            ),
+            explicit_acknowledgment=str(raw["explicit_acknowledgment"]),
             behavioral_influence=str(raw["behavioral_influence"]),
             schema=str(raw["schema"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
         if isinstance(exc, AttestationIntegrityError):
             raise
-        raise AttestationIntegrityError(
-            "attestation record shape invalid"
-        ) from exc
+        raise AttestationIntegrityError("attestation record shape invalid") from exc
     delivery_expected = (
         len(record.lifecycle_states) >= len(_SUCCESS_PREFIX)
-        and record.lifecycle_states[: len(_SUCCESS_PREFIX)]
-        == _SUCCESS_PREFIX
-        and record.lifecycle_states[-1]
-        in {"DELIVERED", "RESPONSE_COMMITTED", "RESPONSE_DISCARDED"}
+        and record.lifecycle_states[: len(_SUCCESS_PREFIX)] == _SUCCESS_PREFIX
+        and record.lifecycle_states[-1] in {"DELIVERED", "RESPONSE_COMMITTED", "RESPONSE_DISCARDED"}
         and record.terminal_kind in _TERMINAL_KINDS
         and bool(record.provider_response_id_hash)
     )
-    state_chain_valid = bool(record.lifecycle_states) and (
-        record.lifecycle_states[0] == "SELECTED"
-    ) and all(
-        current in _ALLOWED_NEXT.get(previous, frozenset())
-        for previous, current in zip(
-            record.lifecycle_states,
-            record.lifecycle_states[1:],
+    state_chain_valid = (
+        bool(record.lifecycle_states)
+        and (record.lifecycle_states[0] == "SELECTED")
+        and all(
+            current in _ALLOWED_NEXT.get(previous, frozenset())
+            for previous, current in zip(
+                record.lifecycle_states,
+                record.lifecycle_states[1:],
+            )
         )
     )
     if (
@@ -1153,14 +1079,10 @@ def _record_from_dict(raw: Mapping[str, Any]) -> CanonicalDeliveryAttestation:
         or record.explicit_acknowledgment != "UNKNOWN"
         or record.behavioral_influence != "NOT_EVALUATED"
         or record.delivery_proven != delivery_expected
-        or record.response_committed
-        != (record.lifecycle_states[-1:] == ("RESPONSE_COMMITTED",))
+        or record.response_committed != (record.lifecycle_states[-1:] == ("RESPONSE_COMMITTED",))
         or not _valid_sha256(record.capsule_hash)
         or not _valid_sha256(record.source_chain_hash)
-        or (
-            bool(record.provider_payload_hash)
-            and not _valid_sha256(record.provider_payload_hash)
-        )
+        or (bool(record.provider_payload_hash) and not _valid_sha256(record.provider_payload_hash))
         or (
             bool(record.provider_response_id_hash)
             and not _valid_sha256(record.provider_response_id_hash)
@@ -1169,29 +1091,19 @@ def _record_from_dict(raw: Mapping[str, Any]) -> CanonicalDeliveryAttestation:
             record.delivery_proven
             and (
                 not _valid_sha256(record.provider_payload_hash)
-                or not _valid_sha256(
-                    record.provider_response_id_hash
-                )
+                or not _valid_sha256(record.provider_response_id_hash)
             )
         )
-        or (
-            record.response_committed
-            and not _valid_sha256(record.response_hash)
-        )
+        or (record.response_committed and not _valid_sha256(record.response_hash))
         or any(
             not item.evidence_id
             or not item.feature_id
-            or item.owner_feature_ids
-            != tuple(sorted(set(item.owner_feature_ids)))
-            or any(
-                not owner.startswith("GT_")
-                for owner in item.owner_feature_ids
-            )
+            or item.owner_feature_ids != tuple(sorted(set(item.owner_feature_ids)))
+            or any(not owner.startswith("GT_") for owner in item.owner_feature_ids)
             or not _valid_sha256(item.evidence_state_hash)
             for item in record.evidence
         )
-        or _sha256_text(_canonical_json(record.unsigned_dict()))
-        != record.record_sha256
+        or _sha256_text(_canonical_json(record.unsigned_dict())) != record.record_sha256
     ):
         raise AttestationIntegrityError("record seal invalid")
     return record
@@ -1206,24 +1118,16 @@ def read_runtime_attestation_bundle(
         encoded = Path(path).read_bytes()
         text = encoded.decode("utf-8")
         if not text.endswith("\n"):
-            raise AttestationIntegrityError(
-                "attestation canonical framing invalid"
-            )
+            raise AttestationIntegrityError("attestation canonical framing invalid")
         raw = json.loads(text)
     except (OSError, UnicodeError, ValueError) as exc:
         if isinstance(exc, AttestationIntegrityError):
             raise
-        raise AttestationIntegrityError(
-            "attestation canonical bytes invalid"
-        ) from exc
+        raise AttestationIntegrityError("attestation canonical bytes invalid") from exc
     if not isinstance(raw, dict) or _canonical_json(raw) + "\n" != text:
         raise AttestationIntegrityError("attestation canonical bytes invalid")
     seal = raw.get("attestation_sha256")
-    unsigned = {
-        key: value
-        for key, value in raw.items()
-        if key != "attestation_sha256"
-    }
+    unsigned = {key: value for key, value in raw.items() if key != "attestation_sha256"}
     if (
         raw.get("schema") != BUNDLE_SCHEMA
         or not isinstance(seal, str)
@@ -1247,9 +1151,7 @@ def read_runtime_attestation_bundle(
         raise AttestationIntegrityError("attestation rejection shape invalid")
     integrity_ok = bool(raw.get("integrity_ok"))
     if integrity_ok != (not rejected) or (rejected and records):
-        raise AttestationIntegrityError(
-            "attestation bundle integrity projection invalid"
-        )
+        raise AttestationIntegrityError("attestation bundle integrity projection invalid")
     return RuntimeAttestationBundle(
         records=records,
         rejected=rejected,
@@ -1290,12 +1192,8 @@ def runtime_attestation_diagnostic(
         "journal_present": loaded.journal_present,
         "integrity_ok": loaded.integrity_ok,
         "attestation_sha256": bundle.attestation_sha256,
-        "delivered_count": sum(
-            item.delivery_proven for item in loaded.attestations
-        ),
-        "response_committed_count": sum(
-            item.response_committed for item in loaded.attestations
-        ),
+        "delivered_count": sum(item.delivery_proven for item in loaded.attestations),
+        "response_committed_count": sum(item.response_committed for item in loaded.attestations),
         "records": [item.as_dict() for item in loaded.attestations],
         "rejected": [item.as_dict() for item in loaded.rejected],
         "explicit_acknowledgment": "UNMEASURED",

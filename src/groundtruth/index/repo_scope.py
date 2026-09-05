@@ -92,7 +92,7 @@ def _resolve_repo_id(conn: sqlite3.Connection, repo_root: str | None) -> int | N
     if not nr:
         return None
     try:
-        rows = conn.execute('SELECT id, root FROM repos').fetchall()
+        rows = conn.execute("SELECT id, root FROM repos").fetchall()
     except sqlite3.Error:
         return None
     matches = [

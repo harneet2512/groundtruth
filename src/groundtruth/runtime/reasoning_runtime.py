@@ -186,10 +186,7 @@ def _canonical_data(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if hasattr(value, "__dataclass_fields__"):
-        return {
-            key: _canonical_data(item)
-            for key, item in asdict(value).items()
-        }
+        return {key: _canonical_data(item) for key, item in asdict(value).items()}
     if isinstance(value, Mapping):
         return {
             str(key): _canonical_data(item)
@@ -360,9 +357,7 @@ class CanonicalEvent:
             self.action is None or self.result is not None
         ):
             raise ValueError("ACTION_PROPOSED requires action and no result")
-        if self.kind is EventKind.ACTION_RESULT and (
-            self.action is None or self.result is None
-        ):
+        if self.kind is EventKind.ACTION_RESULT and (self.action is None or self.result is None):
             raise ValueError("ACTION_RESULT requires action and result")
 
     def canonical_json(self) -> str:
@@ -394,12 +389,9 @@ class CanonicalEvent:
                     changed=item.get("changed"),
                     failure_fingerprint=item.get("failure_fingerprint", ""),
                     metadata=tuple(
-                        (str(key), str(value))
-                        for key, value in item.get("metadata", ())
+                        (str(key), str(value)) for key, value in item.get("metadata", ())
                     ),
-                    authority=Authority(
-                        int(item.get("authority", Authority.LEGACY_INFERRED))
-                    ),
+                    authority=Authority(int(item.get("authority", Authority.LEGACY_INFERRED))),
                     provenance=tuple(item.get("provenance", ())),
                 )
                 for item in raw.get("outcomes", ())
@@ -440,9 +432,7 @@ class CanonicalEvent:
                     changed=raw["result"].get("changed"),
                     hit_count=raw["result"].get("hit_count"),
                     files_hit=tuple(raw["result"].get("files_hit", ())),
-                    changed_files=tuple(
-                        raw["result"].get("changed_files", ())
-                    ),
+                    changed_files=tuple(raw["result"].get("changed_files", ())),
                     # MUST be listed here. This reconstruction is a HAND-MAINTAINED field list,
                     # and canonical events are hash-chained over the result's content: a field
                     # that serializes but does not rehydrate yields a DIFFERENT recomputed hash
@@ -450,21 +440,11 @@ class CanonicalEvent:
                     # mismatch`. Omitting it did exactly that -- and because
                     # `observe_action_result` swallows observer faults by design, the symptom
                     # appeared far away, as "the gateway produced nothing".
-                    viewed_symbols=tuple(
-                        raw["result"].get("viewed_symbols", ())
-                    ),
-                    resolved_symbols=tuple(
-                        raw["result"].get("resolved_symbols", ())
-                    ),
-                    failure_fingerprint=raw["result"].get(
-                        "failure_fingerprint", ""
-                    ),
-                    signature_before=raw["result"].get(
-                        "signature_before", ""
-                    ),
-                    signature_after=raw["result"].get(
-                        "signature_after", ""
-                    ),
+                    viewed_symbols=tuple(raw["result"].get("viewed_symbols", ())),
+                    resolved_symbols=tuple(raw["result"].get("resolved_symbols", ())),
+                    failure_fingerprint=raw["result"].get("failure_fingerprint", ""),
+                    signature_before=raw["result"].get("signature_before", ""),
+                    signature_after=raw["result"].get("signature_after", ""),
                 )
                 if raw.get("result") is not None
                 else None
@@ -536,12 +516,8 @@ class WorkState:
             search_count=int(raw.get("search_count", 0)),
             test_count=int(raw.get("test_count", 0)),
             compile_count=int(raw.get("compile_count", 0)),
-            consecutive_no_test_results=int(
-                raw.get("consecutive_no_test_results", 0)
-            ),
-            no_test_recovery_event_id=str(
-                raw.get("no_test_recovery_event_id", "")
-            ),
+            consecutive_no_test_results=int(raw.get("consecutive_no_test_results", 0)),
+            no_test_recovery_event_id=str(raw.get("no_test_recovery_event_id", "")),
             current_failures=tuple(raw.get("current_failures", ())),
             failure_scopes=tuple(
                 (str(scope), str(fingerprint))
@@ -701,11 +677,7 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
         elif outcome.kind is SemanticKind.TEST_EXECUTED_NO_TESTS:
             consecutive_no_test_results += 1
             phase = Phase.VALIDATION
-            if (
-                consecutive_no_test_results == 2
-                and edited_files
-                and not no_test_recovery_event_id
-            ):
+            if consecutive_no_test_results == 2 and edited_files and not no_test_recovery_event_id:
                 no_test_recovery_event_id = event.event_id
                 phase = Phase.RECOVERY
                 rules.append("repeated_no_tests_after_edit")
@@ -728,9 +700,7 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
                 scope = _validation_scope(outcome.subject)
                 failure_key = (scope, fingerprint)
                 repeated_failure = (
-                    failure_key in failure_scopes
-                    if scope
-                    else fingerprint in current_failures
+                    failure_key in failure_scopes if scope else fingerprint in current_failures
                 )
                 current_failures = _append_unique(current_failures, fingerprint)
                 if scope and failure_key not in failure_scopes:
@@ -738,9 +708,7 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
                 if outcome.kind is SemanticKind.TEST_FAIL and edited_files:
                     phase = Phase.RECOVERY
                     rules.append(
-                        "repeated_failure_after_edit"
-                        if repeated_failure
-                        else "failure_after_edit"
+                        "repeated_failure_after_edit" if repeated_failure else "failure_after_edit"
                     )
                 elif repeated_failure and edited_files:
                     phase = Phase.RECOVERY
@@ -753,25 +721,16 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
                         for failure_scope, fingerprint in failure_scopes
                         if failure_scope == scope
                     }
-                    failure_scopes = tuple(
-                        pair for pair in failure_scopes if pair[0] != scope
-                    )
-                    remaining_fingerprints = {
-                        fingerprint for _, fingerprint in failure_scopes
-                    }
+                    failure_scopes = tuple(pair for pair in failure_scopes if pair[0] != scope)
+                    remaining_fingerprints = {fingerprint for _, fingerprint in failure_scopes}
                     current_failures = tuple(
                         fingerprint
                         for fingerprint in current_failures
-                        if (
-                            fingerprint not in removed
-                            or fingerprint in remaining_fingerprints
-                        )
+                        if (fingerprint not in removed or fingerprint in remaining_fingerprints)
                     )
                 elif outcome.failure_fingerprint:
                     current_failures = tuple(
-                        item
-                        for item in current_failures
-                        if item != outcome.failure_fingerprint
+                        item for item in current_failures if item != outcome.failure_fingerprint
                     )
         elif outcome.kind is SemanticKind.COMPILE_RESULT:
             saw_compile_result = True
@@ -794,8 +753,7 @@ def reduce_event(state: WorkState, event: CanonicalEvent) -> WorkState:
         rules.append("compile_result")
 
     repository_content_advanced = (
-        event.revision_after.repository_content
-        != event.revision_before.repository_content
+        event.revision_after.repository_content != event.revision_before.repository_content
     )
     if repository_changed and not repository_content_advanced:
         # A NO-OP EDIT. Not corruption, and NOT the mirror of the check below.
@@ -1020,10 +978,7 @@ class ReasoningGraph:
         if len(set(ids)) != len(ids):
             raise StateIntegrityError("reasoning graph contains duplicate node ids")
         id_set = set(ids)
-        if any(
-            edge.source_id not in id_set or edge.target_id not in id_set
-            for edge in self.edges
-        ):
+        if any(edge.source_id not in id_set or edge.target_id not in id_set for edge in self.edges):
             raise StateIntegrityError("reasoning graph edge endpoint is unknown")
         if len(set(self.source_event_ids)) != len(self.source_event_ids):
             raise StateIntegrityError("reasoning graph repeats a source event")
@@ -1157,9 +1112,7 @@ def reduce_reasoning_signal(
     signal: OperationalSignal,
 ) -> ReasoningGraph:
     if signal.sequence != graph.sequence + 1:
-        raise StateIntegrityError(
-            f"reasoning signal sequence gap: expected {graph.sequence + 1}"
-        )
+        raise StateIntegrityError(f"reasoning signal sequence gap: expected {graph.sequence + 1}")
     if signal.attempt_id != graph.attempt_id:
         raise StateIntegrityError("reasoning signal attempt identity mismatch")
     same_source_event = signal.event_id in graph.source_event_ids
@@ -1170,16 +1123,12 @@ def reduce_reasoning_signal(
         raise StateIntegrityError("reasoning signal source event identity diverged")
     if signal.source_event_sequence < graph.last_source_event_sequence:
         raise StateIntegrityError("reasoning source event order regressed")
-    if (
-        signal.source_event_sequence == graph.last_source_event_sequence
-        and not same_source_event
-    ):
+    if signal.source_event_sequence == graph.last_source_event_sequence and not same_source_event:
         raise StateIntegrityError("reasoning source event sequence is duplicated")
     nodes = list(graph.nodes)
     edges = list(graph.edges)
     index = next(
-        (position for position, node in enumerate(nodes)
-         if node.node_id == signal.hypothesis_id),
+        (position for position, node in enumerate(nodes) if node.node_id == signal.hypothesis_id),
         None,
     )
     current = None if index is None else nodes[index].hypothesis_state
@@ -1288,9 +1237,7 @@ def reduce_reasoning_signal(
     # tests/runtime/test_orphaned_outcome_signal_20260727.py.
     state_preserving = current is not None and current == target
     orphaned_outcome = current is None and None not in allowed
-    reobserved_opening = (
-        current is not None and None in allowed and current not in allowed
-    )
+    reobserved_opening = current is not None and None in allowed and current not in allowed
     skip_transition = orphaned_outcome or state_preserving or reobserved_opening
     if not skip_transition and current not in allowed:
         raise StateIntegrityError(
@@ -1442,9 +1389,7 @@ def reduce_reasoning_event(
         )
     if event.attempt_id != graph.attempt_id:
         raise StateIntegrityError("reasoning event attempt identity mismatch")
-    if graph.last_source_event_hash and (
-        event.previous_event_hash != graph.last_source_event_hash
-    ):
+    if graph.last_source_event_hash and (event.previous_event_hash != graph.last_source_event_hash):
         raise StateIntegrityError("reasoning event previous hash mismatch")
     expected = derive_operational_signals(
         event,
@@ -1457,13 +1402,9 @@ def reduce_reasoning_event(
                 raise StateIntegrityError("reasoning signal source hash mismatch")
             if signal.revision != event.revision_after:
                 raise StateIntegrityError("reasoning signal revision mismatch")
-            if signal.authority not in {
-                outcome.authority for outcome in event.outcomes
-            }:
+            if signal.authority not in {outcome.authority for outcome in event.outcomes}:
                 raise StateIntegrityError("reasoning signal authority mismatch")
-        raise StateIntegrityError(
-            "reasoning signals do not equal canonical event projection"
-        )
+        raise StateIntegrityError("reasoning signals do not equal canonical event projection")
     result = graph
     for signal in provided:
         result = reduce_reasoning_signal(result, signal)
@@ -1552,14 +1493,11 @@ class EventStore:
         # dataclass shape.
         _event_columns = {
             str(row[1])
-            for row in self._connection.execute(
-                "PRAGMA table_info(canonical_events)"
-            ).fetchall()
+            for row in self._connection.execute("PRAGMA table_info(canonical_events)").fetchall()
         }
         if "hash_schema" not in _event_columns:
             self._connection.execute(
-                "ALTER TABLE canonical_events "
-                "ADD COLUMN hash_schema TEXT NOT NULL DEFAULT ''"
+                "ALTER TABLE canonical_events ADD COLUMN hash_schema TEXT NOT NULL DEFAULT ''"
             )
         self._connection.commit()
 
@@ -1606,9 +1544,7 @@ class EventStore:
             )
         expected_parent = "" if head is None else head[1]
         if event.previous_event_hash != expected_parent:
-            raise EventIntegrityError(
-                "event parent hash does not match the committed causal head"
-            )
+            raise EventIntegrityError("event parent hash does not match the committed causal head")
         return event.sequence, event.content_hash
 
     def append(self, event: CanonicalEvent) -> None:
@@ -1636,11 +1572,7 @@ class EventStore:
                 # A rehydrated historical event owns its original serialized
                 # bytes. Never relabel those bytes as the current schema merely
                 # because this process is current.
-                hash_schema = (
-                    CANONICAL_HASH_SCHEMA
-                    if payload == _canonical_json(event)
-                    else ""
-                )
+                hash_schema = CANONICAL_HASH_SCHEMA if payload == _canonical_json(event) else ""
                 rows.append(
                     (
                         event.event_id,
@@ -1710,17 +1642,12 @@ class EventStore:
             or event.sequence != row_sequence
             or event.previous_event_hash != row_parent_hash
         ):
-            raise EventIntegrityError(
-                f"event identity/tamper mismatch at sequence {row_sequence}"
-            )
+            raise EventIntegrityError(f"event identity/tamper mismatch at sequence {row_sequence}")
 
         # A row claiming the current schema must reproduce the current canonical
         # shape exactly. A hash-valid older payload carrying a current marker is
         # schema drift, not content tampering.
-        if (
-            row_hash_schema == CANONICAL_HASH_SCHEMA
-            and _canonical_json(event) != payload
-        ):
+        if row_hash_schema == CANONICAL_HASH_SCHEMA and _canonical_json(event) != payload:
             raise EventSchemaVersionError(
                 f"canonical event at sequence {row_sequence} claims hash schema "
                 f"{CANONICAL_HASH_SCHEMA!r} but its payload does not round-trip "
@@ -1768,9 +1695,7 @@ class EventStore:
                     f"event sequence gap at {row_sequence}; expected {expected_sequence}"
                 )
             if row_parent_hash != parent_hash:
-                raise EventIntegrityError(
-                    f"event parent hash mismatch at sequence {row_sequence}"
-                )
+                raise EventIntegrityError(f"event parent hash mismatch at sequence {row_sequence}")
             result.append(event)
             expected_sequence += 1
             parent_hash = row_content_hash
@@ -1778,10 +1703,7 @@ class EventStore:
 
     def save_snapshot(self, state: WorkState) -> None:
         committed_events = self.events(state.attempt_id)
-        prefix = tuple(
-            event for event in committed_events
-            if event.sequence <= state.sequence
-        )
+        prefix = tuple(event for event in committed_events if event.sequence <= state.sequence)
         if state.sequence == 0:
             replayed = WorkState.initial(
                 attempt_id=state.attempt_id,
@@ -1875,9 +1797,7 @@ class EventStore:
                 revision=state.revision,
             )
         if replayed != state:
-            raise StateIntegrityError(
-                "snapshot state does not match deterministic replay"
-            )
+            raise StateIntegrityError("snapshot state does not match deterministic replay")
         return state, committed_events[sequence:]
 
 
@@ -1893,11 +1813,7 @@ def _delivery_attempt_from_json(payload: str) -> "DeliveryAttempt":
         joined_capsule_hash=raw.get("joined_capsule_hash", ""),
         provider_payload_hash=raw.get("provider_payload_hash", ""),
         provider_response_id=raw.get("provider_response_id", ""),
-        terminal_kind=(
-            ProviderTerminalKind(terminal_kind)
-            if terminal_kind is not None
-            else None
-        ),
+        terminal_kind=(ProviderTerminalKind(terminal_kind) if terminal_kind is not None else None),
         terminal_reason=raw.get("terminal_reason", ""),
         response_hash=raw.get("response_hash", ""),
         failure_reason=raw.get("failure_reason", ""),
@@ -2071,14 +1987,11 @@ class RuntimeJournal(EventStore):
         ):
             columns = {
                 str(row[1])
-                for row in self.connection.execute(
-                    f"PRAGMA table_info({table})"
-                ).fetchall()
+                for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()
             }
             if column not in columns:
                 self.connection.execute(
-                    f"ALTER TABLE {table} "
-                    f"ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
         # The original evidence table keyed lifecycle only by evidence_id.
         # Retain it as an immutable audit source and backfill the corrected
@@ -2127,9 +2040,7 @@ class RuntimeJournal(EventStore):
             payload = str(row[7])
             state_hash = str(row[6])
             if sequence != expected_sequence or _sha256(payload) != state_hash:
-                raise StateIntegrityError(
-                    "delivery journal sequence/hash integrity failure"
-                )
+                raise StateIntegrityError("delivery journal sequence/hash integrity failure")
             attempt = _delivery_attempt_from_json(payload)
             if (
                 attempt.model_call_id != str(row[1])
@@ -2184,25 +2095,15 @@ class RuntimeJournal(EventStore):
                     "model_call identity already belongs to another delivery attempt"
                 )
             if str(stored_call) != attempt.model_call_id:
-                raise StateIntegrityError(
-                    "delivery attempt model_call identity is immutable"
-                )
-            if (
-                attempt_id
-                and str(stored_attempt)
-                and str(stored_attempt) != attempt_id
-            ):
-                raise StateIntegrityError(
-                    "delivery attempt owner identity is immutable"
-                )
+                raise StateIntegrityError("delivery attempt model_call identity is immutable")
+            if attempt_id and str(stored_attempt) and str(stored_attempt) != attempt_id:
+                raise StateIntegrityError("delivery attempt owner identity is immutable")
 
         payload = _canonical_json(attempt)
         if history:
             latest = history[-1]
             if latest.model_call_id != attempt.model_call_id:
-                raise StateIntegrityError(
-                    "delivery attempt model_call identity is immutable"
-                )
+                raise StateIntegrityError("delivery attempt model_call identity is immutable")
             if latest.capsule_hash != attempt.capsule_hash:
                 raise StateIntegrityError("delivery attempt capsule identity is immutable")
             if latest == attempt:
@@ -2241,9 +2142,7 @@ class RuntimeJournal(EventStore):
                     f"{latest.state.value}->{attempt.state.value}"
                 )
         elif attempt.state is not DeliveryState.SELECTED:
-            raise StateIntegrityError(
-                "delivery journal initial lifecycle must be SELECTED"
-            )
+            raise StateIntegrityError("delivery journal initial lifecycle must be SELECTED")
 
         try:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -2279,9 +2178,7 @@ class RuntimeJournal(EventStore):
             self.connection.commit()
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
-            raise StateIntegrityError(
-                "delivery journal identity/integrity conflict"
-            ) from exc
+            raise StateIntegrityError("delivery journal identity/integrity conflict") from exc
 
     def evidence_history(
         self,
@@ -2300,9 +2197,7 @@ class RuntimeJournal(EventStore):
                 (evidence_id,),
             ).fetchall()
             if len(owners) > 1:
-                raise StateIntegrityError(
-                    "evidence history is attempt-ambiguous"
-                )
+                raise StateIntegrityError("evidence history is attempt-ambiguous")
             if owners:
                 attempt_id = str(owners[0][0])
         rows = self.connection.execute(
@@ -2319,9 +2214,7 @@ class RuntimeJournal(EventStore):
         for expected, row in enumerate(rows, start=1):
             payload = str(row[3])
             if int(row[0]) != expected or _sha256(payload) != str(row[2]):
-                raise StateIntegrityError(
-                    "evidence journal sequence/hash integrity failure"
-                )
+                raise StateIntegrityError("evidence journal sequence/hash integrity failure")
             # C28a, FAIL-CLOSED on an UNKNOWN schema -- parity with `canonical_events`.
             # A row stamped by a build we do not know may carry fields this reader would
             # silently drop, or omit fields this reader would silently default. Empty is
@@ -2337,13 +2230,8 @@ class RuntimeJournal(EventStore):
                     f"{EVIDENCE_RECORD_SCHEMA!r}"
                 )
             record = _evidence_record_from_json(payload)
-            if (
-                record.evidence_id != evidence_id
-                or record.lifecycle.value != str(row[1])
-            ):
-                raise StateIntegrityError(
-                    "evidence journal persisted state mismatch"
-                )
+            if record.evidence_id != evidence_id or record.lifecycle.value != str(row[1]):
+                raise StateIntegrityError("evidence journal persisted state mismatch")
             history.append(record)
         return tuple(history)
 
@@ -2370,23 +2258,16 @@ class RuntimeJournal(EventStore):
                     raise StateIntegrityError(
                         "evidence journal byte-owner lineage cannot be removed"
                     )
-            elif (
-                evidence.lifecycle
-                not in _EVIDENCE_TRANSITIONS[latest.lifecycle]
-            ):
+            elif evidence.lifecycle not in _EVIDENCE_TRANSITIONS[latest.lifecycle]:
                 raise StateIntegrityError(
                     "evidence journal lifecycle integrity failure: "
                     f"{latest.lifecycle.value}->{evidence.lifecycle.value}"
                 )
             if not owner_enrichment and (
-                len(evidence.transition_history)
-                != len(latest.transition_history) + 1
-                or evidence.transition_history[:-1]
-                != latest.transition_history
+                len(evidence.transition_history) != len(latest.transition_history) + 1
+                or evidence.transition_history[:-1] != latest.transition_history
             ):
-                raise StateIntegrityError(
-                    "evidence journal lifecycle transition proof mismatch"
-                )
+                raise StateIntegrityError("evidence journal lifecycle transition proof mismatch")
             if not owner_enrichment:
                 transition = evidence.transition_history[-1]
                 if (
@@ -2396,19 +2277,16 @@ class RuntimeJournal(EventStore):
                         latest.lifecycle,
                         evidence.lifecycle,
                     )
-                    not in _EVIDENCE_REASON_TRANSITIONS[
-                        transition.reason_code
-                    ]
+                    not in _EVIDENCE_REASON_TRANSITIONS[transition.reason_code]
                 ):
-                    raise StateIntegrityError(
-                        "evidence journal lifecycle reason integrity failure"
-                    )
+                    raise StateIntegrityError("evidence journal lifecycle reason integrity failure")
                 expected = replace(
                     latest,
                     lifecycle=evidence.lifecycle,
                     fresh=(
                         False
-                        if evidence.lifecycle in {
+                        if evidence.lifecycle
+                        in {
                             EvidenceLifecycle.INVALIDATED,
                             EvidenceLifecycle.EXPIRED,
                         }
@@ -2416,8 +2294,7 @@ class RuntimeJournal(EventStore):
                     ),
                     superseded=(
                         True
-                        if evidence.lifecycle
-                        is EvidenceLifecycle.SUPERSEDED
+                        if evidence.lifecycle is EvidenceLifecycle.SUPERSEDED
                         else latest.superseded
                     ),
                     transition_history=evidence.transition_history,
@@ -2431,8 +2308,7 @@ class RuntimeJournal(EventStore):
             EvidenceLifecycle.PENDING,
         }:
             raise StateIntegrityError(
-                "evidence journal initial lifecycle must be "
-                "DISCOVERED or PENDING"
+                "evidence journal initial lifecycle must be DISCOVERED or PENDING"
             )
         payload = evidence.canonical_json()
         try:
@@ -2456,9 +2332,7 @@ class RuntimeJournal(EventStore):
             self.connection.commit()
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
-            raise StateIntegrityError(
-                "evidence journal identity/integrity conflict"
-            ) from exc
+            raise StateIntegrityError("evidence journal identity/integrity conflict") from exc
 
     def oracle_history(self, attempt_id: str) -> tuple["OracleDecision", ...]:
         rows = self.connection.execute(
@@ -2474,9 +2348,7 @@ class RuntimeJournal(EventStore):
         for expected, row in enumerate(rows, start=1):
             payload = str(row[3])
             if int(row[0]) != expected or _sha256(payload) != str(row[2]):
-                raise StateIntegrityError(
-                    "oracle journal sequence/hash integrity failure"
-                )
+                raise StateIntegrityError("oracle journal sequence/hash integrity failure")
             decision = _oracle_decision_from_json(payload)
             if decision.decision_id != str(row[1]):
                 raise StateIntegrityError("oracle journal decision identity mismatch")
@@ -2509,9 +2381,7 @@ class RuntimeJournal(EventStore):
             self.connection.commit()
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
-            raise StateIntegrityError(
-                "oracle journal identity/integrity conflict"
-            ) from exc
+            raise StateIntegrityError("oracle journal identity/integrity conflict") from exc
 
     def evidence_records_for_attempt(
         self,
@@ -2551,14 +2421,10 @@ class RuntimeJournal(EventStore):
         for expected, row in enumerate(rows, start=1):
             payload = str(row[3])
             if int(row[0]) != expected or _sha256(payload) != str(row[2]):
-                raise StateIntegrityError(
-                    "compilation journal sequence/hash integrity failure"
-                )
+                raise StateIntegrityError("compilation journal sequence/hash integrity failure")
             compilation = _capsule_compilation_from_json(payload)
             if compilation.model_call_id != str(row[1]):
-                raise StateIntegrityError(
-                    "compilation journal model-call identity mismatch"
-                )
+                raise StateIntegrityError("compilation journal model-call identity mismatch")
             history.append(compilation)
         return tuple(history)
 
@@ -2575,9 +2441,7 @@ class RuntimeJournal(EventStore):
             or compilation.state is not CapsuleCompilationState.COMPILED
             or compilation.delivery_attempt is None
         ):
-            raise StateIntegrityError(
-                "compilation journal requires an owned COMPILED capsule"
-            )
+            raise StateIntegrityError("compilation journal requires an owned COMPILED capsule")
         history = self.compilation_history(delivery_attempt_id)
         if history and history[-1] == compilation:
             return
@@ -2590,27 +2454,19 @@ class RuntimeJournal(EventStore):
                 or latest.evidence_ids != compilation.evidence_ids
                 or latest.decision_id != compilation.decision_id
             ):
-                raise StateIntegrityError(
-                    "compilation journal immutable identity changed"
-                )
+                raise StateIntegrityError("compilation journal immutable identity changed")
             assert latest.delivery_attempt is not None
             current_delivery = compilation.delivery_attempt
             prior_delivery = latest.delivery_attempt
             if current_delivery == prior_delivery:
-                raise StateIntegrityError(
-                    "compilation journal changed without delivery transition"
-                )
+                raise StateIntegrityError("compilation journal changed without delivery transition")
             allowed = _DELIVERY_TRANSITIONS
-            if current_delivery.state not in allowed.get(
-                prior_delivery.state, set()
-            ):
+            if current_delivery.state not in allowed.get(prior_delivery.state, set()):
                 raise StateIntegrityError(
                     "compilation journal delivery lifecycle integrity failure"
                 )
         elif compilation.delivery_attempt.state is not DeliveryState.COMPILED:
-            raise StateIntegrityError(
-                "compilation journal initial delivery state must be COMPILED"
-            )
+            raise StateIntegrityError("compilation journal initial delivery state must be COMPILED")
         payload = _canonical_json(compilation)
         try:
             self.connection.execute(
@@ -2632,9 +2488,7 @@ class RuntimeJournal(EventStore):
             self.connection.commit()
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
-            raise StateIntegrityError(
-                "compilation journal identity/integrity conflict"
-            ) from exc
+            raise StateIntegrityError("compilation journal identity/integrity conflict") from exc
 
     def compilations_for_attempt(
         self,
@@ -2691,11 +2545,7 @@ class RuntimeJournal(EventStore):
             raise StateIntegrityError(
                 "atomic transition found orphan delivery or compilation history"
             )
-        if (
-            compilation_history
-            and compilation_history[-1].delivery_attempt
-            != delivery_history[-1]
-        ):
+        if compilation_history and compilation_history[-1].delivery_attempt != delivery_history[-1]:
             raise StateIntegrityError(
                 "atomic transition found divergent delivery/compilation heads"
             )
@@ -2712,21 +2562,14 @@ class RuntimeJournal(EventStore):
             if (
                 str(stored_id) != delivery_attempt_id
                 or str(stored_call) != delivery.model_call_id
-                or (
-                    str(stored_attempt)
-                    and str(stored_attempt) != attempt_id
-                )
+                or (str(stored_attempt) and str(stored_attempt) != attempt_id)
             ):
-                raise StateIntegrityError(
-                    "atomic transition delivery identity conflict"
-                )
+                raise StateIntegrityError("atomic transition delivery identity conflict")
 
         delivery_rows: list[DeliveryAttempt]
         if not delivery_history:
             if delivery.state is not DeliveryState.COMPILED:
-                raise StateIntegrityError(
-                    "atomic initial delivery state must be COMPILED"
-                )
+                raise StateIntegrityError("atomic initial delivery state must be COMPILED")
             selected = replace(
                 delivery,
                 state=DeliveryState.SELECTED,
@@ -2743,16 +2586,12 @@ class RuntimeJournal(EventStore):
                 or latest_compilation.evidence_ids != compilation.evidence_ids
                 or latest_compilation.decision_id != compilation.decision_id
             ):
-                raise StateIntegrityError(
-                    "atomic compilation immutable identity changed"
-                )
+                raise StateIntegrityError("atomic compilation immutable identity changed")
             if (
                 latest_delivery.model_call_id != delivery.model_call_id
                 or latest_delivery.capsule_hash != delivery.capsule_hash
             ):
-                raise StateIntegrityError(
-                    "atomic delivery immutable identity changed"
-                )
+                raise StateIntegrityError("atomic delivery immutable identity changed")
             if latest_delivery == delivery and latest_compilation == compilation:
                 for item in evidence_updates:
                     history = self.evidence_history(
@@ -2765,29 +2604,21 @@ class RuntimeJournal(EventStore):
                         )
                 return
             allowed = _DELIVERY_TRANSITIONS
-            if delivery.state not in allowed.get(
-                latest_delivery.state, set()
-            ):
+            if delivery.state not in allowed.get(latest_delivery.state, set()):
                 raise StateIntegrityError(
                     "atomic delivery lifecycle integrity failure: "
                     f"{latest_delivery.state.value}->{delivery.state.value}"
                 )
             delivery_rows = [delivery]
 
-        evidence_plans: list[
-            tuple[EvidenceRecord, tuple[EvidenceRecord, ...], str]
-        ] = []
+        evidence_plans: list[tuple[EvidenceRecord, tuple[EvidenceRecord, ...], str]] = []
         seen_evidence_ids: set[str] = set()
         for evidence in evidence_updates:
             if evidence.evidence_id in seen_evidence_ids:
-                raise StateIntegrityError(
-                    "duplicate evidence update in atomic transition"
-                )
+                raise StateIntegrityError("duplicate evidence update in atomic transition")
             seen_evidence_ids.add(evidence.evidence_id)
             if evidence.evidence_id not in delivery.evidence_ids:
-                raise StateIntegrityError(
-                    "atomic evidence update is not bound to the capsule"
-                )
+                raise StateIntegrityError("atomic evidence update is not bound to the capsule")
             history = self.evidence_history(
                 evidence.evidence_id,
                 attempt_id=attempt_id,
@@ -2805,14 +2636,10 @@ class RuntimeJournal(EventStore):
                     f"{latest.lifecycle.value}->{evidence.lifecycle.value}"
                 )
             if (
-                len(evidence.transition_history)
-                != len(latest.transition_history) + 1
-                or evidence.transition_history[:-1]
-                != latest.transition_history
+                len(evidence.transition_history) != len(latest.transition_history) + 1
+                or evidence.transition_history[:-1] != latest.transition_history
             ):
-                raise StateIntegrityError(
-                    "atomic evidence lifecycle transition proof mismatch"
-                )
+                raise StateIntegrityError("atomic evidence lifecycle transition proof mismatch")
             transition = evidence.transition_history[-1]
             if (
                 evidence.lifecycle is EvidenceLifecycle.RELEASED
@@ -2835,13 +2662,9 @@ class RuntimeJournal(EventStore):
                     latest.lifecycle,
                     evidence.lifecycle,
                 )
-                not in _EVIDENCE_REASON_TRANSITIONS[
-                    transition.reason_code
-                ]
+                not in _EVIDENCE_REASON_TRANSITIONS[transition.reason_code]
             ):
-                raise StateIntegrityError(
-                    "atomic evidence lifecycle reason integrity failure"
-                )
+                raise StateIntegrityError("atomic evidence lifecycle reason integrity failure")
             expected = replace(
                 latest,
                 lifecycle=evidence.lifecycle,
@@ -2856,8 +2679,7 @@ class RuntimeJournal(EventStore):
                 ),
                 superseded=(
                     True
-                    if evidence.lifecycle
-                    is EvidenceLifecycle.SUPERSEDED
+                    if evidence.lifecycle is EvidenceLifecycle.SUPERSEDED
                     else latest.superseded
                 ),
                 transition_history=evidence.transition_history,
@@ -2866,9 +2688,7 @@ class RuntimeJournal(EventStore):
                 raise StateIntegrityError(
                     "atomic evidence immutable claim/provenance identity changed"
                 )
-            evidence_plans.append(
-                (evidence, history, evidence.canonical_json())
-            )
+            evidence_plans.append((evidence, history, evidence.canonical_json()))
 
         compilation_payload = _canonical_json(compilation)
         try:
@@ -2972,9 +2792,7 @@ class RuntimeJournal(EventStore):
             self.connection.commit()
         except sqlite3.IntegrityError as exc:
             self.connection.rollback()
-            raise StateIntegrityError(
-                "failure-policy journal identity/integrity conflict"
-            ) from exc
+            raise StateIntegrityError("failure-policy journal identity/integrity conflict") from exc
 
     def failure_history(
         self,
@@ -2993,18 +2811,12 @@ class RuntimeJournal(EventStore):
         for expected, row in enumerate(rows, start=1):
             payload = str(row[2])
             if int(row[0]) != expected or _sha256(payload) != str(row[1]):
-                raise StateIntegrityError(
-                    "failure-policy journal sequence/hash integrity failure"
-                )
+                raise StateIntegrityError("failure-policy journal sequence/hash integrity failure")
             state = _failure_policy_state_from_json(payload)
             if state.attempt_id != attempt_id:
-                raise StateIntegrityError(
-                    "failure-policy journal attempt identity mismatch"
-                )
+                raise StateIntegrityError("failure-policy journal attempt identity mismatch")
             if not state.native_path_enabled:
-                raise StateIntegrityError(
-                    "failure-policy journal disabled the native path"
-                )
+                raise StateIntegrityError("failure-policy journal disabled the native path")
             if state.health in {
                 RuntimeHealthState.HEALTHY,
                 RuntimeHealthState.RECOVERED,
@@ -3015,17 +2827,13 @@ class RuntimeJournal(EventStore):
                 or not state.gt_certification_enabled
                 or state.quarantine_reason is not None
             ):
-                raise StateIntegrityError(
-                    "assured failure-policy state has inconsistent controls"
-                )
+                raise StateIntegrityError("assured failure-policy state has inconsistent controls")
             if state.health is RuntimeHealthState.DEGRADED and (
                 state.assurance is not AssuranceStatus.DEGRADED
                 or state.gt_certification_enabled
                 or not state.isolated_components
             ):
-                raise StateIntegrityError(
-                    "degraded failure-policy state has inconsistent controls"
-                )
+                raise StateIntegrityError("degraded failure-policy state has inconsistent controls")
             if state.health is RuntimeHealthState.QUARANTINED and (
                 state.assurance is not AssuranceStatus.UNASSURED
                 or state.gt_emission_enabled
@@ -3038,29 +2846,16 @@ class RuntimeJournal(EventStore):
                 )
             if history:
                 previous = history[-1]
-                if (
-                    previous.health is RuntimeHealthState.QUARANTINED
-                    and state != previous
-                ):
-                    raise StateIntegrityError(
-                        "quarantined failure-policy state is terminal"
-                    )
+                if previous.health is RuntimeHealthState.QUARANTINED and state != previous:
+                    raise StateIntegrityError("quarantined failure-policy state is terminal")
                 if not set(previous.recovery_attempted_signatures).issubset(
                     state.recovery_attempted_signatures
                 ):
-                    raise StateIntegrityError(
-                        "failure-policy recovery history was rewritten"
-                    )
-                if not set(previous.isolated_components).issubset(
-                    state.isolated_components
-                ):
-                    raise StateIntegrityError(
-                        "failure-policy component isolation was rewritten"
-                    )
+                    raise StateIntegrityError("failure-policy recovery history was rewritten")
+                if not set(previous.isolated_components).issubset(state.isolated_components):
+                    raise StateIntegrityError("failure-policy component isolation was rewritten")
             elif state.health is not RuntimeHealthState.HEALTHY:
-                raise StateIntegrityError(
-                    "failure-policy journal initial state must be HEALTHY"
-                )
+                raise StateIntegrityError("failure-policy journal initial state must be HEALTHY")
             history.append(state)
         return tuple(history)
 
@@ -3257,12 +3052,16 @@ class DeliveryAttempt:
             raise ValueError(f"{self.state.value} requires matching terminal proof")
         if self.state is DeliveryState.RESPONSE_COMMITTED:
             _validate_sha256(self.response_hash, field_name="response_hash")
-        if self.state in {
-            DeliveryState.JOIN_FAILED,
-            DeliveryState.DISPATCH_FAILED,
-            DeliveryState.PROVIDER_REJECTED,
-            DeliveryState.RESPONSE_DISCARDED,
-        } and not self.failure_reason:
+        if (
+            self.state
+            in {
+                DeliveryState.JOIN_FAILED,
+                DeliveryState.DISPATCH_FAILED,
+                DeliveryState.PROVIDER_REJECTED,
+                DeliveryState.RESPONSE_DISCARDED,
+            }
+            and not self.failure_reason
+        ):
             raise ValueError(f"{self.state.value} requires a failure reason")
 
 
@@ -3406,9 +3205,7 @@ def record_delivery_failure(
         },
     }
     if state not in allowed.get(attempt.state, set()):
-        raise ValueError(
-            f"invalid delivery failure {attempt.state.value}->{state.value}"
-        )
+        raise ValueError(f"invalid delivery failure {attempt.state.value}->{state.value}")
     return replace(
         attempt,
         state=state,
@@ -3652,15 +3449,9 @@ def apply_failure_policy(
     return replace(
         state,
         health=(
-            RuntimeHealthState.DEGRADED
-            if retains_degradation
-            else RuntimeHealthState.RECOVERED
+            RuntimeHealthState.DEGRADED if retains_degradation else RuntimeHealthState.RECOVERED
         ),
-        assurance=(
-            AssuranceStatus.DEGRADED
-            if retains_degradation
-            else AssuranceStatus.ASSURED
-        ),
+        assurance=(AssuranceStatus.DEGRADED if retains_degradation else AssuranceStatus.ASSURED),
         recovery_attempted_signatures=attempted,
         last_verified_snapshot_id=recovery_input.snapshot_id,
         gt_emission_enabled=True,
@@ -3820,41 +3611,26 @@ class EvidenceRecord:
             object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
         if not self.evidence_id or not self.feature_id:
             raise ValueError("evidence_id and feature_id are required")
-        if (
-            self.owner_feature_ids
-            != tuple(sorted(set(self.owner_feature_ids)))
-            or any(not item.startswith("GT_") for item in self.owner_feature_ids)
+        if self.owner_feature_ids != tuple(sorted(set(self.owner_feature_ids))) or any(
+            not item.startswith("GT_") for item in self.owner_feature_ids
         ):
-            raise ValueError(
-                "owner_feature_ids must be sorted unique GT_* audit identities"
-            )
-        if (
-            self.observed_substrates
-            != tuple(sorted(set(self.observed_substrates)))
-            or any(not item.strip() for item in self.observed_substrates)
+            raise ValueError("owner_feature_ids must be sorted unique GT_* audit identities")
+        if self.observed_substrates != tuple(sorted(set(self.observed_substrates))) or any(
+            not item.strip() for item in self.observed_substrates
         ):
-            raise ValueError(
-                "observed_substrates must be sorted unique non-empty identities"
-            )
+            raise ValueError("observed_substrates must be sorted unique non-empty identities")
         if (
             self.standing_source_evidence_id == self.evidence_id
-            or (
-                self.standing_source_evidence_id
-                and not self.decision_window_generation
-            )
+            or (self.standing_source_evidence_id and not self.decision_window_generation)
             or (
                 self.decision_window_generation
                 and not self.decision_window_generation.startswith("GT-W-")
             )
             or (
-                (
-                    self.standing_source_evidence_id
-                    or self.decision_window_generation
-                )
+                (self.standing_source_evidence_id or self.decision_window_generation)
                 and (
                     self.feature_id != "obligations"
-                    or self.mandatory_reason
-                    is not MandatoryReason.TASK_OBLIGATION
+                    or self.mandatory_reason is not MandatoryReason.TASK_OBLIGATION
                 )
             )
         ):
@@ -3883,12 +3659,8 @@ class EvidenceRecord:
             value = getattr(self, field_name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{field_name} must be a non-negative integer")
-        if (
-            self.mandatory_reason is MandatoryReason.VERIFIED_CONTRADICTION
-            and (
-                self.grade is not EvidenceGrade.VERIFIED
-                or self.authority < Authority.RESULT_DERIVED
-            )
+        if self.mandatory_reason is MandatoryReason.VERIFIED_CONTRADICTION and (
+            self.grade is not EvidenceGrade.VERIFIED or self.authority < Authority.RESULT_DERIVED
         ):
             raise ValueError(
                 "verified contradiction requires VERIFIED grade and "
@@ -3899,20 +3671,12 @@ class EvidenceRecord:
             contract = contract_registry.get(self.feature_id)
             if contract is not None:
                 if self.decision_context is not contract.decision_context:
-                    raise ValueError(
-                        "evidence decision_context violates its feature contract"
-                    )
+                    raise ValueError("evidence decision_context violates its feature contract")
                 mandatory_overlay = {
                     MandatoryReason.BLOCKER: {EvidenceRole.BLOCKER},
-                    MandatoryReason.VERIFIED_CONTRADICTION: {
-                        EvidenceRole.CONTRADICTION
-                    },
-                    MandatoryReason.MATERIAL_UNCERTAINTY: {
-                        EvidenceRole.MATERIAL_UNCERTAINTY
-                    },
-                    MandatoryReason.TASK_OBLIGATION: {
-                        EvidenceRole.BEHAVIORAL_CONTRACT
-                    },
+                    MandatoryReason.VERIFIED_CONTRADICTION: {EvidenceRole.CONTRADICTION},
+                    MandatoryReason.MATERIAL_UNCERTAINTY: {EvidenceRole.MATERIAL_UNCERTAINTY},
+                    MandatoryReason.TASK_OBLIGATION: {EvidenceRole.BEHAVIORAL_CONTRACT},
                     None: set(),
                 }[self.mandatory_reason]
                 allowed_role_sets = (
@@ -3924,13 +3688,10 @@ class EvidenceRecord:
                     }
                 )
                 if frozenset(self.roles) not in allowed_role_sets:
-                    raise ValueError(
-                        "evidence roles must exactly match its feature contract"
-                    )
+                    raise ValueError("evidence roles must exactly match its feature contract")
                 if self.revision_dependencies != contract.revision_dependencies:
                     raise ValueError(
-                        "evidence revision_dependencies must exactly match "
-                        "its feature contract"
+                        "evidence revision_dependencies must exactly match its feature contract"
                     )
 
     def canonical_json(self) -> str:
@@ -3979,9 +3740,7 @@ _LEGACY_EVIDENCE_REASON_ALIASES: Mapping[str, EvidenceTransitionReason] = {
     "HELD": EvidenceTransitionReason.OTHER_DECISION_CURRENTLY_ACTIVE,
     "RELEASE": EvidenceTransitionReason.DECISION_WINDOW_OPEN,
     "RELEASED": EvidenceTransitionReason.DECISION_WINDOW_OPEN,
-    "MODEL_EXPOSURE_PROVEN": (
-        EvidenceTransitionReason.PROVIDER_TERMINAL_DELIVERY_PROVEN
-    ),
+    "MODEL_EXPOSURE_PROVEN": (EvidenceTransitionReason.PROVIDER_TERMINAL_DELIVERY_PROVEN),
 }
 
 
@@ -3989,56 +3748,78 @@ _EVIDENCE_REASON_TRANSITIONS: Mapping[
     EvidenceTransitionReason,
     frozenset[tuple[EvidenceLifecycle, EvidenceLifecycle]],
 ] = {
-    EvidenceTransitionReason.PRODUCER_DISCOVERED: frozenset({
-        (EvidenceLifecycle.DISCOVERED, EvidenceLifecycle.PENDING),
-    }),
-    EvidenceTransitionReason.PREREQUISITES_PENDING: frozenset({
-        (EvidenceLifecycle.DISCOVERED, EvidenceLifecycle.PENDING),
-        (EvidenceLifecycle.READY, EvidenceLifecycle.HELD),
-    }),
-    EvidenceTransitionReason.READINESS_RULES_SATISFIED: frozenset({
-        (EvidenceLifecycle.PENDING, EvidenceLifecycle.READY),
-        (EvidenceLifecycle.HELD, EvidenceLifecycle.READY),
-    }),
-    EvidenceTransitionReason.OTHER_DECISION_CURRENTLY_ACTIVE: frozenset({
-        (EvidenceLifecycle.READY, EvidenceLifecycle.HELD),
-    }),
-    EvidenceTransitionReason.DECISION_WINDOW_OPEN: frozenset({
-        (EvidenceLifecycle.READY, EvidenceLifecycle.RELEASED),
-        (EvidenceLifecycle.HELD, EvidenceLifecycle.RELEASED),
-    }),
-    EvidenceTransitionReason.PROVIDER_TERMINAL_DELIVERY_PROVEN: frozenset({
-        (EvidenceLifecycle.RELEASED, EvidenceLifecycle.DELIVERED),
-    }),
-    EvidenceTransitionReason.ACTIVATED_AFTER_PROVIDER_DELIVERY: frozenset({
-        (EvidenceLifecycle.DELIVERED, EvidenceLifecycle.ACTIVE),
-    }),
-    EvidenceTransitionReason.DECISION_SATISFIED: frozenset({
-        (EvidenceLifecycle.DELIVERED, EvidenceLifecycle.SATISFIED),
-        (EvidenceLifecycle.ACTIVE, EvidenceLifecycle.SATISFIED),
-    }),
-    EvidenceTransitionReason.STRONGER_EVIDENCE_SUPERSEDED: frozenset({
-        (EvidenceLifecycle.DELIVERED, EvidenceLifecycle.SUPERSEDED),
-        (EvidenceLifecycle.ACTIVE, EvidenceLifecycle.SUPERSEDED),
-    }),
-    EvidenceTransitionReason.DECISION_WINDOW_EXPIRED: frozenset({
-        (EvidenceLifecycle.READY, EvidenceLifecycle.EXPIRED),
-        (EvidenceLifecycle.HELD, EvidenceLifecycle.EXPIRED),
-        (EvidenceLifecycle.RELEASED, EvidenceLifecycle.EXPIRED),
-        (EvidenceLifecycle.ACTIVE, EvidenceLifecycle.EXPIRED),
-    }),
-    EvidenceTransitionReason.REVISION_DEPENDENCY_CHANGED: frozenset({
-        (state, EvidenceLifecycle.INVALIDATED)
-        for state in (
-            EvidenceLifecycle.DISCOVERED,
-            EvidenceLifecycle.PENDING,
-            EvidenceLifecycle.READY,
-            EvidenceLifecycle.HELD,
-            EvidenceLifecycle.RELEASED,
-            EvidenceLifecycle.DELIVERED,
-            EvidenceLifecycle.ACTIVE,
-        )
-    }),
+    EvidenceTransitionReason.PRODUCER_DISCOVERED: frozenset(
+        {
+            (EvidenceLifecycle.DISCOVERED, EvidenceLifecycle.PENDING),
+        }
+    ),
+    EvidenceTransitionReason.PREREQUISITES_PENDING: frozenset(
+        {
+            (EvidenceLifecycle.DISCOVERED, EvidenceLifecycle.PENDING),
+            (EvidenceLifecycle.READY, EvidenceLifecycle.HELD),
+        }
+    ),
+    EvidenceTransitionReason.READINESS_RULES_SATISFIED: frozenset(
+        {
+            (EvidenceLifecycle.PENDING, EvidenceLifecycle.READY),
+            (EvidenceLifecycle.HELD, EvidenceLifecycle.READY),
+        }
+    ),
+    EvidenceTransitionReason.OTHER_DECISION_CURRENTLY_ACTIVE: frozenset(
+        {
+            (EvidenceLifecycle.READY, EvidenceLifecycle.HELD),
+        }
+    ),
+    EvidenceTransitionReason.DECISION_WINDOW_OPEN: frozenset(
+        {
+            (EvidenceLifecycle.READY, EvidenceLifecycle.RELEASED),
+            (EvidenceLifecycle.HELD, EvidenceLifecycle.RELEASED),
+        }
+    ),
+    EvidenceTransitionReason.PROVIDER_TERMINAL_DELIVERY_PROVEN: frozenset(
+        {
+            (EvidenceLifecycle.RELEASED, EvidenceLifecycle.DELIVERED),
+        }
+    ),
+    EvidenceTransitionReason.ACTIVATED_AFTER_PROVIDER_DELIVERY: frozenset(
+        {
+            (EvidenceLifecycle.DELIVERED, EvidenceLifecycle.ACTIVE),
+        }
+    ),
+    EvidenceTransitionReason.DECISION_SATISFIED: frozenset(
+        {
+            (EvidenceLifecycle.DELIVERED, EvidenceLifecycle.SATISFIED),
+            (EvidenceLifecycle.ACTIVE, EvidenceLifecycle.SATISFIED),
+        }
+    ),
+    EvidenceTransitionReason.STRONGER_EVIDENCE_SUPERSEDED: frozenset(
+        {
+            (EvidenceLifecycle.DELIVERED, EvidenceLifecycle.SUPERSEDED),
+            (EvidenceLifecycle.ACTIVE, EvidenceLifecycle.SUPERSEDED),
+        }
+    ),
+    EvidenceTransitionReason.DECISION_WINDOW_EXPIRED: frozenset(
+        {
+            (EvidenceLifecycle.READY, EvidenceLifecycle.EXPIRED),
+            (EvidenceLifecycle.HELD, EvidenceLifecycle.EXPIRED),
+            (EvidenceLifecycle.RELEASED, EvidenceLifecycle.EXPIRED),
+            (EvidenceLifecycle.ACTIVE, EvidenceLifecycle.EXPIRED),
+        }
+    ),
+    EvidenceTransitionReason.REVISION_DEPENDENCY_CHANGED: frozenset(
+        {
+            (state, EvidenceLifecycle.INVALIDATED)
+            for state in (
+                EvidenceLifecycle.DISCOVERED,
+                EvidenceLifecycle.PENDING,
+                EvidenceLifecycle.READY,
+                EvidenceLifecycle.HELD,
+                EvidenceLifecycle.RELEASED,
+                EvidenceLifecycle.DELIVERED,
+                EvidenceLifecycle.ACTIVE,
+            )
+        }
+    ),
 }
 
 
@@ -4047,40 +3828,52 @@ _EVIDENCE_TRANSITIONS: Mapping[
     frozenset[EvidenceLifecycle],
 ] = {
     EvidenceLifecycle.DISCOVERED: frozenset({EvidenceLifecycle.PENDING}),
-    EvidenceLifecycle.PENDING: frozenset({
-        EvidenceLifecycle.READY,
-        EvidenceLifecycle.INVALIDATED,
-        EvidenceLifecycle.EXPIRED,
-    }),
-    EvidenceLifecycle.READY: frozenset({
-        EvidenceLifecycle.HELD,
-        EvidenceLifecycle.RELEASED,
-        EvidenceLifecycle.INVALIDATED,
-        EvidenceLifecycle.EXPIRED,
-    }),
-    EvidenceLifecycle.HELD: frozenset({
-        EvidenceLifecycle.READY,
-        EvidenceLifecycle.RELEASED,
-        EvidenceLifecycle.INVALIDATED,
-        EvidenceLifecycle.EXPIRED,
-    }),
-    EvidenceLifecycle.RELEASED: frozenset({
-        EvidenceLifecycle.DELIVERED,
-        EvidenceLifecycle.INVALIDATED,
-        EvidenceLifecycle.EXPIRED,
-    }),
-    EvidenceLifecycle.DELIVERED: frozenset({
-        EvidenceLifecycle.ACTIVE,
-        EvidenceLifecycle.SATISFIED,
-        EvidenceLifecycle.SUPERSEDED,
-        EvidenceLifecycle.INVALIDATED,
-    }),
-    EvidenceLifecycle.ACTIVE: frozenset({
-        EvidenceLifecycle.SATISFIED,
-        EvidenceLifecycle.SUPERSEDED,
-        EvidenceLifecycle.INVALIDATED,
-        EvidenceLifecycle.EXPIRED,
-    }),
+    EvidenceLifecycle.PENDING: frozenset(
+        {
+            EvidenceLifecycle.READY,
+            EvidenceLifecycle.INVALIDATED,
+            EvidenceLifecycle.EXPIRED,
+        }
+    ),
+    EvidenceLifecycle.READY: frozenset(
+        {
+            EvidenceLifecycle.HELD,
+            EvidenceLifecycle.RELEASED,
+            EvidenceLifecycle.INVALIDATED,
+            EvidenceLifecycle.EXPIRED,
+        }
+    ),
+    EvidenceLifecycle.HELD: frozenset(
+        {
+            EvidenceLifecycle.READY,
+            EvidenceLifecycle.RELEASED,
+            EvidenceLifecycle.INVALIDATED,
+            EvidenceLifecycle.EXPIRED,
+        }
+    ),
+    EvidenceLifecycle.RELEASED: frozenset(
+        {
+            EvidenceLifecycle.DELIVERED,
+            EvidenceLifecycle.INVALIDATED,
+            EvidenceLifecycle.EXPIRED,
+        }
+    ),
+    EvidenceLifecycle.DELIVERED: frozenset(
+        {
+            EvidenceLifecycle.ACTIVE,
+            EvidenceLifecycle.SATISFIED,
+            EvidenceLifecycle.SUPERSEDED,
+            EvidenceLifecycle.INVALIDATED,
+        }
+    ),
+    EvidenceLifecycle.ACTIVE: frozenset(
+        {
+            EvidenceLifecycle.SATISFIED,
+            EvidenceLifecycle.SUPERSEDED,
+            EvidenceLifecycle.INVALIDATED,
+            EvidenceLifecycle.EXPIRED,
+        }
+    ),
     EvidenceLifecycle.SATISFIED: frozenset(),
     EvidenceLifecycle.SUPERSEDED: frozenset(),
     EvidenceLifecycle.EXPIRED: frozenset(),
@@ -4115,13 +3908,10 @@ def transition_evidence(
     else:
         raise TypeError("reason_code must be an EvidenceTransitionReason")
     if to_state not in _EVIDENCE_TRANSITIONS[evidence.lifecycle]:
-        if (
-            evidence.lifecycle is EvidenceLifecycle.RELEASED
-            and to_state in {
-                EvidenceLifecycle.ACTIVE,
-                EvidenceLifecycle.SATISFIED,
-            }
-        ):
+        if evidence.lifecycle is EvidenceLifecycle.RELEASED and to_state in {
+            EvidenceLifecycle.ACTIVE,
+            EvidenceLifecycle.SATISFIED,
+        }:
             raise EvidenceLifecycleError(
                 "RELEASED evidence requires provider-proven DELIVERED state "
                 "before activation or satisfaction"
@@ -4136,13 +3926,9 @@ def transition_evidence(
         )
     if to_state is EvidenceLifecycle.DELIVERED:
         if delivery_attempt is None or not is_delivered(delivery_attempt):
-            raise EvidenceLifecycleError(
-                "DELIVERED requires provider-terminal delivery proof"
-            )
+            raise EvidenceLifecycleError("DELIVERED requires provider-terminal delivery proof")
         if evidence.evidence_id not in delivery_attempt.evidence_ids:
-            raise EvidenceLifecycleError(
-                "provider delivery proof does not bind this evidence"
-            )
+            raise EvidenceLifecycleError("provider delivery proof does not bind this evidence")
     transition = EvidenceTransition(
         from_state=evidence.lifecycle,
         to_state=to_state,
@@ -4154,17 +3940,14 @@ def transition_evidence(
         lifecycle=to_state,
         fresh=(
             False
-            if to_state in {
+            if to_state
+            in {
                 EvidenceLifecycle.INVALIDATED,
                 EvidenceLifecycle.EXPIRED,
             }
             else evidence.fresh
         ),
-        superseded=(
-            True
-            if to_state is EvidenceLifecycle.SUPERSEDED
-            else evidence.superseded
-        ),
+        superseded=(True if to_state is EvidenceLifecycle.SUPERSEDED else evidence.superseded),
         transition_history=evidence.transition_history + (transition,),
     )
 
@@ -4245,9 +4028,7 @@ def invalidate_stale_evidence(
             continue
         dimension = _REVISION_DEPENDENCY_DIMENSION.get(dependency)
         if dimension is None:
-            raise EvidenceLifecycleError(
-                f"unknown revision dependency: {dependency}"
-            )
+            raise EvidenceLifecycleError(f"unknown revision dependency: {dependency}")
         if getattr(evidence.revision, dimension) != getattr(current_revision, dimension):
             changed.append(dependency)
     if not changed:
@@ -4275,19 +4056,13 @@ class FeatureFallbackPolicy:
     minimum_authority: Authority
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "preferred_substrates", tuple(self.preferred_substrates)
-        )
-        object.__setattr__(
-            self, "fallback_substrates", tuple(self.fallback_substrates)
-        )
+        object.__setattr__(self, "preferred_substrates", tuple(self.preferred_substrates))
+        object.__setattr__(self, "fallback_substrates", tuple(self.fallback_substrates))
         if (
             not self.feature_id
             or not self.preferred_substrates
             or not self.fallback_substrates
-            or set(self.preferred_substrates).intersection(
-                self.fallback_substrates
-            )
+            or set(self.preferred_substrates).intersection(self.fallback_substrates)
         ):
             raise ValueError("invalid feature fallback assurance policy")
 
@@ -4301,9 +4076,7 @@ class TemporalPredicate(str, Enum):
     COMMITMENT_WINDOW_OPEN = "decision_commitment_window_open"
     ACTIVE_DECISION_CLOSED = "active_decision_closed"
     REVISION_DEPENDENCY_CHANGED = "declared_revision_dependency_changed"
-    AUTHORIZED_BYTE_OWNER_LINEAGE_PRESENT = (
-        "authorized_byte_owner_lineage_present"
-    )
+    AUTHORIZED_BYTE_OWNER_LINEAGE_PRESENT = "authorized_byte_owner_lineage_present"
 
 
 class CommitmentWindowState(str, Enum):
@@ -4377,8 +4150,7 @@ class FeatureWindow:
             decision = _BOUNDARY_DECISION.get(boundary)
             if decision is None:
                 raise ValueError(
-                    f"feature window {field_name} is not a known delivery boundary: "
-                    f"{boundary!r}"
+                    f"feature window {field_name} is not a known delivery boundary: {boundary!r}"
                 )
             ranks.append(_DECISION_SPINE.index(decision))
         if not ranks[0] <= ranks[1] <= ranks[2]:
@@ -4388,9 +4160,7 @@ class FeatureWindow:
                 f"{self.corrective_boundary}"
             )
 
-    def resolve(
-        self, observed: DecisionContext | None
-    ) -> CommitmentWindowState:
+    def resolve(self, observed: DecisionContext | None) -> CommitmentWindowState:
         """Where ``observed`` sits relative to this window.
 
         Fail-OPEN by construction: an absent or off-spine (FAILURE_RECOVERY) decision
@@ -4405,9 +4175,7 @@ class FeatureWindow:
             return CommitmentWindowState.OPEN
         if now < _DECISION_SPINE.index(_BOUNDARY_DECISION[self.earliest_event]):
             return CommitmentWindowState.NOT_OPEN
-        if now <= _DECISION_SPINE.index(
-            _BOUNDARY_DECISION[self.corrective_boundary]
-        ):
+        if now <= _DECISION_SPINE.index(_BOUNDARY_DECISION[self.corrective_boundary]):
             return CommitmentWindowState.OPEN
         return CommitmentWindowState.COMMITTED
 
@@ -4483,7 +4251,6 @@ class FeatureContract:
         return self.fallback_policy.fallback_substrates
 
 
-
 @dataclass(frozen=True)
 class TemporalRuntimeContext:
     active_decision: ActiveDecision | None
@@ -4493,12 +4260,8 @@ class TemporalRuntimeContext:
     available_substrates: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "satisfied_predicates", frozenset(self.satisfied_predicates)
-        )
-        object.__setattr__(
-            self, "available_substrates", tuple(self.available_substrates)
-        )
+        object.__setattr__(self, "satisfied_predicates", frozenset(self.satisfied_predicates))
+        object.__setattr__(self, "available_substrates", tuple(self.available_substrates))
 
 
 @dataclass(frozen=True)
@@ -4591,8 +4354,7 @@ def _validate_evidence_byte_owners(evidence: EvidenceRecord) -> None:
     )
     if invalid:
         raise StateIntegrityError(
-            "evidence byte owner is not authorized for its canonical FACT: "
-            + ",".join(invalid)
+            "evidence byte owner is not authorized for its canonical FACT: " + ",".join(invalid)
         )
 
 
@@ -4674,13 +4436,8 @@ def _merge_same_evidence_generation(
         raise StateIntegrityError("cannot merge different evidence identities")
     _validate_evidence_byte_owners(existing)
     _validate_evidence_byte_owners(incoming)
-    if (
-        _evidence_generation_projection(existing)
-        != _evidence_generation_projection(incoming)
-    ):
-        raise StateIntegrityError(
-            "evidence identity reused with different canonical generation"
-        )
+    if _evidence_generation_projection(existing) != _evidence_generation_projection(incoming):
+        raise StateIntegrityError("evidence identity reused with different canonical generation")
     existing_window = existing.decision_window_generation
     incoming_window = incoming.decision_window_generation
     if existing_window and incoming_window and existing_window != incoming_window:
@@ -4690,19 +4447,14 @@ def _merge_same_evidence_generation(
             EvidenceLifecycle.READY,
             EvidenceLifecycle.HELD,
         }:
-            raise StateIntegrityError(
-                "provider-bound evidence decision generation cannot change"
-            )
+            raise StateIntegrityError("provider-bound evidence decision generation cannot change")
         merged_window = incoming_window
     else:
         merged_window = existing_window or incoming_window
     return replace(
         existing,
         owner_feature_ids=tuple(
-            sorted(
-                set(existing.owner_feature_ids)
-                | set(incoming.owner_feature_ids)
-            )
+            sorted(set(existing.owner_feature_ids) | set(incoming.owner_feature_ids))
         ),
         decision_window_generation=merged_window,
     )
@@ -4907,9 +4659,7 @@ def _build_feature_contracts() -> Mapping[str, FeatureContract]:
                 TemporalPredicate.ACTIVE_DECISION_ID_MATCHES,
                 TemporalPredicate.REASONING_GRAPH_CONNECTED,
             ),
-            commitment_predicates=(
-                TemporalPredicate.COMMITMENT_WINDOW_OPEN,
-            ),
+            commitment_predicates=(TemporalPredicate.COMMITMENT_WINDOW_OPEN,),
             expiry_predicates=(
                 TemporalPredicate.ACTIVE_DECISION_CLOSED,
                 TemporalPredicate.REVISION_DEPENDENCY_CHANGED,
@@ -4935,9 +4685,8 @@ def _build_feature_contracts() -> Mapping[str, FeatureContract]:
             ),
             decision_context=fact.decision_context,
             roles=roles,
-            ready_predicates=fact.ready_predicates + (
-                TemporalPredicate.AUTHORIZED_BYTE_OWNER_LINEAGE_PRESENT,
-            ),
+            ready_predicates=fact.ready_predicates
+            + (TemporalPredicate.AUTHORIZED_BYTE_OWNER_LINEAGE_PRESENT,),
             relevance_predicates=fact.relevance_predicates,
             commitment_predicates=fact.commitment_predicates,
             expiry_predicates=fact.expiry_predicates,
@@ -4955,8 +4704,6 @@ def feature_contract_for(feature_id: str) -> FeatureContract | None:
     return FEATURE_CONTRACTS.get(feature_id)
 
 
-
-
 def role_driven_coalition_enabled(env: Mapping[str, str] | None = None) -> bool:
     """``GT_ROLE_DRIVEN_COALITION`` -- default OFF, so the default is byte-identical.
 
@@ -4970,8 +4717,6 @@ def role_driven_coalition_enabled(env: Mapping[str, str] | None = None) -> bool:
     """
     source = os.environ if env is None else env
     return str(source.get("GT_ROLE_DRIVEN_COALITION", "0")).strip() == "1"
-
-
 
 
 @dataclass(frozen=True)
@@ -5015,14 +4760,11 @@ class CanonicalEvidenceSemantics:
             raise ValueError("canonical semantics causal neighborhood is required")
         if not self.revision_dependencies:
             raise ValueError("canonical semantics revision dependencies are required")
-        if (
-            self.observed_substrates
-            != tuple(sorted(set(self.observed_substrates)))
-            or any(not item.strip() for item in self.observed_substrates)
+        if self.observed_substrates != tuple(sorted(set(self.observed_substrates))) or any(
+            not item.strip() for item in self.observed_substrates
         ):
             raise ValueError(
-                "canonical semantics observed_substrates must be sorted unique "
-                "non-empty identities"
+                "canonical semantics observed_substrates must be sorted unique non-empty identities"
             )
         for field_name in (
             "failure_prevention",
@@ -5044,15 +4786,9 @@ def _roles_match_contract(
 
     overlay = {
         MandatoryReason.BLOCKER: {EvidenceRole.BLOCKER},
-        MandatoryReason.VERIFIED_CONTRADICTION: {
-            EvidenceRole.CONTRADICTION
-        },
-        MandatoryReason.MATERIAL_UNCERTAINTY: {
-            EvidenceRole.MATERIAL_UNCERTAINTY
-        },
-        MandatoryReason.TASK_OBLIGATION: {
-            EvidenceRole.BEHAVIORAL_CONTRACT
-        },
+        MandatoryReason.VERIFIED_CONTRADICTION: {EvidenceRole.CONTRADICTION},
+        MandatoryReason.MATERIAL_UNCERTAINTY: {EvidenceRole.MATERIAL_UNCERTAINTY},
+        MandatoryReason.TASK_OBLIGATION: {EvidenceRole.BEHAVIORAL_CONTRACT},
         None: set(),
     }[mandatory_reason]
     allowed = (
@@ -5113,9 +4849,7 @@ def _canonical_sidecar_provenance(
         SourceState,
     )
 
-    runtime_witnesses = tuple(
-        getattr(envelope, "runtime_witnesses", ())
-    )
+    runtime_witnesses = tuple(getattr(envelope, "runtime_witnesses", ()))
     if runtime_witnesses:
         provenances: list[str] = []
         for witness in runtime_witnesses:
@@ -5124,17 +4858,13 @@ def _canonical_sidecar_provenance(
             if witness.kind == "canonical_event":
                 if (
                     committed_event_hashes is None
-                    or committed_event_hashes.get(witness.witness_id)
-                    != witness.content_sha256
+                    or committed_event_hashes.get(witness.witness_id) != witness.content_sha256
                 ):
                     return ()
-                provenances.append(
-                    f"event:{witness.witness_id}:sha256:{witness.content_sha256}"
-                )
+                provenances.append(f"event:{witness.witness_id}:sha256:{witness.content_sha256}")
             elif witness.kind == "deterministic_computation":
                 provenances.append(
-                    "computation:"
-                    f"{witness.witness_id}:sha256:{witness.content_sha256}"
+                    f"computation:{witness.witness_id}:sha256:{witness.content_sha256}"
                 )
             elif witness.kind == "diagnostic_location":
                 provenances.append(
@@ -5151,10 +4881,8 @@ def _canonical_sidecar_provenance(
         return ()
     if (
         getattr(envelope, "producer", "") != "change_surface"
-        or getattr(envelope, "evidence_type", "")
-        != "new_file_destination"
-        or
-        inputs.schema != PRODUCER_INPUTS_SCHEMA
+        or getattr(envelope, "evidence_type", "") != "new_file_destination"
+        or inputs.schema != PRODUCER_INPUTS_SCHEMA
         or inputs.evidence_type != getattr(envelope, "evidence_type", "")
         or inputs.candidate_id != getattr(envelope, "dedup_key", "")
         or inputs.graph_revision != semantics.revision.graph
@@ -5226,7 +4954,7 @@ def _dedup_key_from_evidence_id(evidence_id: str) -> str:
     """
     if not isinstance(evidence_id, str) or not evidence_id.startswith("GT-E-"):
         return ""
-    body = evidence_id[len("GT-E-"):]
+    body = evidence_id[len("GT-E-") :]
     key, separator, generation = body.rpartition("-g")
     if not separator or not key or not generation:
         return ""
@@ -5289,10 +5017,7 @@ def canonical_evidence_from_envelope(
     # The legacy graph token and the full canonical vector must agree.  A
     # producer may use a composite ``valid_until`` token, so only the graph
     # identity itself is compared here.
-    if (
-        envelope.graph_revision
-        and envelope.graph_revision != semantics.revision.graph
-    ):
+    if envelope.graph_revision and envelope.graph_revision != semantics.revision.graph:
         return None
     tier_map = {
         "VERIFIED": EvidenceGrade.VERIFIED,
@@ -5303,10 +5028,7 @@ def canonical_evidence_from_envelope(
     grade = tier_map.get(envelope.tier)
     if grade is None:
         return None
-    provenance = tuple(
-        f"{path}:{line}"
-        for path, line in envelope.provenance
-    )
+    provenance = tuple(f"{path}:{line}" for path, line in envelope.provenance)
     if not provenance:
         provenance = _canonical_sidecar_provenance(
             envelope,
@@ -5396,10 +5118,7 @@ def canonicalize_evidence_envelopes(
         by_id[record.evidence_id] = replace(
             previous,
             owner_feature_ids=tuple(
-                sorted(
-                    set(previous.owner_feature_ids)
-                    | set(record.owner_feature_ids)
-                )
+                sorted(set(previous.owner_feature_ids) | set(record.owner_feature_ids))
             ),
             # INTERSECTION, deliberately -- and NOT an inconsistency with the
             # `owner_feature_ids` union directly above. The two fields answer different
@@ -5415,10 +5134,7 @@ def canonicalize_evidence_envelopes(
             # the "union is obviously right / it is inconsistent with the line above" argument
             # is not made a third time: the asymmetry is the point.
             observed_substrates=tuple(
-                sorted(
-                    set(previous.observed_substrates)
-                    & set(record.observed_substrates)
-                )
+                sorted(set(previous.observed_substrates) & set(record.observed_substrates))
             ),
         )
     return tuple(by_id[key] for key in sorted(by_id))
@@ -5487,9 +5203,7 @@ def evaluate_feature_contract(
             relevant=True,
             release_allowed=False,
             expired=evidence.lifecycle is EvidenceLifecycle.EXPIRED,
-            invalidated=(
-                evidence.lifecycle is EvidenceLifecycle.INVALIDATED
-            ),
+            invalidated=(evidence.lifecycle is EvidenceLifecycle.INVALIDATED),
             next_lifecycle=evidence.lifecycle,
             reason=None,
         )
@@ -5541,14 +5255,10 @@ def evaluate_feature_contract(
         f"decision:{active.decision_id}",
     }
     active_semantic_nodes = {
-        node
-        for node in active.causal_neighborhood
-        if not node.startswith("decision:")
+        node for node in active.causal_neighborhood if not node.startswith("decision:")
     }
     evidence_semantic_nodes = {
-        node
-        for node in evidence.causal_neighborhood
-        if not node.startswith("decision:")
+        node for node in evidence.causal_neighborhood if not node.startswith("decision:")
     }
     if evidence.mandatory_reason is MandatoryReason.TASK_OBLIGATION:
         evidence_semantic_nodes.add("obligation:task")
@@ -5563,8 +5273,7 @@ def evaluate_feature_contract(
         # decision differs from their declared context, and role fit takes oracle
         # eligibility from 8/17 to 17/17.
         serves_open_decision = bool(
-            set(evidence.roles)
-            & (set(active.required_roles) | set(active.useful_roles))
+            set(evidence.roles) & (set(active.required_roles) | set(active.useful_roles))
         )
     # The `decision:` anchor records which decision the evidence was PRODUCED for. The
     # installed producer (`gateway.py`, which runs at file_view) emits exactly
@@ -5614,15 +5323,11 @@ def evaluate_feature_contract(
     # field existed rehydrates to `()` and is permanently HELD on replay/resume. That is a
     # JOURNAL VERSIONING gap and must be fixed there -- the same way `canonical_events` got
     # `hash_schema` -- not by making this gate permissive.
-    available = set(context.available_substrates).intersection(
-        evidence.observed_substrates
-    )
+    available = set(context.available_substrates).intersection(evidence.observed_substrates)
     preferred_available = bool(
         available.intersection(contract.fallback_policy.preferred_substrates)
     )
-    fallback_available = bool(
-        available.intersection(contract.fallback_policy.fallback_substrates)
-    )
+    fallback_available = bool(available.intersection(contract.fallback_policy.fallback_substrates))
     fallback_assured = (
         fallback_available
         and evidence.grade >= contract.fallback_policy.minimum_grade
@@ -5657,11 +5362,7 @@ def evaluate_feature_contract(
         release_allowed=release,
         expired=False,
         invalidated=False,
-        next_lifecycle=(
-            EvidenceLifecycle.RELEASED
-            if release
-            else EvidenceLifecycle.READY
-        ),
+        next_lifecycle=(EvidenceLifecycle.RELEASED if release else EvidenceLifecycle.READY),
         reason=(
             EvidenceTransitionReason.DECISION_WINDOW_OPEN
             if release
@@ -5697,9 +5398,7 @@ def _evaluate_current_decision_contract(
     # none keeps the exact former constant, and is therefore byte-identical.
     resolved = (
         contract.window.resolve(
-            context.active_decision.context
-            if context.active_decision is not None
-            else None
+            context.active_decision.context if context.active_decision is not None else None
         )
         if contract.window is not None
         else CommitmentWindowState.OPEN
@@ -5744,9 +5443,7 @@ class EvidenceRef:
     def __post_init__(self) -> None:
         object.__setattr__(self, "roles", tuple(self.roles))
         object.__setattr__(self, "provenance", tuple(self.provenance))
-        object.__setattr__(
-            self, "owner_feature_ids", tuple(self.owner_feature_ids)
-        )
+        object.__setattr__(self, "owner_feature_ids", tuple(self.owner_feature_ids))
 
 
 @dataclass(frozen=True)
@@ -5801,9 +5498,7 @@ def _evidence_record_from_json(payload: str) -> EvidenceRecord:
         fresh=bool(raw["fresh"]),
         already_visible=bool(raw["already_visible"]),
         superseded=bool(raw["superseded"]),
-        mandatory_reason=(
-            MandatoryReason(mandatory) if mandatory is not None else None
-        ),
+        mandatory_reason=(MandatoryReason(mandatory) if mandatory is not None else None),
         token_cost=int(raw["token_cost"]),
         failure_prevention=int(raw["failure_prevention"]),
         causal_value=int(raw["causal_value"]),
@@ -5812,17 +5507,11 @@ def _evidence_record_from_json(payload: str) -> EvidenceRecord:
         revision_dependencies=tuple(raw.get("revision_dependencies", ())),
         transition_history=transitions,
         authority=Authority(int(raw.get("authority", Authority.RESULT_DERIVED))),
-        visible_to_decision_ids=tuple(
-            raw.get("visible_to_decision_ids", ())
-        ),
+        visible_to_decision_ids=tuple(raw.get("visible_to_decision_ids", ())),
         owner_feature_ids=tuple(raw.get("owner_feature_ids", ())),
         observed_substrates=tuple(raw.get("observed_substrates", ())),
-        standing_source_evidence_id=str(
-            raw.get("standing_source_evidence_id", "")
-        ),
-        decision_window_generation=str(
-            raw.get("decision_window_generation", "")
-        ),
+        standing_source_evidence_id=str(raw.get("standing_source_evidence_id", "")),
+        decision_window_generation=str(raw.get("decision_window_generation", "")),
     )
 
 
@@ -5858,9 +5547,7 @@ def _oracle_decision_from_json(payload: str) -> OracleDecision:
         ),
         total_tokens=int(raw["total_tokens"]),
         coverage=tuple(EvidenceRole(value) for value in raw["coverage"]),
-        unresolved_roles=tuple(
-            EvidenceRole(value) for value in raw["unresolved_roles"]
-        ),
+        unresolved_roles=tuple(EvidenceRole(value) for value in raw["unresolved_roles"]),
         overall_grade=EvidenceGrade(int(raw["overall_grade"])),
         decision_complete=bool(raw["decision_complete"]),
         release_allowed=bool(raw["release_allowed"]),
@@ -5977,11 +5664,7 @@ class CapsuleCompilation:
         if not self.observation_id or not self.model_call_id:
             raise ValueError("capsule compilation observation/model-call identity is required")
         if self.state is CapsuleCompilationState.COMPILED:
-            if (
-                not self.capsule_text
-                or not self.capsule_hash
-                or self.delivery_attempt is None
-            ):
+            if not self.capsule_text or not self.capsule_hash or self.delivery_attempt is None:
                 raise ValueError("COMPILED capsule lacks content/delivery proof")
             _validate_sha256(self.capsule_hash, field_name="capsule_hash")
             _validate_sha256(
@@ -5996,21 +5679,17 @@ class CapsuleCompilation:
                 try:
                     manifest = json.loads(self.evidence_manifest_json)
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "evidence_manifest_json must be valid JSON"
-                    ) from exc
+                    raise ValueError("evidence_manifest_json must be valid JSON") from exc
                 if (
                     _canonical_json(manifest) != self.evidence_manifest_json
-                    or _sha256(self.evidence_manifest_json)
-                    != self.evidence_manifest_hash
+                    or _sha256(self.evidence_manifest_json) != self.evidence_manifest_hash
                 ):
-                    raise ValueError(
-                        "evidence manifest JSON/hash identity mismatch"
-                    )
+                    raise ValueError("evidence manifest JSON/hash identity mismatch")
         if self.binding is not None:
             if (
                 self.delivery_attempt is None
-                or self.delivery_attempt.state not in {
+                or self.delivery_attempt.state
+                not in {
                     DeliveryState.JOINED,
                     DeliveryState.DISPATCHED,
                     DeliveryState.PROVIDER_ACCEPTED,
@@ -6043,9 +5722,7 @@ def _capsule_binding_from_data(
         message_index=int(raw["message_index"]),
         content_index=int(raw["content_index"]),
         decision_id=str(raw.get("decision_id", "")),
-        evidence_manifest_hash=str(
-            raw.get("evidence_manifest_hash", "")
-        ),
+        evidence_manifest_hash=str(raw.get("evidence_manifest_hash", "")),
         schema=str(raw.get("schema", "gt.capsule_binding.v1")),
     )
 
@@ -6078,22 +5755,12 @@ def _capsule_compilation_from_json(payload: str) -> CapsuleCompilation:
         ),
         failure_code=str(raw.get("failure_code", "")),
         binding=_capsule_binding_from_data(raw.get("binding")),
-        bound_provider_payload_json=str(
-            raw.get("bound_provider_payload_json", "")
-        ),
-        rendered_token_estimate=int(
-            raw.get("rendered_token_estimate", 0)
-        ),
+        bound_provider_payload_json=str(raw.get("bound_provider_payload_json", "")),
+        rendered_token_estimate=int(raw.get("rendered_token_estimate", 0)),
         decision_id=str(raw.get("decision_id", "")),
-        rendered_content_hash=str(
-            raw.get("rendered_content_hash", "")
-        ),
-        evidence_manifest_hash=str(
-            raw.get("evidence_manifest_hash", "")
-        ),
-        evidence_manifest_json=str(
-            raw.get("evidence_manifest_json", "")
-        ),
+        rendered_content_hash=str(raw.get("rendered_content_hash", "")),
+        evidence_manifest_hash=str(raw.get("evidence_manifest_hash", "")),
+        evidence_manifest_json=str(raw.get("evidence_manifest_json", "")),
         # A dropped identity would be invisible until a REPLAYED capsule silently lost its
         # join key, so the round-trip carries it like every other field. Malformed entries
         # are skipped rather than coerced -- a half-read pair is not an identity.
@@ -6119,25 +5786,13 @@ def _failure_policy_state_from_json(payload: str) -> FailurePolicyState:
         health=RuntimeHealthState(raw["health"]),
         assurance=AssuranceStatus(raw["assurance"]),
         isolated_components=tuple(raw.get("isolated_components", ())),
-        recovery_attempted_signatures=tuple(
-            raw.get("recovery_attempted_signatures", ())
-        ),
-        last_verified_snapshot_id=str(
-            raw.get("last_verified_snapshot_id", "")
-        ),
+        recovery_attempted_signatures=tuple(raw.get("recovery_attempted_signatures", ())),
+        last_verified_snapshot_id=str(raw.get("last_verified_snapshot_id", "")),
         gt_emission_enabled=bool(raw["gt_emission_enabled"]),
-        gt_interruption_enabled=bool(
-            raw["gt_interruption_enabled"]
-        ),
-        gt_certification_enabled=bool(
-            raw["gt_certification_enabled"]
-        ),
+        gt_interruption_enabled=bool(raw["gt_interruption_enabled"]),
+        gt_certification_enabled=bool(raw["gt_certification_enabled"]),
         native_path_enabled=bool(raw["native_path_enabled"]),
-        quarantine_reason=(
-            FaultCode(quarantine_reason)
-            if quarantine_reason is not None
-            else None
-        ),
+        quarantine_reason=(FaultCode(quarantine_reason) if quarantine_reason is not None else None),
         failed_event_id=str(raw.get("failed_event_id", "")),
     )
 
@@ -6148,9 +5803,7 @@ def _model_visible_provenance(
     """Keep host-only runtime witness identities out of model-facing bytes."""
 
     return tuple(
-        row
-        for row in provenance
-        if not row.startswith(("event:", "computation:", "diagnostic:"))
+        row for row in provenance if not row.startswith(("event:", "computation:", "diagnostic:"))
     )
 
 
@@ -6393,8 +6046,7 @@ def compile_observation_capsule(
         if previous.observation_id == observation_id:
             if (
                 previous.delivery_attempt is not None
-                and previous.delivery_attempt.state
-                in retryable_delivery_states
+                and previous.delivery_attempt.state in retryable_delivery_states
                 and previous.model_call_id != model_call_id
             ):
                 retry_candidates.append(previous)
@@ -6438,8 +6090,7 @@ def compile_observation_capsule(
     # decision needs). Comparing provenance here would re-impose the producer-identity
     # partition one stage later and fail the whole capsule.
     if not role_driven and any(
-        item.decision_context is not decision.decision_context
-        for item in decision.coalition
+        item.decision_context is not decision.decision_context for item in decision.coalition
     ):
         return _failed_compilation(
             native_observation=native_observation,
@@ -6471,9 +6122,7 @@ def compile_observation_capsule(
         )
     try:
         capsule_text = (
-            renderer(decision)
-            if renderer is not None
-            else _render_decision_capsule(decision)
+            renderer(decision) if renderer is not None else _render_decision_capsule(decision)
         )
     except Exception:
         return _failed_compilation(
@@ -6503,9 +6152,7 @@ def compile_observation_capsule(
             failure_code="PRODUCER_IDENTITY_LEAK",
         )
     producer_identities = {
-        _normalized_identity(item.feature_id)
-        for item in decision.coalition
-        if item.feature_id
+        _normalized_identity(item.feature_id) for item in decision.coalition if item.feature_id
     }
     disclosed = {
         _normalized_identity(match.group(1))
@@ -6548,32 +6195,31 @@ def compile_observation_capsule(
     manifest_json = _canonical_json(_evidence_manifest(decision))
     evidence_manifest_hash = _sha256(manifest_json)
     capsule_hash = _sha256(
-        _canonical_json({
-            # v3 (2026-07-28): BUMPED because `_evidence_manifest` gained a `subject` key,
-            # which changes `evidence_manifest_hash` and therefore this preimage. Leaving the
-            # label at v2 while the preimage moved is exactly the C5 defect one layer up --
-            # an unversioned hash change that makes old and new digests silently
-            # incomparable. `capsule_hash` is not decorative: it flows into
-            # `observation_candidate_id` -> `candidate_dedup_sha256` -> `opportunity_id`, and
-            # `retry_candidates` compares `previous.capsule_hash != capsule_hash` to detect
-            # RETRY_CAPSULE_MISMATCH. A silent preimage change therefore breaks joins AND
-            # manufactures spurious retry mismatches for any capsule compiled before it.
-            #
-            # Model-visible bytes are unaffected: `capsule_text` and its
-            # `rendered_content_hash` are untouched, and `_renderer_manifest_matches` does not
-            # consult `subject`. This is a JOIN-KEY version bump, not a delivery change.
-            #
-            # From the exported constant -- see DECISION_CAPSULE_SCHEMA for why this must never
-            # be a literal again. Readers import it and recompute against the same label.
-            "schema": DECISION_CAPSULE_SCHEMA,
-            "rendered_content_hash": rendered_content_hash,
-            "evidence_manifest_hash": evidence_manifest_hash,
-        })
+        _canonical_json(
+            {
+                # v3 (2026-07-28): BUMPED because `_evidence_manifest` gained a `subject` key,
+                # which changes `evidence_manifest_hash` and therefore this preimage. Leaving the
+                # label at v2 while the preimage moved is exactly the C5 defect one layer up --
+                # an unversioned hash change that makes old and new digests silently
+                # incomparable. `capsule_hash` is not decorative: it flows into
+                # `observation_candidate_id` -> `candidate_dedup_sha256` -> `opportunity_id`, and
+                # `retry_candidates` compares `previous.capsule_hash != capsule_hash` to detect
+                # RETRY_CAPSULE_MISMATCH. A silent preimage change therefore breaks joins AND
+                # manufactures spurious retry mismatches for any capsule compiled before it.
+                #
+                # Model-visible bytes are unaffected: `capsule_text` and its
+                # `rendered_content_hash` are untouched, and `_renderer_manifest_matches` does not
+                # consult `subject`. This is a JOIN-KEY version bump, not a delivery change.
+                #
+                # From the exported constant -- see DECISION_CAPSULE_SCHEMA for why this must never
+                # be a literal again. Readers import it and recompute against the same label.
+                "schema": DECISION_CAPSULE_SCHEMA,
+                "rendered_content_hash": rendered_content_hash,
+                "evidence_manifest_hash": evidence_manifest_hash,
+            }
+        )
     )
-    if any(
-        previous.capsule_hash != capsule_hash
-        for previous in retry_candidates
-    ):
+    if any(previous.capsule_hash != capsule_hash for previous in retry_candidates):
         return _failed_compilation(
             native_observation=native_observation,
             decision=decision,
@@ -6756,10 +6402,7 @@ def _grade_for_required_links(
     links = [
         item.grade
         for item in selected
-        if (
-            item.mandatory_reason is not None
-            or any(role in required_roles for role in item.roles)
-        )
+        if (item.mandatory_reason is not None or any(role in required_roles for role in item.roles))
     ]
     return min(links) if links else EvidenceGrade.INFO
 
@@ -6825,9 +6468,7 @@ def select_evidence_coalition(
         if (normalized := _normalize_repository_subject(subject))
     )
     neighborhood = {
-        node
-        for node in decision.causal_neighborhood
-        if not node.startswith("decision:")
+        node for node in decision.causal_neighborhood if not node.startswith("decision:")
     }
 
     evidence_items = tuple(evidence)
@@ -6838,9 +6479,7 @@ def select_evidence_coalition(
     for item in sorted(evidence_items, key=lambda row: row.evidence_id):
         reason: SuppressionReason | None = None
         item_neighborhood = {
-            node
-            for node in item.causal_neighborhood
-            if not node.startswith("decision:")
+            node for node in item.causal_neighborhood if not node.startswith("decision:")
         }
         if item.mandatory_reason is MandatoryReason.TASK_OBLIGATION:
             item_neighborhood.add("obligation:task")
@@ -6854,31 +6493,22 @@ def select_evidence_coalition(
             reasoning_graph is not None
             and not shared_neighborhood
             and not any(
-            reasoning_graph.connected(decision_node, evidence_node)
-            for decision_node in decision.causal_neighborhood
-            for evidence_node in item_neighborhood
+                reasoning_graph.connected(decision_node, evidence_node)
+                for decision_node in decision.causal_neighborhood
+                for evidence_node in item_neighborhood
             )
         ):
             reason = SuppressionReason.DISCONNECTED
-        elif (
-            reasoning_graph is None
-            and not shared_neighborhood
-        ):
+        elif reasoning_graph is None and not shared_neighborhood:
             reason = SuppressionReason.DISCONNECTED
         elif item.lifecycle not in {
             EvidenceLifecycle.READY,
             EvidenceLifecycle.ACTIVE,
         }:
             reason = SuppressionReason.NOT_READY
-        elif (
-            not item.fresh
-            or not _evidence_revision_is_fresh(item, decision.current_revision)
-        ):
+        elif not item.fresh or not _evidence_revision_is_fresh(item, decision.current_revision):
             reason = SuppressionReason.STALE
-        elif (
-            item.already_visible
-            or decision.decision_id in item.visible_to_decision_ids
-        ):
+        elif item.already_visible or decision.decision_id in item.visible_to_decision_ids:
             reason = SuppressionReason.ALREADY_VISIBLE
         elif (
             EvidenceRole.TARGET_IDENTITY in item.roles
@@ -6887,11 +6517,8 @@ def select_evidence_coalition(
             reason = SuppressionReason.ALREADY_ACQUIRED
         elif item.superseded:
             reason = SuppressionReason.SUPERSEDED
-        elif (
-            item.mandatory_reason is None
-            and not set(item.roles).intersection(
-                set(decision.required_roles) | set(decision.useful_roles)
-            )
+        elif item.mandatory_reason is None and not set(item.roles).intersection(
+            set(decision.required_roles) | set(decision.useful_roles)
         ):
             reason = SuppressionReason.NOT_ACTIONABLE_FOR_DECISION
         if reason is not None:
@@ -6945,12 +6572,8 @@ def select_evidence_coalition(
     for item in mandatory:
         selected.append(item)
         selected_roles.update(item.roles)
-        selected_subject_roles.update(
-            (item.subject, role) for role in item.roles
-        )
-        selected_consequences.add(
-            " ".join(item.actionable_consequence.lower().split())
-        )
+        selected_subject_roles.update((item.subject, role) for role in item.roles)
+        selected_consequences.add(" ".join(item.actionable_consequence.lower().split()))
         total_tokens += item.token_cost
 
     remaining = [
@@ -6971,26 +6594,18 @@ def select_evidence_coalition(
             break
         unresolved_required = set(decision.required_roles) - selected_roles
         decision_candidates = (
-            [
-                item for item in remaining
-                if unresolved_required.intersection(item.roles)
-            ]
+            [item for item in remaining if unresolved_required.intersection(item.roles)]
             if unresolved_required
             else remaining
         )
         scored: list[tuple[float, int, str, EvidenceRecord]] = []
         for item in decision_candidates:
             new_roles = set(item.roles) - selected_roles
-            consequence_key = " ".join(
-                item.actionable_consequence.lower().split()
-            )
+            consequence_key = " ".join(item.actionable_consequence.lower().split())
             same_role_unique_action = (
                 bool(set(item.roles).intersection(selected_roles))
                 and consequence_key not in selected_consequences
-                and any(
-                    (item.subject, role) not in selected_subject_roles
-                    for role in item.roles
-                )
+                and any((item.subject, role) not in selected_subject_roles for role in item.roles)
             )
             if not new_roles and not same_role_unique_action:
                 suppressed[item.evidence_id] = SuppressionRecord(
@@ -6998,10 +6613,7 @@ def select_evidence_coalition(
                     SuppressionReason.REDUNDANT_ROLE,
                 )
                 continue
-            role_coverage = sum(
-                4 if role in decision.required_roles else 1
-                for role in new_roles
-            )
+            role_coverage = sum(4 if role in decision.required_roles else 1 for role in new_roles)
             if same_role_unique_action:
                 role_coverage += 1
             raw_value = (
@@ -7040,17 +6652,13 @@ def select_evidence_coalition(
         else:
             selected.append(winner)
             selected_roles.update(winner.roles)
-            selected_subject_roles.update(
-                (winner.subject, role) for role in winner.roles
-            )
-            selected_consequences.add(
-                " ".join(winner.actionable_consequence.lower().split())
-            )
+            selected_subject_roles.update((winner.subject, role) for role in winner.roles)
+            selected_consequences.add(" ".join(winner.actionable_consequence.lower().split()))
             total_tokens += winner.token_cost
         remaining = [
-            item for item in remaining
-            if item.evidence_id != winner.evidence_id
-            and item.evidence_id not in suppressed
+            item
+            for item in remaining
+            if item.evidence_id != winner.evidence_id and item.evidence_id not in suppressed
         ]
 
     if remaining:
@@ -7066,26 +6674,18 @@ def select_evidence_coalition(
                 SuppressionRecord(item.evidence_id, reason),
             )
 
-    coverage = tuple(
-        sorted(selected_roles, key=_role_order)
-    )
-    unresolved = tuple(
-        role for role in decision.required_roles
-        if role not in selected_roles
-    )
+    coverage = tuple(sorted(selected_roles, key=_role_order))
+    unresolved = tuple(role for role in decision.required_roles if role not in selected_roles)
     decision_complete = not unresolved
     over_budget = total_tokens > decision.token_budget
-    ordered_suppressions = tuple(
-        suppressed[key] for key in sorted(suppressed)
-    )
+    ordered_suppressions = tuple(suppressed[key] for key in sorted(suppressed))
     return OracleDecision(
         decision_id=decision.decision_id,
         decision_context=decision.context,
         primary_claim=decision.primary_claim,
         coalition=tuple(_evidence_ref(item) for item in selected),
         mandatory_items=tuple(
-            item.evidence_id for item in selected
-            if item.mandatory_reason is not None
+            item.evidence_id for item in selected if item.mandatory_reason is not None
         ),
         suppressed=ordered_suppressions,
         total_tokens=total_tokens,
@@ -7159,10 +6759,7 @@ class AttemptReasoningRuntime:
 
         # Reconstruct both projections from the same committed event truth.
         events = self.journal.events(attempt_id)
-        if (
-            events
-            and events[0].revision_before != initial_revision
-        ):
+        if events and events[0].revision_before != initial_revision:
             raise StateIntegrityError(
                 "attempt initial revision conflicts with canonical event truth"
             )
@@ -7172,30 +6769,18 @@ class AttemptReasoningRuntime:
                 self.reasoning_graph,
                 event=event,
             )
-        for evidence in self.journal.evidence_records_for_attempt(
-            attempt_id
-        ):
+        for evidence in self.journal.evidence_records_for_attempt(attempt_id):
             if evidence.evidence_id in self._evidence:
-                raise StateIntegrityError(
-                    "duplicate evidence identity during reconstruction"
-                )
+                raise StateIntegrityError("duplicate evidence identity during reconstruction")
             self._evidence[evidence.evidence_id] = evidence
-        for delivery_attempt_id, compilation in (
-            self.journal.compilations_for_attempt(attempt_id)
-        ):
+        for delivery_attempt_id, compilation in self.journal.compilations_for_attempt(attempt_id):
             history = self.journal.delivery_history(delivery_attempt_id)
             if not history or compilation.delivery_attempt != history[-1]:
-                raise StateIntegrityError(
-                    "compilation/delivery journal reconstruction mismatch"
-                )
+                raise StateIntegrityError("compilation/delivery journal reconstruction mismatch")
             if compilation.model_call_id in self._delivery_attempt_ids:
-                raise StateIntegrityError(
-                    "duplicate model-call identity during reconstruction"
-                )
+                raise StateIntegrityError("duplicate model-call identity during reconstruction")
             self._compilations[delivery_attempt_id] = compilation
-            self._delivery_attempt_ids[
-                compilation.model_call_id
-            ] = delivery_attempt_id
+            self._delivery_attempt_ids[compilation.model_call_id] = delivery_attempt_id
         if set(self.journal.delivery_attempt_ids_for_attempt(attempt_id)) != set(
             self._compilations
         ):
@@ -7296,9 +6881,7 @@ class AttemptReasoningRuntime:
             compilation=compilation,
             delivery_attempt_id="",
             held_evidence_ids=tuple(sorted(self._evidence)),
-            suppressed_decision_ids=tuple(
-                item.decision_id for item in tuple(decisions)[1:]
-            ),
+            suppressed_decision_ids=tuple(item.decision_id for item in tuple(decisions)[1:]),
             native_observation=native_observation,
             assurance=self.failure_state.assurance,
         )
@@ -7318,9 +6901,7 @@ class AttemptReasoningRuntime:
         )
         roots = tuple(
             item
-            for item in sorted(
-                self._evidence.values(), key=lambda row: row.evidence_id
-            )
+            for item in sorted(self._evidence.values(), key=lambda row: row.evidence_id)
             if (
                 item.feature_id == "obligations"
                 and item.mandatory_reason is MandatoryReason.TASK_OBLIGATION
@@ -7423,9 +7004,7 @@ class AttemptReasoningRuntime:
         # Readiness is decision-independent. Advance it once, then arbitrate
         # exactly one active decision over that stable evidence snapshot.
         ready_records: list[EvidenceRecord] = []
-        for evidence in sorted(
-            self._evidence.values(), key=lambda item: item.evidence_id
-        ):
+        for evidence in sorted(self._evidence.values(), key=lambda item: item.evidence_id):
             current = invalidate_stale_evidence(
                 evidence,
                 current_revision=self.work_state.revision,
@@ -7445,9 +7024,7 @@ class AttemptReasoningRuntime:
                     current = transition_evidence(
                         current,
                         EvidenceLifecycle.READY,
-                        reason_code=(
-                            EvidenceTransitionReason.READINESS_RULES_SATISFIED
-                        ),
+                        reason_code=(EvidenceTransitionReason.READINESS_RULES_SATISFIED),
                     )
                     self._persist_evidence(current)
             ready_records.append(current)
@@ -7463,9 +7040,7 @@ class AttemptReasoningRuntime:
             # Temporal evaluation is the scheduler gate. The selector receives
             # READY items; release is applied only after this decision wins.
             scheduled: list[EvidenceRecord] = []
-            temporal_evaluations: dict[
-                str, TemporalContractEvaluation
-            ] = {}
+            temporal_evaluations: dict[str, TemporalContractEvaluation] = {}
             for evidence in ready_records:
                 contract = feature_contract_for(evidence.feature_id)
                 if contract is None:
@@ -7528,10 +7103,7 @@ class AttemptReasoningRuntime:
             )
 
         active, oracle, winning_evaluations = next(
-            (
-                pair for pair in evaluated
-                if pair[1].release_allowed and pair[1].decision_complete
-            ),
+            (pair for pair in evaluated if pair[1].release_allowed and pair[1].decision_complete),
             evaluated[0],
         )
         coalition_ids = {item.evidence_id for item in oracle.coalition}
@@ -7546,15 +7118,13 @@ class AttemptReasoningRuntime:
                     EvidenceLifecycle.EXPIRED,
                     EvidenceLifecycle.INVALIDATED,
                 }
-                and current.lifecycle
-                is not evaluation.next_lifecycle
+                and current.lifecycle is not evaluation.next_lifecycle
             ):
                 current = transition_evidence(
                     current,
                     evaluation.next_lifecycle,
                     reason_code=(
-                        evaluation.reason
-                        or EvidenceTransitionReason.DECISION_WINDOW_EXPIRED
+                        evaluation.reason or EvidenceTransitionReason.DECISION_WINDOW_EXPIRED
                     ),
                 )
                 self._persist_evidence(current)
@@ -7563,17 +7133,14 @@ class AttemptReasoningRuntime:
                 and current.lifecycle is EvidenceLifecycle.READY
                 and (
                     evaluation is None
-                    or evaluation.next_lifecycle
-                    is EvidenceLifecycle.HELD
+                    or evaluation.next_lifecycle is EvidenceLifecycle.HELD
                     or evaluation.release_allowed
                 )
             ):
                 current = transition_evidence(
                     current,
                     EvidenceLifecycle.HELD,
-                    reason_code=(
-                        EvidenceTransitionReason.OTHER_DECISION_CURRENTLY_ACTIVE
-                    ),
+                    reason_code=(EvidenceTransitionReason.OTHER_DECISION_CURRENTLY_ACTIVE),
                 )
                 self._persist_evidence(current)
                 held_ids.append(current.evidence_id)
@@ -7582,9 +7149,7 @@ class AttemptReasoningRuntime:
 
         # Persist the full eligible-pool suppression record, not only coalition
         # losers from the winning decision.
-        winner_suppressions = {
-            item.evidence_id: item for item in oracle.suppressed
-        }
+        winner_suppressions = {item.evidence_id: item for item in oracle.suppressed}
         for evidence in ready_records:
             if (
                 evidence.evidence_id not in coalition_ids
@@ -7596,10 +7161,7 @@ class AttemptReasoningRuntime:
                 )
         oracle = replace(
             oracle,
-            suppressed=tuple(
-                winner_suppressions[key]
-                for key in sorted(winner_suppressions)
-            ),
+            suppressed=tuple(winner_suppressions[key] for key in sorted(winner_suppressions)),
         )
         self.journal.append_oracle(self.attempt_id, oracle)
 
@@ -7628,9 +7190,7 @@ class AttemptReasoningRuntime:
                     current = transition_evidence(
                         current,
                         EvidenceLifecycle.RELEASED,
-                        reason_code=(
-                            EvidenceTransitionReason.DECISION_WINDOW_OPEN
-                        ),
+                        reason_code=(EvidenceTransitionReason.DECISION_WINDOW_OPEN),
                     )
                     released_records.append(current)
             delivery_attempt_id = f"delivery:{model_call_id}"
@@ -7654,9 +7214,7 @@ class AttemptReasoningRuntime:
             assurance=self.failure_state.assurance,
         )
 
-    def _compilation_for(
-        self, delivery_attempt_id: str
-    ) -> CapsuleCompilation:
+    def _compilation_for(self, delivery_attempt_id: str) -> CapsuleCompilation:
         try:
             return self._compilations[delivery_attempt_id]
         except KeyError as exc:
@@ -7678,9 +7236,7 @@ class AttemptReasoningRuntime:
             evidence_updates=evidence_updates,
         )
         self._compilations[delivery_attempt_id] = compilation
-        self._delivery_attempt_ids[
-            compilation.model_call_id
-        ] = delivery_attempt_id
+        self._delivery_attempt_ids[compilation.model_call_id] = delivery_attempt_id
         for evidence in evidence_updates:
             self._evidence[evidence.evidence_id] = evidence
 
@@ -7761,9 +7317,7 @@ class AttemptReasoningRuntime:
                 delivered = transition_evidence(
                     evidence,
                     EvidenceLifecycle.DELIVERED,
-                    reason_code=(
-                        EvidenceTransitionReason.PROVIDER_TERMINAL_DELIVERY_PROVEN
-                    ),
+                    reason_code=(EvidenceTransitionReason.PROVIDER_TERMINAL_DELIVERY_PROVEN),
                     delivery_attempt=terminal,
                 )
                 evidence_updates.append(delivered)
@@ -7859,9 +7413,7 @@ class AttemptReasoningRuntime:
                 transition_evidence(
                     evidence,
                     EvidenceLifecycle.ACTIVE,
-                    reason_code=(
-                        EvidenceTransitionReason.ACTIVATED_AFTER_PROVIDER_DELIVERY
-                    ),
+                    reason_code=(EvidenceTransitionReason.ACTIVATED_AFTER_PROVIDER_DELIVERY),
                 )
             )
         self._commit_compilation_transition(
@@ -7913,50 +7465,34 @@ class AttemptReasoningRuntime:
             )
 
         if events:
-            snapshot, tail = self.journal.load_snapshot_and_tail(
-                self.attempt_id
-            )
+            snapshot, tail = self.journal.load_snapshot_and_tail(self.attempt_id)
             replayed = snapshot
             for event in tail:
                 replayed = reduce_event(replayed, event)
             if replayed != work_state:
-                raise StateIntegrityError(
-                    "snapshot plus committed tail diverges from full replay"
-                )
+                raise StateIntegrityError("snapshot plus committed tail diverges from full replay")
 
         evidence = {
             item.evidence_id: item
-            for item in self.journal.evidence_records_for_attempt(
-                self.attempt_id
-            )
+            for item in self.journal.evidence_records_for_attempt(self.attempt_id)
         }
         compilations: dict[str, CapsuleCompilation] = {}
         delivery_attempt_ids: dict[str, str] = {}
         delivered_evidence: set[str] = set()
-        for delivery_attempt_id, compilation in (
-            self.journal.compilations_for_attempt(self.attempt_id)
+        for delivery_attempt_id, compilation in self.journal.compilations_for_attempt(
+            self.attempt_id
         ):
             history = self.journal.delivery_history(delivery_attempt_id)
             if not history or compilation.delivery_attempt != history[-1]:
-                raise StateIntegrityError(
-                    "compilation/delivery state diverges during replay"
-                )
+                raise StateIntegrityError("compilation/delivery state diverges during replay")
             if compilation.model_call_id in delivery_attempt_ids:
-                raise StateIntegrityError(
-                    "model-call identity reused during replay"
-                )
+                raise StateIntegrityError("model-call identity reused during replay")
             compilations[delivery_attempt_id] = compilation
-            delivery_attempt_ids[
-                compilation.model_call_id
-            ] = delivery_attempt_id
+            delivery_attempt_ids[compilation.model_call_id] = delivery_attempt_id
             if any(is_delivered(item) for item in history):
                 delivered_evidence.update(history[-1].evidence_ids)
-        if set(
-            self.journal.delivery_attempt_ids_for_attempt(self.attempt_id)
-        ) != set(compilations):
-            raise StateIntegrityError(
-                "orphan delivery or compilation journal during replay"
-            )
+        if set(self.journal.delivery_attempt_ids_for_attempt(self.attempt_id)) != set(compilations):
+            raise StateIntegrityError("orphan delivery or compilation journal during replay")
         for item in evidence.values():
             if (
                 item.lifecycle
@@ -7982,16 +7518,10 @@ class AttemptReasoningRuntime:
     def recovery_input(self) -> RecoveryInput:
         events = self.journal.events(self.attempt_id)
         if events:
-            snapshot, tail = self.journal.load_snapshot_and_tail(
-                self.attempt_id
-            )
-            snapshot_id = (
-                f"{self.attempt_id}:{snapshot.sequence}"
-            )
+            snapshot, tail = self.journal.load_snapshot_and_tail(self.attempt_id)
+            snapshot_id = f"{self.attempt_id}:{snapshot.sequence}"
             snapshot_state_hash = snapshot.state_hash
-            committed_event_ids = tuple(
-                event.event_id for event in tail
-            )
+            committed_event_ids = tuple(event.event_id for event in tail)
             committed_tail_hash = events[-1].content_hash
         else:
             initial = WorkState.initial(
@@ -8034,8 +7564,7 @@ class AttemptReasoningRuntime:
         )
         should_reconstruct = (
             fault.code in CORE_CORRUPTION_CODES
-            and fault.signature
-            not in prior.recovery_attempted_signatures
+            and fault.signature not in prior.recovery_attempted_signatures
             and disposition.health
             in {
                 RuntimeHealthState.RECOVERED,
@@ -8047,19 +7576,11 @@ class AttemptReasoningRuntime:
                 reconstructed = self._reconstruct_canonical_state()
                 if (
                     recovered_proof is None
-                    or recovered_proof.recovered_state_hash
-                    != reconstructed[0].state_hash
+                    or recovered_proof.recovered_state_hash != reconstructed[0].state_hash
                 ):
-                    raise StateIntegrityError(
-                        "recovery proof state hash does not match replay"
-                    )
-                if (
-                    disposition.last_verified_snapshot_id
-                    != request.snapshot_id
-                ):
-                    raise StateIntegrityError(
-                        "recovery disposition lost snapshot identity"
-                    )
+                    raise StateIntegrityError("recovery proof state hash does not match replay")
+                if disposition.last_verified_snapshot_id != request.snapshot_id:
+                    raise StateIntegrityError("recovery disposition lost snapshot identity")
                 (
                     self.work_state,
                     self.reasoning_graph,

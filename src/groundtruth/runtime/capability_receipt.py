@@ -31,6 +31,7 @@ The base-graph precedence (arg -> GT_HOST_GRAPH_DB -> GT_GRAPH_DB) mirrors the r
 (``gt_mini_patch._db_path`` / ``runtime.context.from_env``): the receipt proves the SHIPPED base
 surface, so it reads the untouched base mount, never the derived L6 work-copy.
 """
+
 from __future__ import annotations
 
 import json

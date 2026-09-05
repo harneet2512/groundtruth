@@ -1,4 +1,5 @@
 """Public localization-vNext shadow API."""
+
 from .engine import (
     EcosystemAdapter,
     build_structured_symbol_passages,

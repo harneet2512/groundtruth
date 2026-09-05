@@ -4,6 +4,7 @@ This is the architecture contract for when GT may speak. Adapter surfaces can
 convert their local events into these enums, but should not reimplement the
 allowlist in workflow or harness-specific code.
 """
+
 from __future__ import annotations
 
 import os
@@ -63,97 +64,119 @@ class PayloadKind(Enum):
 
 
 PHASE_POLICY: dict[Phase, frozenset[str]] = {
-    Phase.ORIENT: frozenset({
-        PayloadKind.BRIEF.value,
-        PayloadKind.ORIENTATION.value,
-    }),
-    Phase.VIEW: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-        # A degenerate loop is "stuck" regardless of phase — the agent can spin
-        # on the same query/binary during exploration (fd stale-binary: same
-        # command + identical output, no edits). The loop detector must fire in
-        # VIEW, not only VERIFY (it was silent ~75 steps on the fd shape).
-        PayloadKind.LOOP_NUDGE.value,
-        # SM-10: an EARLY-stuck agent (no edits yet) is in VIEW/ORIENT; the recovery
-        # nudge must reach it there (it is otherwise event-bound to TEST_RESULT).
-        PayloadKind.RECOVERY.value,
-    }),
-    Phase.EDIT: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-        PayloadKind.CONTRACT.value,
-        PayloadKind.COCHANGE.value,
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.COHERENCE_RISK.value,
-        PayloadKind.SEMANTIC_DRIFT.value,  # F1: post-edit guard/return-deletion steer
-        PayloadKind.LOOP_NUDGE.value,
-        PayloadKind.RECOVERY.value,  # SM-10: stuck after an edit
-    }),
-    Phase.VERIFY: frozenset({
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.STUCK_NUDGE.value,
-        PayloadKind.FAILURE_NUDGE.value,
-        PayloadKind.NO_TEST_NUDGE.value,
-        PayloadKind.LOOP_NUDGE.value,
-        PayloadKind.RECOVERY.value,  # SM-10: stuck during verification
-        PayloadKind.SEMANTIC_DRIFT.value,  # F1: a drift noticed at verify still delivers
-        # F4 (Fable 2026-07-05): the scope-completeness steer is PRODUCED on the review
-        # predicate (edits + non-edit streak>=3), which is exactly when _detect_phase reaches
-        # VERIFY. It was event-bound ONLY to REVIEW_TRANSITION, but _current_event returns
-        # POST_VIEW/POST_EDIT on those turns (they outrank the review event), so the produced
-        # candidate hit wrong_phase and was starved. Allowing it at VERIFY (the phase the streak
-        # reaches) delivers it via the phase gate regardless of the event classification.
-        PayloadKind.SCOPE_COMPLETENESS.value,
-        PayloadKind.VERIFY_ADVISORY.value,
-        PayloadKind.VERIFY_URGENT.value,
-        PayloadKind.VERIFY_PIVOT.value,
-        # A3 (Fable 2026-07-05): the verify-before-submit GATE is calibrated to fire at
-        # ~7.48 action-cycles, but _detect_phase only reaches SUBMIT at >90% budget — so
-        # the gate was phase-starved until it was almost too late to act on. VERIFY is the
-        # phase the agent is actually verifying in; allow the gate there (kept in SUBMIT
-        # too) so it delivers at its calibrated moment instead of the budget tail.
-        PayloadKind.VERIFY_GATE.value,
-    }),
-    Phase.SUBMIT: frozenset({
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.VERIFY_GATE.value,
-    }),
+    Phase.ORIENT: frozenset(
+        {
+            PayloadKind.BRIEF.value,
+            PayloadKind.ORIENTATION.value,
+        }
+    ),
+    Phase.VIEW: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+            # A degenerate loop is "stuck" regardless of phase — the agent can spin
+            # on the same query/binary during exploration (fd stale-binary: same
+            # command + identical output, no edits). The loop detector must fire in
+            # VIEW, not only VERIFY (it was silent ~75 steps on the fd shape).
+            PayloadKind.LOOP_NUDGE.value,
+            # SM-10: an EARLY-stuck agent (no edits yet) is in VIEW/ORIENT; the recovery
+            # nudge must reach it there (it is otherwise event-bound to TEST_RESULT).
+            PayloadKind.RECOVERY.value,
+        }
+    ),
+    Phase.EDIT: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+            PayloadKind.CONTRACT.value,
+            PayloadKind.COCHANGE.value,
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.COHERENCE_RISK.value,
+            PayloadKind.SEMANTIC_DRIFT.value,  # F1: post-edit guard/return-deletion steer
+            PayloadKind.LOOP_NUDGE.value,
+            PayloadKind.RECOVERY.value,  # SM-10: stuck after an edit
+        }
+    ),
+    Phase.VERIFY: frozenset(
+        {
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.STUCK_NUDGE.value,
+            PayloadKind.FAILURE_NUDGE.value,
+            PayloadKind.NO_TEST_NUDGE.value,
+            PayloadKind.LOOP_NUDGE.value,
+            PayloadKind.RECOVERY.value,  # SM-10: stuck during verification
+            PayloadKind.SEMANTIC_DRIFT.value,  # F1: a drift noticed at verify still delivers
+            # F4 (Fable 2026-07-05): the scope-completeness steer is PRODUCED on the review
+            # predicate (edits + non-edit streak>=3), which is exactly when _detect_phase reaches
+            # VERIFY. It was event-bound ONLY to REVIEW_TRANSITION, but _current_event returns
+            # POST_VIEW/POST_EDIT on those turns (they outrank the review event), so the produced
+            # candidate hit wrong_phase and was starved. Allowing it at VERIFY (the phase the streak
+            # reaches) delivers it via the phase gate regardless of the event classification.
+            PayloadKind.SCOPE_COMPLETENESS.value,
+            PayloadKind.VERIFY_ADVISORY.value,
+            PayloadKind.VERIFY_URGENT.value,
+            PayloadKind.VERIFY_PIVOT.value,
+            # A3 (Fable 2026-07-05): the verify-before-submit GATE is calibrated to fire at
+            # ~7.48 action-cycles, but _detect_phase only reaches SUBMIT at >90% budget — so
+            # the gate was phase-starved until it was almost too late to act on. VERIFY is the
+            # phase the agent is actually verifying in; allow the gate there (kept in SUBMIT
+            # too) so it delivers at its calibrated moment instead of the budget tail.
+            PayloadKind.VERIFY_GATE.value,
+        }
+    ),
+    Phase.SUBMIT: frozenset(
+        {
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.VERIFY_GATE.value,
+        }
+    ),
 }
 
 
 EVENT_BOUND_PAYLOADS: dict[Event, frozenset[str]] = {
-    Event.TASK_START: frozenset({
-        PayloadKind.BRIEF.value,
-        PayloadKind.ORIENTATION.value,
-    }),
-    Event.POST_VIEW: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-        PayloadKind.RECOVERY.value,  # SM-10: a repeated failing view/probe -> recovery
-    }),
-    Event.POST_EDIT: frozenset({
-        PayloadKind.LOCAL_EVIDENCE.value,
-        PayloadKind.CONTRACT.value,
-        PayloadKind.COCHANGE.value,
-        PayloadKind.COHERENCE_RISK.value,
-        PayloadKind.SEMANTIC_DRIFT.value,  # F1: guard/return-deletion is a post-edit event
-        PayloadKind.RECOVERY.value,  # SM-10: a failure recurring after an edit -> recovery
-    }),
-    Event.TEST_RESULT: frozenset({
-        PayloadKind.FAILURE_NUDGE.value,
-        PayloadKind.NO_TEST_NUDGE.value,
-        PayloadKind.VERIFY_PIVOT.value,
-        PayloadKind.RECOVERY.value,  # SM-10: a repeated/falsified test failure -> recovery
-    }),
-    Event.REVIEW_TRANSITION: frozenset({
-        PayloadKind.SCOPE_COMPLETENESS.value,
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.VERIFY_ADVISORY.value,
-        PayloadKind.VERIFY_URGENT.value,
-        PayloadKind.VERIFY_GATE.value,
-    }),
-    Event.PRE_SUBMIT: frozenset({
-        PayloadKind.OBLIGATION_STATUS.value,
-        PayloadKind.VERIFY_GATE.value,
-    }),
+    Event.TASK_START: frozenset(
+        {
+            PayloadKind.BRIEF.value,
+            PayloadKind.ORIENTATION.value,
+        }
+    ),
+    Event.POST_VIEW: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+            PayloadKind.RECOVERY.value,  # SM-10: a repeated failing view/probe -> recovery
+        }
+    ),
+    Event.POST_EDIT: frozenset(
+        {
+            PayloadKind.LOCAL_EVIDENCE.value,
+            PayloadKind.CONTRACT.value,
+            PayloadKind.COCHANGE.value,
+            PayloadKind.COHERENCE_RISK.value,
+            PayloadKind.SEMANTIC_DRIFT.value,  # F1: guard/return-deletion is a post-edit event
+            PayloadKind.RECOVERY.value,  # SM-10: a failure recurring after an edit -> recovery
+        }
+    ),
+    Event.TEST_RESULT: frozenset(
+        {
+            PayloadKind.FAILURE_NUDGE.value,
+            PayloadKind.NO_TEST_NUDGE.value,
+            PayloadKind.VERIFY_PIVOT.value,
+            PayloadKind.RECOVERY.value,  # SM-10: a repeated/falsified test failure -> recovery
+        }
+    ),
+    Event.REVIEW_TRANSITION: frozenset(
+        {
+            PayloadKind.SCOPE_COMPLETENESS.value,
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.VERIFY_ADVISORY.value,
+            PayloadKind.VERIFY_URGENT.value,
+            PayloadKind.VERIFY_GATE.value,
+        }
+    ),
+    Event.PRE_SUBMIT: frozenset(
+        {
+            PayloadKind.OBLIGATION_STATUS.value,
+            PayloadKind.VERIFY_GATE.value,
+        }
+    ),
 }
 
 
@@ -213,8 +236,11 @@ def phase_allows(
     # VIEW/EDIT. Since VERIFY needs `test_count or nonedit_streak>=3`, def_partition answers the
     # agent's SEARCH only after the agent has run a TEST. Measured: 34 suppressed_wrong_phase vs 7
     # delivered (83% lost). Admitting it where it fires is what makes it a search-time answer at all.
-    if (k == "consensus.scope" and phase in (Phase.VIEW, Phase.EDIT)
-            and os.environ.get("GT_SCOPE_AT_SEARCH", "0").strip() == "1"):
+    if (
+        k == "consensus.scope"
+        and phase in (Phase.VIEW, Phase.EDIT)
+        and os.environ.get("GT_SCOPE_AT_SEARCH", "0").strip() == "1"
+    ):
         return True
     return False
 

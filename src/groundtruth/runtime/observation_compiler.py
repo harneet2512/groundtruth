@@ -296,8 +296,7 @@ def artifact_from_envelope(
     """
 
     anchors = tuple(
-        SourceAnchor(path=str(path), line=int(line), column=0)
-        for path, line in envelope.provenance
+        SourceAnchor(path=str(path), line=int(line), column=0) for path, line in envelope.provenance
     )
     artifact = EvidenceArtifact(
         schema=EVIDENCE_ARTIFACT_SCHEMA,
@@ -525,9 +524,7 @@ def validate(value: object) -> tuple[str, ...]:
         errors.extend(validate(value.repository_snapshot))
         if value.repository_snapshot_sha256 != canonical_sha256(value.repository_snapshot):
             errors.append("request:snapshot_sha256:mismatch")
-        if value.configuration_sha256 != canonical_sha256(
-            value.repository_snapshot.configuration
-        ):
+        if value.configuration_sha256 != canonical_sha256(value.repository_snapshot.configuration):
             errors.append("request:configuration_sha256:mismatch")
         if not isinstance(value.requested_fidelity, RequestedFidelity):
             errors.append("request:requested_fidelity:invalid")
@@ -537,8 +534,11 @@ def validate(value: object) -> tuple[str, ...]:
         if value.schema != EVIDENCE_ARTIFACT_SCHEMA:
             errors.append("artifact:schema:unsupported")
         for field in (
-            "request_sha256", "envelope_sha256", "snapshot_sha256",
-            "configuration_sha256", "raw_fallback_sha256",
+            "request_sha256",
+            "envelope_sha256",
+            "snapshot_sha256",
+            "configuration_sha256",
+            "raw_fallback_sha256",
         ):
             if not _is_sha256(getattr(value, field)):
                 errors.append(f"artifact:{field}:invalid")
@@ -584,9 +584,12 @@ def validate(value: object) -> tuple[str, ...]:
         if value.schema != DELIVERY_RECEIPT_SCHEMA:
             errors.append("receipt:schema:unsupported")
         for field in (
-            "action_request_sha256", "repository_snapshot_sha256",
-            "interception_decision_sha256", "raw_result_sha256",
-            "transformation_inputs_sha256", "final_observation_sha256",
+            "action_request_sha256",
+            "repository_snapshot_sha256",
+            "interception_decision_sha256",
+            "raw_result_sha256",
+            "transformation_inputs_sha256",
+            "final_observation_sha256",
             "provider_payload_sha256",
         ):
             if not _is_sha256(getattr(value, field)):
@@ -596,7 +599,9 @@ def validate(value: object) -> tuple[str, ...]:
         if not _is_sha256(value.immediate_next_action_sha256, allow_empty=True):
             errors.append("receipt:immediate_next_action_sha256:invalid")
         for field in (
-            "transformation_version", "model_call_id", "observation_id",
+            "transformation_version",
+            "model_call_id",
+            "observation_id",
             "provider_response_id",
         ):
             if not _nonempty_text(getattr(value, field)):

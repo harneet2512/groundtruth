@@ -101,14 +101,66 @@ _MIN_COCHANGE_COUNT = 2
 # small stoplist (language keywords + the most generic verbs/nouns) — no framework
 # or benchmark names.
 _MIN_DISTINCTIVE_LEN = 3
-_GENERIC_NAMES: frozenset[str] = frozenset(keyword.kwlist) | frozenset({
-    "run", "main", "get", "set", "add", "put", "pop", "new", "make", "build",
-    "call", "init", "test", "name", "type", "self", "cls", "data", "value",
-    "item", "items", "key", "keys", "node", "func", "args", "kwargs", "base",
-    "util", "utils", "list", "dict", "str", "int", "bool", "obj", "res",
-    "result", "out", "tmp", "val", "cfg", "conf", "ctx", "app", "api", "url",
-    "the", "and", "for", "not", "all", "any", "map", "row", "col",
-})
+_GENERIC_NAMES: frozenset[str] = frozenset(keyword.kwlist) | frozenset(
+    {
+        "run",
+        "main",
+        "get",
+        "set",
+        "add",
+        "put",
+        "pop",
+        "new",
+        "make",
+        "build",
+        "call",
+        "init",
+        "test",
+        "name",
+        "type",
+        "self",
+        "cls",
+        "data",
+        "value",
+        "item",
+        "items",
+        "key",
+        "keys",
+        "node",
+        "func",
+        "args",
+        "kwargs",
+        "base",
+        "util",
+        "utils",
+        "list",
+        "dict",
+        "str",
+        "int",
+        "bool",
+        "obj",
+        "res",
+        "result",
+        "out",
+        "tmp",
+        "val",
+        "cfg",
+        "conf",
+        "ctx",
+        "app",
+        "api",
+        "url",
+        "the",
+        "and",
+        "for",
+        "not",
+        "all",
+        "any",
+        "map",
+        "row",
+        "col",
+    }
+)
 
 # Files scanned for registration/export surfaces — PYTHON ONLY (bounce F1 law).
 # Counting a reference requires (i) stripping comments/strings and (ii) proving a
@@ -116,11 +168,28 @@ _GENERIC_NAMES: frozenset[str] = frozenset(keyword.kwlist) | frozenset({
 # cannot do that confidently with stdlib alone, so those files are NOT counted at
 # all (a config-file entry-point registry is a known, honest gap — never a guess).
 _SCAN_EXTS: frozenset[str] = frozenset({".py", ".pyi"})
-_PRUNE_DIRS: frozenset[str] = frozenset({
-    ".git", ".hg", ".svn", ".tox", ".venv", "venv", "env", "__pycache__",
-    "node_modules", "vendor", "dist", "build", "target", ".mypy_cache",
-    ".pytest_cache", ".idea", ".vscode", "site-packages",
-})
+_PRUNE_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".tox",
+        ".venv",
+        "venv",
+        "env",
+        "__pycache__",
+        "node_modules",
+        "vendor",
+        "dist",
+        "build",
+        "target",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".idea",
+        ".vscode",
+        "site-packages",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +209,7 @@ class SignatureMismatch:
     caller: str
     caller_file: str
     caller_line: int
-    call_site_text: str      # the literal source line (evidence)
+    call_site_text: str  # the literal source line (evidence)
     positional_args: int
     confidence: float
     tier: str = "WARNING"
@@ -158,10 +227,10 @@ class CompanionSurface:
     newly-added symbol but NOT the symbol itself. WARNING tier — concrete
     referencing lines are the evidence."""
 
-    symbol: str                                  # the added symbol likely unregistered
-    edited_file: str                             # the file it was added to
-    file: str                                    # the untouched registration surface
-    siblings: tuple[str, ...]                    # parallel sibling names found in `file`
+    symbol: str  # the added symbol likely unregistered
+    edited_file: str  # the file it was added to
+    file: str  # the untouched registration surface
+    siblings: tuple[str, ...]  # parallel sibling names found in `file`
     referencing_lines: tuple[tuple[int, str], ...]  # (line_no, text) per sibling
     tier: str = "WARNING"
 
@@ -192,11 +261,7 @@ class PatchDeltaResult:
 
     @property
     def is_empty(self) -> bool:
-        return not (
-            self.signature_mismatches
-            or self.companion_surfaces
-            or self.cochange_partners
-        )
+        return not (self.signature_mismatches or self.companion_surfaces or self.cochange_partners)
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +326,8 @@ def _norm(path: str) -> str:
 class _Sig:
     """Positional bounds of a Python def (all counts INCLUDE a leading self/cls)."""
 
-    min_pos: int   # required positional-or-keyword params (no default)
-    max_pos: int   # total positional-or-keyword params
+    min_pos: int  # required positional-or-keyword params (no default)
+    max_pos: int  # total positional-or-keyword params
     is_method: bool  # PROVEN instance/class method (class-body def, self/cls first)
 
 
@@ -446,9 +511,7 @@ def _edge_cols_ok(cols: set[str]) -> bool:
     return {"resolution_method", "source_line"}.issubset(cols)
 
 
-def _fact_callers(
-    con: sqlite3.Connection, symbol: str, edited_file: str
-) -> list[dict[str, Any]]:
+def _fact_callers(con: sqlite3.Connection, symbol: str, edited_file: str) -> list[dict[str, Any]]:
     """FACT-tier NON-test callers of ``symbol`` DEFINED IN ``edited_file``, with the
     call-site file+line so the live line can be parsed.
 
@@ -499,7 +562,17 @@ def _fact_callers(
     except sqlite3.Error:
         return []
     out: list[dict[str, Any]] = []
-    for caller, caller_file, src_file, src_line, conf, target_file, method, edge_id, target_id in rows:
+    for (
+        caller,
+        caller_file,
+        src_file,
+        src_line,
+        conf,
+        target_file,
+        method,
+        edge_id,
+        target_id,
+    ) in rows:
         if not caller or src_line is None:
             continue
         # Belt-and-braces exact re-check: the SQL IN list already excludes any
@@ -517,16 +590,18 @@ def _fact_callers(
             conf_f = float(conf) if conf is not None else 1.0
         except (TypeError, ValueError):
             conf_f = 1.0
-        out.append({
-            "caller": caller,
-            "caller_file": caller_file or "",
-            "site_file": (src_file or caller_file or ""),
-            "line": line_no,
-            "confidence": conf_f,
-            "resolution_method": str(method or ""),
-            "edge_id": int(edge_id) if edge_id is not None else None,
-            "definition_id": int(target_id) if target_id is not None else None,
-        })
+        out.append(
+            {
+                "caller": caller,
+                "caller_file": caller_file or "",
+                "site_file": (src_file or caller_file or ""),
+                "line": line_no,
+                "confidence": conf_f,
+                "resolution_method": str(method or ""),
+                "edge_id": int(edge_id) if edge_id is not None else None,
+                "definition_id": int(target_id) if target_id is not None else None,
+            }
+        )
     return out
 
 
@@ -560,8 +635,7 @@ def _line_at(
         cache[norm] = lines
         if source_hashes is not None and source_text:
             exact_bytes = (
-                edited_after[norm].encode("utf-8")
-                if norm in edited_after else source_bytes
+                edited_after[norm].encode("utf-8") if norm in edited_after else source_bytes
             )
             source_hashes[norm] = hashlib.sha256(exact_bytes).hexdigest()
     if 0 < line_no <= len(lines):
@@ -611,8 +685,12 @@ def _signature_advisories(
                     continue  # positional bounds unchanged -> nothing to break
                 for site in _fact_callers(con, name, edited_file):
                     line = _line_at(
-                        repo_root, site["site_file"], site["line"], edited_after,
-                        line_cache, source_hashes,
+                        repo_root,
+                        site["site_file"],
+                        site["line"],
+                        edited_after,
+                        line_cache,
+                        source_hashes,
                     )
                     if not line:
                         continue
@@ -627,28 +705,30 @@ def _signature_advisories(
                     valid_before = v_old[0] <= n_args <= v_old[1]
                     valid_after = v_new[0] <= n_args <= v_new[1]
                     if valid_before and not valid_after:
-                        out.append(SignatureMismatch(
-                            symbol=name,
-                            edited_file=edited_file,
-                            old_min_params=v_old[0],
-                            old_max_params=v_old[1],
-                            new_min_params=v_new[0],
-                            new_max_params=v_new[1],
-                            caller=site["caller"],
-                            caller_file=_norm(site["site_file"]),
-                            caller_line=site["line"],
-                            call_site_text=line.strip(),
-                            positional_args=n_args,
-                            confidence=site["confidence"],
-                            resolution_method=site["resolution_method"],
-                            before_sha256=hashlib.sha256(before.encode("utf-8")).hexdigest(),
-                            after_sha256=hashlib.sha256(after.encode("utf-8")).hexdigest(),
-                            caller_source_sha256=source_hashes.get(
-                                _norm(site["site_file"]), ""
-                            ),
-                            edge_id=site["edge_id"],
-                            definition_id=site["definition_id"],
-                        ))
+                        out.append(
+                            SignatureMismatch(
+                                symbol=name,
+                                edited_file=edited_file,
+                                old_min_params=v_old[0],
+                                old_max_params=v_old[1],
+                                new_min_params=v_new[0],
+                                new_max_params=v_new[1],
+                                caller=site["caller"],
+                                caller_file=_norm(site["site_file"]),
+                                caller_line=site["line"],
+                                call_site_text=line.strip(),
+                                positional_args=n_args,
+                                confidence=site["confidence"],
+                                resolution_method=site["resolution_method"],
+                                before_sha256=hashlib.sha256(before.encode("utf-8")).hexdigest(),
+                                after_sha256=hashlib.sha256(after.encode("utf-8")).hexdigest(),
+                                caller_source_sha256=source_hashes.get(
+                                    _norm(site["site_file"]), ""
+                                ),
+                                edge_id=site["edge_id"],
+                                definition_id=site["definition_id"],
+                            )
+                        )
                         if len(out) >= _MAX_SIGNATURE_ROWS:
                             break
                 if len(out) >= _MAX_SIGNATURE_ROWS:
@@ -734,11 +814,16 @@ def _py_registration_refs(
                 continue  # bare annotation ``x: T`` -> no reference
             _add(value)  # RHS exactly a bare Name -> alias/re-export binding
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if (any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets)
-                    and isinstance(value, (ast.List, ast.Tuple, ast.Set))):
+            if any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets) and isinstance(
+                value, (ast.List, ast.Tuple, ast.Set)
+            ):
                 for elt in value.elts:
-                    if (isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                            and elt.value in wanted and elt.value not in hits):
+                    if (
+                        isinstance(elt, ast.Constant)
+                        and isinstance(elt.value, str)
+                        and elt.value in wanted
+                        and elt.value not in hits
+                    ):
                         hits[elt.value] = elt.lineno
         elif allow_imports and isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -820,9 +905,7 @@ def _companion_surface_advisories(
         src_lines = text.splitlines()
         hits: dict[str, tuple[int, str]] = {}
         for name, lineno in refs.items():
-            line_text = (
-                src_lines[lineno - 1].strip() if 0 < lineno <= len(src_lines) else ""
-            )
+            line_text = src_lines[lineno - 1].strip() if 0 < lineno <= len(src_lines) else ""
             hits[name] = (lineno, line_text)
         hit_names = set(hits)
         for edited_file, (fam, added_d) in families.items():
@@ -833,13 +916,15 @@ def _companion_surface_advisories(
                 if len(siblings) < _MIN_PARALLEL_SIBLINGS:
                     continue
                 evidence = tuple(hits[s] for s in siblings[:_MAX_SIBLING_EVIDENCE])
-                rows.append(CompanionSurface(
-                    symbol=symbol,
-                    edited_file=edited_file,
-                    file=rel,
-                    siblings=tuple(siblings),
-                    referencing_lines=evidence,
-                ))
+                rows.append(
+                    CompanionSurface(
+                        symbol=symbol,
+                        edited_file=edited_file,
+                        file=rel,
+                        siblings=tuple(siblings),
+                        referencing_lines=evidence,
+                    )
+                )
         if len(rows) >= _MAX_COMPANION_ROWS:
             break
     rows.sort(key=lambda r: (r.symbol, r.file))
@@ -863,12 +948,14 @@ def _cochange_advisories(
             continue  # a primary / already-touched file is not a forgotten partner
         if hit.count < _MIN_COCHANGE_COUNT:
             continue
-        out.append(CochangePartner(
-            file=hf,
-            score=round(float(hit.score), 6),
-            count=int(hit.count),
-            primaries=tuple(_norm(p) for p in hit.primaries),
-            commits=tuple(hit.commits),
-        ))
+        out.append(
+            CochangePartner(
+                file=hf,
+                score=round(float(hit.score), 6),
+                count=int(hit.count),
+                primaries=tuple(_norm(p) for p in hit.primaries),
+                commits=tuple(hit.commits),
+            )
+        )
     out.sort(key=lambda p: (-p.score, p.file))
     return out[:_MAX_COCHANGE_ROWS]

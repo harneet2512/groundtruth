@@ -88,9 +88,7 @@ def _canonical(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def recompute_churn(
-    write_steps: "Iterable[int]", pass_steps: "Iterable[int]"
-) -> "int | None":
+def recompute_churn(write_steps: "Iterable[int]", pass_steps: "Iterable[int]") -> "int | None":
     """The PURE churn predicate — a faithful, self-contained replica of the seam's
     ``_ss_coherence_churn`` arithmetic (gt_mini_patch.py): the count of successful writes to
     the file SINCE the last passing test, or ``None`` when that count is <=2.
@@ -119,8 +117,7 @@ def _canonical_claim(rel: str, churn: int) -> str:
     no passing test between edits``. A pure function of ``(basename, churn)`` — the delivered
     steer must contain it, which binds the delivered N to the re-derived churn count."""
     return (
-        f"rewritten {os.path.basename(rel)} {int(churn)} times "
-        "with no passing test between edits"
+        f"rewritten {os.path.basename(rel)} {int(churn)} times with no passing test between edits"
     )
 
 
@@ -171,15 +168,9 @@ def build_recovery_candidate_input(
     producer delivered. ``churn`` is the count the producer computed (recorded for the
     equality cross-check)."""
     write_steps = tuple(
-        sorted(
-            int(step)
-            for (r, step, ok) in (edit_events or ())
-            if r == rel and ok
-        )
+        sorted(int(step) for (r, step, ok) in (edit_events or ()) if r == rel and ok)
     )
-    pass_steps = tuple(
-        sorted(int(step) for (step, passed) in (test_events or ()) if passed)
-    )
+    pass_steps = tuple(sorted(int(step) for (step, passed) in (test_events or ()) if passed))
     return RecoveryDecisionInput(
         rel=str(rel or ""),
         churn=int(churn),
@@ -269,8 +260,7 @@ def finalize_recovery_attestation(
         and isinstance(delivery_seal, str)
         and delivery_seal == _sha(shipped_bytes)[:16]
         and isinstance(candidate_id, str)
-        and candidate_id
-        == lane_delivery_candidate_id(_LANE_KIND, target, shipped_suffix)
+        and candidate_id == lane_delivery_candidate_id(_LANE_KIND, target, shipped_suffix)
         and candidate.actual_event == _ACTUAL_EVENT
         and actual_event == _ACTUAL_EVENT
     )
@@ -289,8 +279,7 @@ def finalize_recovery_attestation(
             "edit-event ledger and equals the count the steer claims"
         ),
         observation=(
-            "churn re-derived from the recorded edit/test events reproduces the "
-            "delivered claim"
+            "churn re-derived from the recorded edit/test events reproduces the delivered claim"
             if complete
             else "steer not bound to a re-derived churn claim"
         ),

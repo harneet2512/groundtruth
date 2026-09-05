@@ -10,6 +10,7 @@ Research basis:
 - R2 Agentless: structured evidence, not controller
 - R5 Lost-in-the-Middle: long/noisy context hurts
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,7 +52,9 @@ def should_suppress_completeness(
         )
     return DeliveryDecision(
         status=DELIVERED_VISIBLE,
-        reason="Completeness scoped to edited function" if edited_functions else "Legacy all-pairs mode",
+        reason="Completeness scoped to edited function"
+        if edited_functions
+        else "Legacy all-pairs mode",
     )
 
 
@@ -117,6 +120,8 @@ def should_emit_l4a(
         )
 
     if symbol_callers > 0:
-        return DeliveryDecision(DELIVERED_VISIBLE, f"Structural relevance ({symbol_callers} callers)")
+        return DeliveryDecision(
+            DELIVERED_VISIBLE, f"Structural relevance ({symbol_callers} callers)"
+        )
 
     return DeliveryDecision(SUPPRESSED_NO_EVIDENCE, "No callers, no issue match, no file relevance")

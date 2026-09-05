@@ -1,4 +1,5 @@
 """Fail-open shadow integration for immutable legacy localization projections."""
+
 from __future__ import annotations
 
 import hashlib
@@ -76,16 +77,12 @@ def legacy_discoveries_from_projection(
     if source_projection == "localize":
         candidates = tuple(getattr(result, "candidates", ()) or ())
         semantic_paths = {
-            _norm_path(str(path))
-            for path in (getattr(result, "semantic_body_paths", ()) or ())
+            _norm_path(str(path)) for path in (getattr(result, "semantic_body_paths", ()) or ())
         }
         content_paths = {
-            _norm_path(str(path))
-            for path in (getattr(result, "content_leg_paths", ()) or ())
+            _norm_path(str(path)) for path in (getattr(result, "content_leg_paths", ()) or ())
         }
-        signals_by_file = dict(
-            getattr(result, "signals_by_file", {}) or {}
-        )
+        signals_by_file = dict(getattr(result, "signals_by_file", {}) or {})
         signal_rows = []
         for candidate in candidates:
             path = _norm_path(str(getattr(candidate, "file_path", "")))
@@ -93,25 +90,13 @@ def legacy_discoveries_from_projection(
             signal_rows.append(
                 {
                     "path": path,
-                    "score": float(
-                        getattr(candidate, "score", 0.0) or 0.0
-                    ),
+                    "score": float(getattr(candidate, "score", 0.0) or 0.0),
                     "symbol": "",
-                    "entered_via": (
-                        "graph_rescue"
-                        if "structural" in signals
-                        else "semantic_seed"
-                    ),
+                    "entered_via": ("graph_rescue" if "structural" in signals else "semantic_seed"),
                     "components": {
-                        "sem": 1.0
-                        if path in semantic_paths or "semantic" in signals
-                        else 0.0,
-                        "lex": 1.0
-                        if path in content_paths or "grep" in signals
-                        else 0.0,
-                        "reach": 1.0
-                        if "structural" in signals
-                        else 0.0,
+                        "sem": 1.0 if path in semantic_paths or "semantic" in signals else 0.0,
+                        "lex": 1.0 if path in content_paths or "grep" in signals else 0.0,
+                        "reach": 1.0 if "structural" in signals else 0.0,
                     },
                 }
             )
@@ -139,8 +124,7 @@ def _legacy_snapshot(result: Any, source_projection: str) -> dict[str, Any]:
             for candidate in getattr(result, "candidates", ()) or ()
         ]
         snapshot["witnesses"] = [
-            str(candidate.render_witness())
-            for candidate in getattr(result, "candidates", ()) or ()
+            str(candidate.render_witness()) for candidate in getattr(result, "candidates", ()) or ()
         ]
         snapshot["confidence"] = float(getattr(result, "confidence", 0.0) or 0.0)
         snapshot["gate_reason"] = str(getattr(result, "gate_reason", ""))
@@ -149,8 +133,7 @@ def _legacy_snapshot(result: Any, source_projection: str) -> dict[str, Any]:
             str(row.get("path", "")) for row in getattr(result, "ranked_full", ()) or ()
         ]
         snapshot["scores"] = [
-            float(row.get("score", 0.0) or 0.0)
-            for row in getattr(result, "ranked_full", ()) or ()
+            float(row.get("score", 0.0) or 0.0) for row in getattr(result, "ranked_full", ()) or ()
         ]
         snapshot["elapsed_ms"] = int(getattr(result, "elapsed_ms", 0) or 0)
     return snapshot
@@ -172,9 +155,7 @@ def write_shadow_sidecar(payload: dict[str, Any], path: Path) -> None:
         indent=2,
         ensure_ascii=False,
     ).encode("utf-8")
-    temporary = path.with_suffix(
-        path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp"
-    )
+    temporary = path.with_suffix(path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
     temporary.write_bytes(encoded)
     os.replace(temporary, path)
 

@@ -63,8 +63,9 @@ _TEST_BASENAME_RE = re.compile(
 try:
     from groundtruth.delivery.path_policy import _TEST_DIR_SEGMENTS as _PP_TEST_DIR_SEGMENTS
 except Exception:  # noqa: BLE001 — path_policy absent: local mirror (Fable P11: no `testing`)
-    _PP_TEST_DIR_SEGMENTS = frozenset({
-        "test", "tests", "__tests__", "__test__", "__tests", "spec", "specs", "e2e"})
+    _PP_TEST_DIR_SEGMENTS = frozenset(
+        {"test", "tests", "__tests__", "__test__", "__tests", "spec", "specs", "e2e"}
+    )
 _TEST_DIR_RE = re.compile(
     r"(^|/)(" + "|".join(re.escape(s) for s in sorted(_PP_TEST_DIR_SEGMENTS)) + r")(/|$)",
     re.IGNORECASE,
@@ -77,7 +78,9 @@ _RE_DEF_TEST_ECHO = re.compile(r"^\s*(async\s+)?def\s+test\w*\s*\(")
 _RE_SUMMARY = re.compile(r"^\s*(FAILED|PASSED|ERROR|SKIPPED)\s")
 _RE_PYTEST_NOISE = re.compile(
     r"^\s*(platform\s|rootdir|plugins:|cachedir:|collected\s|configfile:"
-    r"|===|test session starts|short test summary)", re.IGNORECASE)
+    r"|===|test session starts|short test summary)",
+    re.IGNORECASE,
+)
 _RE_GO_FAIL_HDR = re.compile(r"^\s*---\s+(FAIL|PASS|SKIP):")
 # a `path:line: rest` traceback / message frame (py/go)
 _RE_FRAME = re.compile(r"^\s*(?P<path>[\w./\\+\-]+?):(?P<line>\d+):\s?(?P<rest>.*)$")
@@ -144,16 +147,16 @@ _RE_ANY_NODEID = re.compile(r"([\w./\\+\-]+\.(?:py|go|rs|js|jsx|ts|tsx|rb|java))
 # `std::collections`, `shouldRetry`, `Testing*`/`testing*`). Deliberately NOT caught (over-match
 # cost > leak severity, would drop the near-misses): JUnit `shouldX`, mocha `it(`.
 PROSE_TEST_NAME_RE = re.compile(
-    r"(?i:\btest_\w+\b)"                                            # snake, any case: test_x / TEST_X / Test_X
-    r"|(?i:\b\w+_test\b)"                                           # suffix, any case: widget_test / FOO_TEST
-    r"|\bTest[A-Z]\w*\b"                                            # PascalCase (excl. Testing): TestReconnect
-    r"|\btest[A-Z]\w*\b"                                            # camelCase (excl. testing): testShouldReconnect
-    r"|\b\w[\w.\-]*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)\b"    # JS/TS test file: utils.test.ts
-    r"|[\w/\\+\-]+\.[A-Za-z0-9_]+::[\w.\[\]\-]+"                    # pytest/go nodeid: a/b.py::TestX
-    r"|\b\w+::tests?::\w"                                           # rust test path: crate::tests::fn
-    r"|\btests?[\\/]"                                               # test path segment: tests/ or test/
-    r"|\#\[\s*tests?\b"                                             # rust attribute: #[test]
-    r"|\b(?:it|describe|context)\(\s*['\"]"                         # JS/mocha BDD decl: it('...')
+    r"(?i:\btest_\w+\b)"  # snake, any case: test_x / TEST_X / Test_X
+    r"|(?i:\b\w+_test\b)"  # suffix, any case: widget_test / FOO_TEST
+    r"|\bTest[A-Z]\w*\b"  # PascalCase (excl. Testing): TestReconnect
+    r"|\btest[A-Z]\w*\b"  # camelCase (excl. testing): testShouldReconnect
+    r"|\b\w[\w.\-]*\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)\b"  # JS/TS test file: utils.test.ts
+    r"|[\w/\\+\-]+\.[A-Za-z0-9_]+::[\w.\[\]\-]+"  # pytest/go nodeid: a/b.py::TestX
+    r"|\b\w+::tests?::\w"  # rust test path: crate::tests::fn
+    r"|\btests?[\\/]"  # test path segment: tests/ or test/
+    r"|\#\[\s*tests?\b"  # rust attribute: #[test]
+    r"|\b(?:it|describe|context)\(\s*['\"]"  # JS/mocha BDD decl: it('...')
 )
 # Deliberately NOT a leg: bare JUnit-style `shouldReturnX` (camelCase `should\w+`). It collides
 # with legitimate production booleans on the near-miss keep-list (`shouldRetry`/`shouldClose`) and
@@ -188,9 +191,7 @@ def prose_leaks_test_identity(text: str) -> bool:
     production prose (``std::collections``, ``manifest.json``) is untouched."""
     t = text or ""
     return bool(
-        PROSE_TEST_NAME_RE.search(t)
-        or PROSE_ASSERT_RE.search(t)
-        or contains_test_identity(t)
+        PROSE_TEST_NAME_RE.search(t) or PROSE_ASSERT_RE.search(t) or contains_test_identity(t)
     )
 
 
@@ -203,8 +204,7 @@ def _strip_case_tokens(msg: str) -> str:
 
 # a `path[:line[:col]]` location token (any of the source exts) — used to scrub an EMBEDDED
 # test-file path from a kept value/message line (Fable-LIPI round-2 Invariant-1, 2026-07-11).
-_RE_PATH_LOC = re.compile(
-    r"([\w./\\+\-]+\.(?:py|go|rs|js|jsx|ts|tsx|rb|java))(?::\d+){0,2}")
+_RE_PATH_LOC = re.compile(r"([\w./\\+\-]+\.(?:py|go|rs|js|jsx|ts|tsx|rb|java))(?::\d+){0,2}")
 
 
 def _scrub_test_path_tokens(line: str, test_files: set[str]) -> str:
@@ -215,7 +215,8 @@ def _scrub_test_path_tokens(line: str, test_files: set[str]) -> str:
     ran-set so a covering test in a NON-conventional dir (``qa/``) is caught too; a NON-test source
     frame (``src/pool.rs`` — the where-to-fix) is left untouched."""
     return _RE_PATH_LOC.sub(
-        lambda m: "<test>" if _is_test_path(m.group(1), test_files) else m.group(0), line)
+        lambda m: "<test>" if _is_test_path(m.group(1), test_files) else m.group(0), line
+    )
 
 
 # Strips BOTH an opening (``<gt-x ...>``) AND a closing (``</gt-x>``) GT tag. The module-level
@@ -235,7 +236,7 @@ def _final_scrub(line: str, test_files: set[str] | None = None) -> str:
     Byte-identity note (SM-1 LIPI close-vector 2): the ``_RE_GT_TAG_ANY`` strip is a NO-OP on the
     frozen ``render_covering_failure_native`` path — anonymized runner tokens never contain
     ``<gt-`` — so the covering byte pins are unmoved (proven, not assumed)."""
-    line = _RE_ANSI.sub("", line)   # belt: a colorized token can never mask an identity
+    line = _RE_ANSI.sub("", line)  # belt: a colorized token can never mask an identity
     line = _RE_GT_TAG_ANY.sub("", line)
     line = _RE_CARGO_THREAD.sub("thread", line)
     line = _RE_RUST_TESTPATH.sub("<test>", line)
@@ -293,7 +294,7 @@ def render_covering_failure_native(
     if not result:
         return ""
     tf = {_norm(t) for t in (test_files or [])}
-    raw = ((result.get("stdout_tail") or "") + "\n" + (result.get("stderr_tail") or ""))
+    raw = (result.get("stdout_tail") or "") + "\n" + (result.get("stderr_tail") or "")
     # Leak-robustness: de-colorize BEFORE any recognition (see _RE_ANSI above).
     raw = _RE_ANSI.sub("", raw)
     kept: list[str] = []
@@ -302,9 +303,14 @@ def render_covering_failure_native(
         if not s.strip():
             continue
         # --- STRIP: pure test-identity / ceremony -------------------------
-        if (_RE_CMD_ECHO.match(s) or _RE_PYTEST_BANNER.match(s)
-                or _RE_DEF_TEST_ECHO.match(s) or _RE_SUMMARY.match(s)
-                or _RE_PYTEST_NOISE.match(s) or _RE_GO_FAIL_HDR.match(s)):
+        if (
+            _RE_CMD_ECHO.match(s)
+            or _RE_PYTEST_BANNER.match(s)
+            or _RE_DEF_TEST_ECHO.match(s)
+            or _RE_SUMMARY.match(s)
+            or _RE_PYTEST_NOISE.match(s)
+            or _RE_GO_FAIL_HDR.match(s)
+        ):
             continue
         # --- KEEP: pytest error / assertion line (scrubbed) ---------------
         m = _RE_E_LINE.match(s)
@@ -357,10 +363,15 @@ def render_covering_failure_native(
             s = line.rstrip()
             if not s.strip():
                 continue
-            if (_RE_CMD_ECHO.match(s) or _RE_PYTEST_BANNER.match(s)
-                    or _RE_DEF_TEST_ECHO.match(s) or _RE_SUMMARY.match(s)
-                    or _RE_PYTEST_NOISE.match(s) or _RE_GO_FAIL_HDR.match(s)
-                    or _RE_COUNT_SUMMARY.match(s)):
+            if (
+                _RE_CMD_ECHO.match(s)
+                or _RE_PYTEST_BANNER.match(s)
+                or _RE_DEF_TEST_ECHO.match(s)
+                or _RE_SUMMARY.match(s)
+                or _RE_PYTEST_NOISE.match(s)
+                or _RE_GO_FAIL_HDR.match(s)
+                or _RE_COUNT_SUMMARY.match(s)
+            ):
                 continue
             if _RE_GENERIC_FAIL.search(s) and not _is_test_path(s, tf):
                 kept.append(s.strip())
@@ -376,8 +387,11 @@ def render_covering_failure_native(
     out = out[:_MAX_KEEP_LINES]
     # §0 native voice: the environment reports the failure, GT never speaks in its
     # own voice ("GT ran ...") on a model-facing surface.
-    head = (f"Your change to `{edited_symbol}()` fails a covering test:"
-            if edited_symbol else "A covering test fails:")
+    head = (
+        f"Your change to `{edited_symbol}()` fails a covering test:"
+        if edited_symbol
+        else "A covering test fails:"
+    )
     return _tail(head + "\n" + "\n".join(out))
 
 
@@ -412,13 +426,14 @@ def render_syntax_error_native(result: dict[str, Any]) -> str:
     return _tail(diag, _MAX_BODY).strip()
 
 
-def deepest_agent_frame(result: dict[str, Any], test_files: list[str] | set[str] | None = None
-                        ) -> tuple[str, int] | None:
+def deepest_agent_frame(
+    result: dict[str, Any], test_files: list[str] | set[str] | None = None
+) -> tuple[str, int] | None:
     """The deepest NON-test traceback frame (agent's own source) as (path, line),
     or None. Used by the attribution gate (was this red caused by the edit)."""
     tf = {_norm(t) for t in (test_files or [])}
-    raw = ((result.get("stdout_tail") or "") + "\n" + (result.get("stderr_tail") or ""))
-    raw = _RE_ANSI.sub("", raw)   # colorized frames must still attribute (leak-robustness class)
+    raw = (result.get("stdout_tail") or "") + "\n" + (result.get("stderr_tail") or "")
+    raw = _RE_ANSI.sub("", raw)  # colorized frames must still attribute (leak-robustness class)
     found: tuple[str, int] | None = None
     for line in raw.splitlines():
         fm = _RE_FRAME.match(line.rstrip())
@@ -721,8 +736,7 @@ def render_caller_contract_native(
         return ""  # never name a test file as the edit site (identity firewall)
     delta = _cap(sig_delta).strip()
     changed = f"signature changed ({delta})" if delta else "signature changed"
-    msg = (f"{sym}() {changed}; {nc} caller(s) in {nf} file(s) "
-           f"must update the call sites")
+    msg = f"{sym}() {changed}; {nc} caller(s) in {nf} file(s) must update the call sites"
     out = f"{df}: error: {msg}" if df else f"error: {msg}"
     return _final_scrub(out, tf)
 
@@ -759,7 +773,8 @@ def render_caller_usage_native(
     if _is_test_path(path, tf):
         return ""
     return _final_scrub(
-        f"{path}:{line}: note: {sym}() result is {phrase}", tf,
+        f"{path}:{line}: note: {sym}() result is {phrase}",
+        tf,
     )
 
 
@@ -870,8 +885,7 @@ def render_note_rows_native(
             continue
         if _is_test_path(n, tf):
             continue  # ripgrep would show it, but GT never surfaces a test row
-        row_s = _final_scrub(
-            f"{n}:{ln}: note: {s} - verify your change is consistent here", tf)
+        row_s = _final_scrub(f"{n}:{ln}: note: {s} - verify your change is consistent here", tf)
         if row_s.strip():
             out.append(row_s)
     return "\n".join(out)
@@ -921,7 +935,8 @@ def render_related_files_native(
         if not path or not method or _is_test_path(path, tf):
             continue
         row = _final_scrub(
-            f"{path}: note: related file to inspect (certified {method} relation)", tf)
+            f"{path}: note: related file to inspect (certified {method} relation)", tf
+        )
         if row.strip():
             out.append(row)
     return "\n".join(out)
@@ -965,8 +980,8 @@ def render_recovery_native(reason: str, imperative: str) -> str:
     text = _RE_GT_TAG_ANY.sub("", (imperative or "")).strip()
     if not text:
         return ""
-    text = " ".join(text.split())     # collapse to a single imperative line
-    text = text[:_MAX_BODY]           # bound BEFORE the O(n²) scrub (ReDoS guard)
+    text = " ".join(text.split())  # collapse to a single imperative line
+    text = text[:_MAX_BODY]  # bound BEFORE the O(n²) scrub (ReDoS guard)
     return _final_scrub(text, set())  # symmetry: no test identity survives an imperative
 
 
@@ -1016,8 +1031,8 @@ _CERT_HOOK_LABEL: dict[str, str] = {
     "scope_compliance": "scope guard",
     "reproduction_status": "reproduce issue",
 }
-_CERT_HYGIENE_LABEL = "diff hygiene"   # the head's hygiene block (not an SDLC field)
-_CERT_LEADER_WIDTH = 56                # pre-commit dotted-leader column
+_CERT_HYGIENE_LABEL = "diff hygiene"  # the head's hygiene block (not an SDLC field)
+_CERT_LEADER_WIDTH = 56  # pre-commit dotted-leader column
 
 
 def render_completion_cert_native(
@@ -1048,7 +1063,7 @@ def render_completion_cert_native(
     labels: list[str] = []
     if hygiene_blocked:
         labels.append(_CERT_HYGIENE_LABEL)
-    for name in (failing_heads or []):
+    for name in failing_heads or []:
         lbl = _CERT_HOOK_LABEL.get(str(name))
         if lbl and lbl not in labels:
             labels.append(lbl)

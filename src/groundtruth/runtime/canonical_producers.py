@@ -72,9 +72,7 @@ _ACTIONABLE_RECOVERY_DISPOSITIONS = frozenset(
         D_REFRESH_BEFORE_ADVICE,
     }
 )
-_ATTRIBUTION_METHODS = frozenset(
-    {"trace_frame", "differential", "unresolved_covering"}
-)
+_ATTRIBUTION_METHODS = frozenset({"trace_frame", "differential", "unresolved_covering"})
 _FINE_TO_COARSE_EVENT = {
     fact_registry.EVENT_EDIT_RESULT: ee.EVENT_EDIT,
     fact_registry.EVENT_FAILURE_OBS: ee.EVENT_TEST,
@@ -104,12 +102,8 @@ class ProducerContext:
             "provenance",
             tuple((str(path), int(line)) for path, line in self.provenance),
         )
-        object.__setattr__(
-            self, "causal_neighborhood", tuple(self.causal_neighborhood)
-        )
-        object.__setattr__(
-            self, "runtime_witnesses", tuple(self.runtime_witnesses)
-        )
+        object.__setattr__(self, "causal_neighborhood", tuple(self.causal_neighborhood))
+        object.__setattr__(self, "runtime_witnesses", tuple(self.runtime_witnesses))
         if not isinstance(self.subject, str) or not self.subject.strip():
             raise ValueError("producer subject is required")
         if not isinstance(self.revision, RevisionVector):
@@ -124,29 +118,18 @@ class ProducerContext:
             for violation in ee.runtime_witness_violations(witness)
         ]
         if witness_violations:
-            raise ValueError(
-                "invalid canonical runtime witness: "
-                + "; ".join(witness_violations)
-            )
+            raise ValueError("invalid canonical runtime witness: " + "; ".join(witness_violations))
         subject_path = _subject_path(self.subject)
         if any(
-            witness.source_path
-            and _normalized_path(witness.source_path) != subject_path
+            witness.source_path and _normalized_path(witness.source_path) != subject_path
             for witness in self.runtime_witnesses
         ):
-            raise ValueError(
-                "diagnostic runtime witness must locate the producer subject"
-            )
+            raise ValueError("diagnostic runtime witness must locate the producer subject")
         if not self.provenance and not self.runtime_witnesses:
-            raise ValueError(
-                "source provenance or canonical runtime witness is required"
-            )
+            raise ValueError("source provenance or canonical runtime witness is required")
         if not self.causal_neighborhood:
             raise ValueError("producer causal neighborhood is required")
-        if any(
-            not isinstance(item, str) or not item.strip()
-            for item in self.causal_neighborhood
-        ):
+        if any(not isinstance(item, str) or not item.strip() for item in self.causal_neighborhood):
             raise ValueError("producer causal neighborhood entries must be strings")
 
 
@@ -281,8 +264,7 @@ def _lineage(
         return lineage
     mechanism = CAP_BYTE_OWNER_MECHANISMS.get(owner_feature_id)
     if mechanism is None or not any(
-        binding.fact_class == lineage.fact_class
-        for binding in mechanism.bindings
+        binding.fact_class == lineage.fact_class for binding in mechanism.bindings
     ):
         return None
     features = set(lineage.features)
@@ -352,9 +334,7 @@ def _build_envelope(
         observed_substrates=tuple(sorted(set(observed_substrates))),
     )
     try:
-        computation_hash = _sha256_text(
-            _stable_json(computation if identity is None else identity)
-        )
+        computation_hash = _sha256_text(_stable_json(computation if identity is None else identity))
         for witness in context.runtime_witnesses:
             if (
                 witness.kind == "deterministic_computation"
@@ -362,9 +342,7 @@ def _build_envelope(
             ):
                 return None
             if witness.kind == "diagnostic_location":
-                diagnostic_hash = getattr(
-                    computation, "diagnostic_sha256", None
-                )
+                diagnostic_hash = getattr(computation, "diagnostic_sha256", None)
                 if witness.content_sha256 != diagnostic_hash:
                     return None
         envelope = ee.EvidenceEnvelope.build(
@@ -382,12 +360,7 @@ def _build_envelope(
             blocking_eligibility=ee.ADVISORY,
             estimated_cost_tokens=max(
                 1,
-                (
-                    len(claim)
-                    + len(consequence)
-                    + sum(len(item) for item in payload)
-                )
-                // 4,
+                (len(claim) + len(consequence) + sum(len(item) for item in payload)) // 4,
             ),
             measured=tier == ee.VERIFIED,
             lineage=lineage,
@@ -410,9 +383,7 @@ def produce_covering_red(
 ) -> ee.EvidenceEnvelope | None:
     """Emit an attributable executed covering RED, otherwise abstain."""
 
-    if not isinstance(result, Mapping) or not isinstance(
-        attribution, CoveringAttribution
-    ):
+    if not isinstance(result, Mapping) or not isinstance(attribution, CoveringAttribution):
         return None
     command = result.get("command")
     exit_code = result.get("exit_code")
@@ -442,12 +413,8 @@ def produce_covering_red(
     subject_path = _subject_path(context.subject)
     selected = {_normalized_path(path) for path in selected_files}
     ran = {_normalized_path(path) for path in ran_files}
-    attributed_covering = {
-        _normalized_path(path) for path in attribution.covering_files
-    }
-    implicated = {
-        _normalized_path(path) for path in attribution.implicated_edited_paths
-    }
+    attributed_covering = {_normalized_path(path) for path in attribution.covering_files}
+    implicated = {_normalized_path(path) for path in attribution.implicated_edited_paths}
     if (
         subject_path not in implicated
         or not attributed_covering.issubset(selected)
@@ -491,8 +458,7 @@ def produce_covering_red(
             "red and attributable to the current patch."
         ),
         consequence=(
-            "The open failure-recovery decision remains constrained by this "
-            "observed failing path."
+            "The open failure-recovery decision remains constrained by this observed failing path."
         ),
         tier=ee.VERIFIED,
         confidence=0.98,
@@ -572,9 +538,7 @@ def produce_syntax_result(
         contradiction_resolution=5,
         anchoring_risk=0,
         observed_substrates=(
-            ("parser_result",)
-            if verdict == "syntax_error"
-            else ("compiler_result",)
+            ("parser_result",) if verdict == "syntax_error" else ("compiler_result",)
         ),
     )
 
@@ -623,9 +587,7 @@ def produce_recovery(
         owner_feature_id="GT_HYPOTHESIS",
         failure_prevention=8,
         causal_value=7,
-        contradiction_resolution=(
-            9 if advisory.disposition == D_HYPOTHESIS_FALSIFIED else 6
-        ),
+        contradiction_resolution=(9 if advisory.disposition == D_HYPOTHESIS_FALSIFIED else 6),
         anchoring_risk=2 if advisory.tier == ee.INFO else 1,
         observed_substrates=("canonical_event_history",),
     )
@@ -672,9 +634,7 @@ def produce_submit_refusal(
     else:
         return None
     certificate_json = (
-        _stable_json_or_none(certificate.to_dict())
-        if certificate is not None
-        else ""
+        _stable_json_or_none(certificate.to_dict()) if certificate is not None else ""
     )
     gate_record_json = _stable_json_or_none(verdict.record)
     if certificate_json is None or gate_record_json is None:

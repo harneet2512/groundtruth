@@ -135,7 +135,9 @@ def finalize_submit_refusal_attestation(
     verdict_payload = {
         "allow": bool(getattr(verdict, "allow", True)),
         "reason": str(getattr(verdict, "reason", "")),
-        "record": dict(verdict.record) if isinstance(getattr(verdict, "record", None), dict) else {},
+        "record": dict(verdict.record)
+        if isinstance(getattr(verdict, "record", None), dict)
+        else {},
     }
     verdict_bytes = _canonical(verdict_payload)
 

@@ -199,8 +199,12 @@ def cli() -> None:
 
     gt_plan_parser = subparsers.add_parser("gt_plan", help="Print the current v7 GT plan JSON")
     gt_plan_parser.add_argument("--plan", default=None, help="Path to <task>_v7_plan.json")
-    gt_plan_parser.add_argument("--log-dir", default=None, help="Directory containing v7 plan files")
-    gt_plan_parser.add_argument("--full", action="store_true", help="Print full diagnostic plan JSON")
+    gt_plan_parser.add_argument(
+        "--log-dir", default=None, help="Directory containing v7 plan files"
+    )
+    gt_plan_parser.add_argument(
+        "--full", action="store_true", help="Print full diagnostic plan JSON"
+    )
 
     gt_patch_parser = subparsers.add_parser("gt_patch_check", help="Audit current patch shape")
     gt_patch_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
@@ -242,7 +246,9 @@ def cli() -> None:
     gt_replan_parser = subparsers.add_parser("gt_replan", help="Evaluate or recompute the v7 plan")
     gt_replan_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
     gt_replan_parser.add_argument("--plan", default=None, help="Path to <task>_v7_plan.json")
-    gt_replan_parser.add_argument("--issue-text-file", default=None, help="Original issue text file")
+    gt_replan_parser.add_argument(
+        "--issue-text-file", default=None, help="Original issue text file"
+    )
     gt_replan_parser.add_argument("--db", default=None, help="Graph database path")
     gt_replan_parser.add_argument(
         "--run-tests",
@@ -264,13 +270,17 @@ def cli() -> None:
     gt_replan_parser.add_argument("--log-dir", default=None, help="Telemetry output directory")
     gt_replan_parser.add_argument("--task-id", default="unknown", help="Task id")
 
-    gt_memory_parser = subparsers.add_parser("gt_project_memory", help="Build opt-in project memory")
+    gt_memory_parser = subparsers.add_parser(
+        "gt_project_memory", help="Build opt-in project memory"
+    )
     gt_memory_parser.add_argument("--root", default=os.getcwd(), help="Project root directory")
     gt_memory_parser.add_argument("--output", default=None, help="Output JSON path")
     gt_memory_parser.add_argument("--log-dir", default=None, help="Telemetry output directory")
     gt_memory_parser.add_argument("--task-id", default="unknown", help="Task id")
 
-    gt_report_parser = subparsers.add_parser("gt_report", help="Aggregate full-form GT benchmark metrics")
+    gt_report_parser = subparsers.add_parser(
+        "gt_report", help="Aggregate full-form GT benchmark metrics"
+    )
     gt_report_parser.add_argument("--run-dir", required=True, help="Benchmark output directory")
     gt_report_parser.add_argument("--json", default=None, help="Output JSON path")
     gt_report_parser.add_argument("--md", default=None, help="Output markdown path")

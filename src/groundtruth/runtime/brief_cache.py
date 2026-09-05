@@ -5,6 +5,7 @@ The later emit stage loads those exact bytes, executes the same acquisition once
 independently, and attaches a repeat witness only when their canonical identities
 match. The second execution never replaces the model-visible gate artifact.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -19,22 +20,35 @@ BRIEF_CACHE_BASENAME = "brief_result.json"
 BRIEF_DETERMINISM_DIAGNOSTIC_BASENAME = "brief_determinism_mismatch.json"
 BRIEF_RESULT_SCHEMA = "gt.brief_result.v1"
 _METRIC_FIELDS = (
-    "effective_w_sem", "semantic_signal_count",
-    "rendered_candidate_count", "k_sem_top", "sem_components",
-    "localization_proof", "acquisition_proof",
+    "effective_w_sem",
+    "semantic_signal_count",
+    "rendered_candidate_count",
+    "k_sem_top",
+    "sem_components",
+    "localization_proof",
+    "acquisition_proof",
     # ACQ phase-A: V1R already computes these witnesses. Keep them across the
     # gate->emit boundary so the sealed cache retains acquisition provenance.
     # Sidecar-only: none participates in ``brief_text``.
-    "graph_edge_count", "structural_signal_count", "fts5_signal_count",
+    "graph_edge_count",
+    "structural_signal_count",
+    "fts5_signal_count",
     # C15 (2026-07-27): the four fields above are DELIVERY counts whose unqualified names
     # read as ACQUISITION. Carry both families explicitly so a downstream reader never has
     # to guess which fact it is holding. ``delivered_*`` may be None == NOT_EVALUABLE.
-    "acquired_graph_edge_count", "acquired_semantic_signal_count",
-    "acquired_structural_signal_count", "acquired_fts5_signal_count",
-    "delivered_graph_edge_count", "delivered_semantic_signal_count",
-    "delivered_structural_signal_count", "delivered_fts5_signal_count",
+    "acquired_graph_edge_count",
+    "acquired_semantic_signal_count",
+    "acquired_structural_signal_count",
+    "acquired_fts5_signal_count",
+    "delivered_graph_edge_count",
+    "delivered_semantic_signal_count",
+    "delivered_structural_signal_count",
+    "delivered_fts5_signal_count",
     "delivered_candidate_count",
-    "block_receipts", "control_participation", "tokenizer_used", "budget_suppressed",
+    "block_receipts",
+    "control_participation",
+    "tokenizer_used",
+    "budget_suppressed",
     # Cluster-2b: the build-time obligations extraction record (issue source identity +
     # extracted obligations digest/count) bound to the delivered obligations block seal,
     # so the runner can seal a joinable obligations producer attestation. Sidecar only.
@@ -68,7 +82,11 @@ def _extract_metrics(obj: Any) -> dict:
         v = _get(k)
         # Some metric payloads may carry dataclass-ish or iterator values; keep only
         # JSON-safe scalars/lists/dicts so proof persistence cannot affect briefing.
-        if k in {"sem_components", "localization_proof", "acquisition_proof"} and v is not None and not isinstance(v, (list, dict, int, float, str, bool)):
+        if (
+            k in {"sem_components", "localization_proof", "acquisition_proof"}
+            and v is not None
+            and not isinstance(v, (list, dict, int, float, str, bool))
+        ):
             try:
                 v = list(v)
             except TypeError:
@@ -131,7 +149,10 @@ def _value_fingerprint(value: Any) -> dict[str, str]:
     if value is _MISSING:
         return {"type": "missing", "sha256_16": ""}
     encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
     return {
@@ -141,7 +162,10 @@ def _value_fingerprint(value: Any) -> dict[str, str]:
 
 
 def _bounded_payload_diff(
-    primary: Any, repeat: Any, *, limit: int = 32,
+    primary: Any,
+    repeat: Any,
+    *,
+    limit: int = 32,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Return stable hash-only JSON-pointer differences, bounded for diagnostics."""
     differences: list[dict[str, Any]] = []
@@ -155,8 +179,7 @@ def _bounded_payload_diff(
         if isinstance(left, dict) and isinstance(right, dict):
             for key in sorted(set(left) | set(right)):
                 escaped = str(key).replace("~", "~0").replace("/", "~1")
-                walk(left.get(key, _MISSING), right.get(key, _MISSING),
-                     f"{pointer}/{escaped}")
+                walk(left.get(key, _MISSING), right.get(key, _MISSING), f"{pointer}/{escaped}")
             return
         if isinstance(left, list) and isinstance(right, list):
             for index in range(max(len(left), len(right))):
@@ -167,11 +190,13 @@ def _bounded_payload_diff(
                 )
             return
         if left != right or type(left) is not type(right):
-            differences.append({
-                "json_pointer": pointer or "/",
-                "primary": _value_fingerprint(left),
-                "repeat": _value_fingerprint(right),
-            })
+            differences.append(
+                {
+                    "json_pointer": pointer or "/",
+                    "primary": _value_fingerprint(left),
+                    "repeat": _value_fingerprint(right),
+                }
+            )
 
     walk(primary, repeat, "")
     return differences, truncated
@@ -183,7 +208,10 @@ def _atomic_write_payload(path: str, payload: dict[str, Any]) -> None:
     temp_path = ""
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=parent, delete=False,
+            mode="w",
+            encoding="utf-8",
+            dir=parent,
+            delete=False,
         ) as handle:
             temp_path = handle.name
             json.dump(payload, handle, sort_keys=True)
@@ -308,7 +336,9 @@ def capture_request_identity(issue_text: str, graph: str) -> RequestIdentityHand
     h.update(b"\x00")
     h.update(graph_state.encode("ascii"))
     return RequestIdentityHandoff(
-        value=h.hexdigest(), issue_text=issue_text or "", graph=graph,
+        value=h.hexdigest(),
+        issue_text=issue_text or "",
+        graph=graph,
         graph_state_sha256=graph_state,
     )
 
@@ -349,8 +379,9 @@ def load_cached_brief(out_dir: str, expect_identity: Optional[str] = None) -> Op
     return None
 
 
-def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
-                  identity: str = "") -> dict:
+def persist_brief(
+    out_dir: str, brief_text: str, result_obj: Any = None, identity: str = ""
+) -> dict:
     """Best-effort persist of the brief text + sha + request identity + metrics for
     cross-process reuse. Returns the dict regardless of whether the write succeeded."""
     text = (brief_text or "").strip()
@@ -368,9 +399,14 @@ def persist_brief(out_dir: str, brief_text: str, result_obj: Any = None,
     return d
 
 
-def get_or_generate(out_dir: str, issue_text: str, work: str, graph: str,
-                    generator: Any = None,
-                    identity_handoff: RequestIdentityHandoff | None = None) -> dict:
+def get_or_generate(
+    out_dir: str,
+    issue_text: str,
+    work: str,
+    graph: str,
+    generator: Any = None,
+    identity_handoff: RequestIdentityHandoff | None = None,
+) -> dict:
     """Single-generation entry point. Returns
     ``{schema, brief_text, brief_sha256, metrics, generated: bool}``.
 

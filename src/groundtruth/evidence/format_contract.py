@@ -62,11 +62,7 @@ def mine_return_shape(
 
     def _gate_keys(items: list[str]) -> list[str]:
         """Keep only mined keys/attrs that overlap the edit's relevance anchor."""
-        return [
-            it
-            for it in items
-            if passes_relevance_gate(str(it), issue_terms, fn_tokens)
-        ]
+        return [it for it in items if passes_relevance_gate(str(it), issue_terms, fn_tokens)]
 
     try:
         conn = sqlite3.connect(db_path)
@@ -236,10 +232,36 @@ def _mine_test_assertions(
     return keys
 
 
-_SKIP_ATTRS = frozenset({
-    "items", "keys", "values", "get", "pop", "update", "copy",
-    "append", "extend", "insert", "remove", "sort", "reverse",
-    "strip", "split", "join", "replace", "lower", "upper",
-    "encode", "decode", "format", "startswith", "endswith",
-    "__init__", "__str__", "__repr__", "__eq__", "__hash__",
-})
+_SKIP_ATTRS = frozenset(
+    {
+        "items",
+        "keys",
+        "values",
+        "get",
+        "pop",
+        "update",
+        "copy",
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "sort",
+        "reverse",
+        "strip",
+        "split",
+        "join",
+        "replace",
+        "lower",
+        "upper",
+        "encode",
+        "decode",
+        "format",
+        "startswith",
+        "endswith",
+        "__init__",
+        "__str__",
+        "__repr__",
+        "__eq__",
+        "__hash__",
+    }
+)

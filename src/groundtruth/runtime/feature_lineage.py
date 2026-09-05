@@ -30,53 +30,90 @@ FEATURE_ROLES = frozenset({"fact", "byte_owner", "mediator", "eligibility"})
 # 8→7, mediator 26→27, eligibility 13.) SEPARATELY, Cluster-5 ITEM 0 (2026-07-18) added the
 # post_search master GT_POST_SEARCH as an ELIGIBILITY member — CAP 47→48, eligibility 13→14,
 # total inventory 128→129. This is a revisitable product decision, documented in code.
-CAP_BYTE_OWNER_IDS = frozenset({
-    "GT_EDIT_CHECK",
-    "GT_CHANGE_SURFACE",
-    "GT_PATCH_DELTA",
-    "GT_HYPOTHESIS",
-    "GT_LOC_RESLOT",
-    "GT_SS_SUBMIT_RED",
-    "GT_CERT_DELIVERY",
-})
-CAP_ELIGIBILITY_IDS = frozenset({
-    "GT_OBLIGATION_FRESHNESS",
-    "GT_SS_NOVELTY",
-    "GT_SS_EXEC_TRUTH",
-    "GT_EDIT_OVERLAY",
-    "GT_REGISTRY_ENFORCE",
-    "GT_SS_RECOVERY_V2",
-    "GT_BRIEF_MINIMAL",
-    "GT_SS_DEDUP2",
-    "GT_SS_ELIGIBILITY",
-    "GT_XSESSION_MEMORY",
-    "GT_D7_RELATEDNESS",
-    "GT_SS_SHADOW",
-    "GT_SS_LATE_DROP",
-    # ITEM 0 (2026-07-18): the post_search lattice MASTER enable is an ELIGIBILITY gate — it
-    # decides WHETHER the post_search def-partition producer runs at all (gt_mini_patch
-    # _POST_SEARCH_ON), the same lattice GT_SS_ELIGIBILITY widens. Never owns bytes.
-    "GT_POST_SEARCH",
-})
-CAP_FEATURE_IDS = frozenset({
-    "GT_CONTRACT_NATIVE", "GT_SS_ACK_METRICS", "GT_OBLIGATION_FRESHNESS",
-    "GT_L6_FRESH", "GT_SS_NOVELTY", "GT_SS_EXEC_TRUTH",
-    "GT_GATEWAY_EDIT_BRIDGES", "GT_LANE_ENVELOPE", "GT_EDIT_OVERLAY",
-    "GT_SS_RECOVERY_V2", "GT_BRIEF_MINIMAL", "GT_EVIDENCE_NATIVE",
-    "GT_CHANGE_SURFACE", "GT_REGISTRY_ENFORCE", "GT_CONTRACT_BILATERAL",
-    "GT_GATEWAY", "GT_STEER_NATIVE", "GT_NUDGE_NATIVE",
-    "GT_POST_SEARCH_NATIVE", "GT_SS_COHERENCE_V2", "GT_SS_DEDUP2",
-    "GT_CERT_DELIVERY", "GT_SS_SUBMIT_RED", "GT_LOC_RESLOT",
-    "GT_SS_ARBITER_V2", "GT_COMPLETION_CERT", "GT_VERIFICATION_PLAN",
-    "GT_SEM_BODY", "GT_SS_ELIGIBILITY", "GT_XSESSION_MEMORY",
-    "GT_GLOBAL_ARBITER", "GT_SCOPE_NATIVE", "GT_EDIT_CHECK",
-    "GT_D7_RELATEDNESS", "GT_GATEWAY_NATIVE", "GT_HYPOTHESIS",
-    "GT_SS_ACK_FORM", "GT_SS_PROVENANCE", "GT_XSESSION_RANKUP",
-    "GT_CONTENT_LEG", "GT_INSEAM_METRICS", "GT_SS_SHADOW",
-    "GT_BRIEF_NATIVE", "GT_VERIFY_EXECUTE", "GT_CONTRACT_MODE",
-    "GT_PATCH_DELTA", "GT_SS_LATE_DROP",
-    "GT_POST_SEARCH",  # ITEM 0 (2026-07-18): post_search lattice master enable (eligibility)
-})
+CAP_BYTE_OWNER_IDS = frozenset(
+    {
+        "GT_EDIT_CHECK",
+        "GT_CHANGE_SURFACE",
+        "GT_PATCH_DELTA",
+        "GT_HYPOTHESIS",
+        "GT_LOC_RESLOT",
+        "GT_SS_SUBMIT_RED",
+        "GT_CERT_DELIVERY",
+    }
+)
+CAP_ELIGIBILITY_IDS = frozenset(
+    {
+        "GT_OBLIGATION_FRESHNESS",
+        "GT_SS_NOVELTY",
+        "GT_SS_EXEC_TRUTH",
+        "GT_EDIT_OVERLAY",
+        "GT_REGISTRY_ENFORCE",
+        "GT_SS_RECOVERY_V2",
+        "GT_BRIEF_MINIMAL",
+        "GT_SS_DEDUP2",
+        "GT_SS_ELIGIBILITY",
+        "GT_XSESSION_MEMORY",
+        "GT_D7_RELATEDNESS",
+        "GT_SS_SHADOW",
+        "GT_SS_LATE_DROP",
+        # ITEM 0 (2026-07-18): the post_search lattice MASTER enable is an ELIGIBILITY gate — it
+        # decides WHETHER the post_search def-partition producer runs at all (gt_mini_patch
+        # _POST_SEARCH_ON), the same lattice GT_SS_ELIGIBILITY widens. Never owns bytes.
+        "GT_POST_SEARCH",
+    }
+)
+CAP_FEATURE_IDS = frozenset(
+    {
+        "GT_CONTRACT_NATIVE",
+        "GT_SS_ACK_METRICS",
+        "GT_OBLIGATION_FRESHNESS",
+        "GT_L6_FRESH",
+        "GT_SS_NOVELTY",
+        "GT_SS_EXEC_TRUTH",
+        "GT_GATEWAY_EDIT_BRIDGES",
+        "GT_LANE_ENVELOPE",
+        "GT_EDIT_OVERLAY",
+        "GT_SS_RECOVERY_V2",
+        "GT_BRIEF_MINIMAL",
+        "GT_EVIDENCE_NATIVE",
+        "GT_CHANGE_SURFACE",
+        "GT_REGISTRY_ENFORCE",
+        "GT_CONTRACT_BILATERAL",
+        "GT_GATEWAY",
+        "GT_STEER_NATIVE",
+        "GT_NUDGE_NATIVE",
+        "GT_POST_SEARCH_NATIVE",
+        "GT_SS_COHERENCE_V2",
+        "GT_SS_DEDUP2",
+        "GT_CERT_DELIVERY",
+        "GT_SS_SUBMIT_RED",
+        "GT_LOC_RESLOT",
+        "GT_SS_ARBITER_V2",
+        "GT_COMPLETION_CERT",
+        "GT_VERIFICATION_PLAN",
+        "GT_SEM_BODY",
+        "GT_SS_ELIGIBILITY",
+        "GT_XSESSION_MEMORY",
+        "GT_GLOBAL_ARBITER",
+        "GT_SCOPE_NATIVE",
+        "GT_EDIT_CHECK",
+        "GT_D7_RELATEDNESS",
+        "GT_GATEWAY_NATIVE",
+        "GT_HYPOTHESIS",
+        "GT_SS_ACK_FORM",
+        "GT_SS_PROVENANCE",
+        "GT_XSESSION_RANKUP",
+        "GT_CONTENT_LEG",
+        "GT_INSEAM_METRICS",
+        "GT_SS_SHADOW",
+        "GT_BRIEF_NATIVE",
+        "GT_VERIFY_EXECUTE",
+        "GT_CONTRACT_MODE",
+        "GT_PATCH_DELTA",
+        "GT_SS_LATE_DROP",
+        "GT_POST_SEARCH",  # ITEM 0 (2026-07-18): post_search lattice master enable (eligibility)
+    }
+)
 if CAP_BYTE_OWNER_IDS & CAP_ELIGIBILITY_IDS:
     raise ValueError("CAP role sets overlap")
 if not (CAP_BYTE_OWNER_IDS | CAP_ELIGIBILITY_IDS) <= CAP_FEATURE_IDS:
@@ -132,57 +169,81 @@ def _bindings(*rows: tuple[str, str, str | None]) -> tuple[CAPByteOwnerBinding, 
 # canonical FACT identity (fact_class=None), so it could never satisfy the byte-owner bar;
 # its ``detect.coherence`` byte stamp now lives ONLY as a lane profile-member stamp
 # (``gt_mini_patch._LANE_PROFILE_MEMBER_OWNERS``), never fabricating a FACT.
-CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyType({
-    "GT_CHANGE_SURFACE": CAPByteOwnerMechanism("typed_lineage", _bindings(
-        ("change_surface", "missing_role", "newfile_precedent"),
-        ("change_surface", "missing_role_postcreate", "newfile_precedent"),
-        ("change_surface", "new_file_destination", "newfile_precedent"),
-    )),
-    "GT_PATCH_DELTA": CAPByteOwnerMechanism("typed_lineage", _bindings(
-        ("patch_delta", "companion_surface", "signature_delta"),
-        ("patch_delta", "signature_mismatch", "signature_delta"),
-    )),
-    "GT_LOC_RESLOT": CAPByteOwnerMechanism("typed_lineage", _bindings(
-        ("ranked_localization", "localization", "localization"),
-    )),
-    "GT_SS_SUBMIT_RED": CAPByteOwnerMechanism("typed_lineage", _bindings(
-        ("submit_gate", "submit_refusal", "submit_refusal"),
-    )),
-    # TWO bindings, one per PLANE, both naming the SAME registered row.
-    #   ("edit_check", "edit.syntax",    "syntax_result") — the LANE ledger layer. Consumed by
-    #     the lane stamp path (``gt_mini_patch._exact_profile_delivery_extra`` matches
-    #     ``b.layer == kind`` where ``kind`` is the ledger layer) and by the exact-profile
-    #     branches of ``gt_feature_metrics`` (``binding.layer == row["layer"]``).
-    #   ("edit_check", "syntax_result", "syntax_result") — the CANONICAL evidence type. Consumed
-    #     by ``_feature_refs`` below, which matches ``binding.layer`` against
-    #     ``evidence_type.split(":")[0]``.
-    # WHY BOTH (2026-07-28): the ``layer`` field is overloaded BY MECHANISM — typed_lineage rows
-    # spell an evidence_type there (``missing_role``/``signature_mismatch``/``localization``/
-    # ``submit_refusal`` are all registered evidence types), exact_profile rows spell a lane
-    # layer. ``registration_for("edit.syntax")`` is None, so the lane spelling alone could never
-    # authorize a canonical CAP ref and GT_EDIT_CHECK was DARK on the canonical plane while LIVE
-    # on the lane. Adding the canonical spelling INVENTS NOTHING: ``syntax_result`` is §1 FACT row
-    # 5 of 11 and its registered producer is literally ``edit_check``
-    # (fact_registry._REGISTRATIONS), so the registry itself already asserts this exact triple.
-    # This is the l3.cochange test applied and PASSED — l3.cochange was kept out because no
-    # cochange row existed to name; here the row exists and is named verbatim. The lane path
-    # already performs this same layer→evidence-type resolution at runtime
-    # (``gt_mini_patch:10693`` passes ``binding.fact_class`` as the evidence_type), so this is a
-    # correction of the DECLARATION to match the behaviour, not a new claim.
-    "GT_EDIT_CHECK": CAPByteOwnerMechanism("exact_profile_member", _bindings(
-        ("edit_check", "edit.syntax", "syntax_result"),
-        ("edit_check", "syntax_result", "syntax_result"),
-    )),
-    "GT_HYPOTHESIS": CAPByteOwnerMechanism("exact_profile_member", _bindings(
-        ("governor", "recovery", "recovery"),
-        ("governor", "verify.horizon.pivot", "recovery"),
-    )),
-    "GT_CERT_DELIVERY": CAPByteOwnerMechanism("exact_profile_member", _bindings(
-        ("submit_gate", "submit_refusal", "submit_refusal"),
-    )),
-})
+CAP_BYTE_OWNER_MECHANISMS: Mapping[str, CAPByteOwnerMechanism] = MappingProxyType(
+    {
+        "GT_CHANGE_SURFACE": CAPByteOwnerMechanism(
+            "typed_lineage",
+            _bindings(
+                ("change_surface", "missing_role", "newfile_precedent"),
+                ("change_surface", "missing_role_postcreate", "newfile_precedent"),
+                ("change_surface", "new_file_destination", "newfile_precedent"),
+            ),
+        ),
+        "GT_PATCH_DELTA": CAPByteOwnerMechanism(
+            "typed_lineage",
+            _bindings(
+                ("patch_delta", "companion_surface", "signature_delta"),
+                ("patch_delta", "signature_mismatch", "signature_delta"),
+            ),
+        ),
+        "GT_LOC_RESLOT": CAPByteOwnerMechanism(
+            "typed_lineage",
+            _bindings(
+                ("ranked_localization", "localization", "localization"),
+            ),
+        ),
+        "GT_SS_SUBMIT_RED": CAPByteOwnerMechanism(
+            "typed_lineage",
+            _bindings(
+                ("submit_gate", "submit_refusal", "submit_refusal"),
+            ),
+        ),
+        # TWO bindings, one per PLANE, both naming the SAME registered row.
+        #   ("edit_check", "edit.syntax",    "syntax_result") — the LANE ledger layer. Consumed by
+        #     the lane stamp path (``gt_mini_patch._exact_profile_delivery_extra`` matches
+        #     ``b.layer == kind`` where ``kind`` is the ledger layer) and by the exact-profile
+        #     branches of ``gt_feature_metrics`` (``binding.layer == row["layer"]``).
+        #   ("edit_check", "syntax_result", "syntax_result") — the CANONICAL evidence type. Consumed
+        #     by ``_feature_refs`` below, which matches ``binding.layer`` against
+        #     ``evidence_type.split(":")[0]``.
+        # WHY BOTH (2026-07-28): the ``layer`` field is overloaded BY MECHANISM — typed_lineage rows
+        # spell an evidence_type there (``missing_role``/``signature_mismatch``/``localization``/
+        # ``submit_refusal`` are all registered evidence types), exact_profile rows spell a lane
+        # layer. ``registration_for("edit.syntax")`` is None, so the lane spelling alone could never
+        # authorize a canonical CAP ref and GT_EDIT_CHECK was DARK on the canonical plane while LIVE
+        # on the lane. Adding the canonical spelling INVENTS NOTHING: ``syntax_result`` is §1 FACT row
+        # 5 of 11 and its registered producer is literally ``edit_check``
+        # (fact_registry._REGISTRATIONS), so the registry itself already asserts this exact triple.
+        # This is the l3.cochange test applied and PASSED — l3.cochange was kept out because no
+        # cochange row existed to name; here the row exists and is named verbatim. The lane path
+        # already performs this same layer→evidence-type resolution at runtime
+        # (``gt_mini_patch:10693`` passes ``binding.fact_class`` as the evidence_type), so this is a
+        # correction of the DECLARATION to match the behaviour, not a new claim.
+        "GT_EDIT_CHECK": CAPByteOwnerMechanism(
+            "exact_profile_member",
+            _bindings(
+                ("edit_check", "edit.syntax", "syntax_result"),
+                ("edit_check", "syntax_result", "syntax_result"),
+            ),
+        ),
+        "GT_HYPOTHESIS": CAPByteOwnerMechanism(
+            "exact_profile_member",
+            _bindings(
+                ("governor", "recovery", "recovery"),
+                ("governor", "verify.horizon.pivot", "recovery"),
+            ),
+        ),
+        "GT_CERT_DELIVERY": CAPByteOwnerMechanism(
+            "exact_profile_member",
+            _bindings(
+                ("submit_gate", "submit_refusal", "submit_refusal"),
+            ),
+        ),
+    }
+)
 if set(CAP_BYTE_OWNER_MECHANISMS) != set(CAP_BYTE_OWNER_IDS):
     raise ValueError("CAP byte-owner mechanism table must cover exactly all byte owners")
+
 
 def _binding_is_registry_valid(binding: CAPByteOwnerBinding) -> bool:
     """Whether the fact registry ITSELF already asserts this exact producer/type/FACT triple.
@@ -295,18 +356,14 @@ def canonical_binding_exclusions() -> tuple[dict, ...]:
             "layer": binding.layer,
             "fact_class": binding.fact_class,
             "reason": reason,
-            "owner_has_canonical_binding": bool(
-                _TYPED_CAP_OWNER_BINDINGS.get(feature_id)
-            ),
+            "owner_has_canonical_binding": bool(_TYPED_CAP_OWNER_BINDINGS.get(feature_id)),
         }
         for feature_id, binding, reason in CAP_BYTE_OWNER_BINDING_EXCLUSIONS
     )
 
 
 _owners_without_canonical_binding = frozenset(
-    feature_id
-    for feature_id in CAP_BYTE_OWNER_IDS
-    if not _TYPED_CAP_OWNER_BINDINGS.get(feature_id)
+    feature_id for feature_id in CAP_BYTE_OWNER_IDS if not _TYPED_CAP_OWNER_BINDINGS.get(feature_id)
 )
 if _owners_without_canonical_binding != CAP_OWNERS_WITHOUT_CANONICAL_PATH:
     raise ValueError(
@@ -440,8 +497,7 @@ def _feature_refs(
                 f"CAP byte owner {feature_id} is not authorized for "
                 f"producer/evidence {runtime_producer_id}/{evidence_type}"
                 + (
-                    f" — declared but declined ({declined}); see "
-                    "canonical_binding_exclusions()"
+                    f" — declared but declined ({declined}); see canonical_binding_exclusions()"
                     if declined
                     else " (no such declared binding)"
                 )

@@ -98,33 +98,37 @@ class Adjudication:
     matched_probe: MatchedProbe | None
 
     def timing_bytes(self) -> bytes:
-        return _canonical({
-            "schema": TIMING_SCHEMA,
-            "evidence_type": self.evidence_type,
-            "delivery_seal": self.delivery_seal,
-            "required_event": self.required_event,
-            "actual_event": self.actual_event,
-            "verdict": self.timing_verdict,
-            "chronology": asdict(self.chronology),
-        })
+        return _canonical(
+            {
+                "schema": TIMING_SCHEMA,
+                "evidence_type": self.evidence_type,
+                "delivery_seal": self.delivery_seal,
+                "required_event": self.required_event,
+                "actual_event": self.actual_event,
+                "verdict": self.timing_verdict,
+                "chronology": asdict(self.chronology),
+            }
+        )
 
     def fair_probe_bytes(self) -> bytes:
-        return _canonical({
-            "schema": FAIR_PROBE_SCHEMA,
-            "evidence_type": self.evidence_type,
-            "delivery_seal": self.delivery_seal,
-            "verdict": self.fair_probe_verdict,
-            "chronology": asdict(self.chronology),
-            "matched_probe": (
-                asdict(self.matched_probe) if self.matched_probe is not None else None
-            ),
-        })
+        return _canonical(
+            {
+                "schema": FAIR_PROBE_SCHEMA,
+                "evidence_type": self.evidence_type,
+                "delivery_seal": self.delivery_seal,
+                "verdict": self.fair_probe_verdict,
+                "chronology": asdict(self.chronology),
+                "matched_probe": (
+                    asdict(self.matched_probe) if self.matched_probe is not None else None
+                ),
+            }
+        )
 
 
 def _canonical(value: object) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
 
 def _timing(
@@ -216,12 +220,15 @@ def _valid_probe(probe: MatchedProbe, delivery_seal: str) -> bool:
         and _lower_hex(probe.treatment_seal, _SHA16_WIDTH)
         and probe.treatment_outcome == "acted"
         and probe.control_outcome == "not_acted"
-        and all(_lower_hex(value, _SHA256_WIDTH) for value in (
-            probe.assignment_sha256,
-            probe.treatment_sha256,
-            probe.control_sha256,
-            probe.outcome_sha256,
-        ))
+        and all(
+            _lower_hex(value, _SHA256_WIDTH)
+            for value in (
+                probe.assignment_sha256,
+                probe.treatment_sha256,
+                probe.control_sha256,
+                probe.outcome_sha256,
+            )
+        )
     )
 
 

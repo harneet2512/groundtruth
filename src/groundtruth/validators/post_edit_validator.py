@@ -21,7 +21,6 @@ from __future__ import annotations
 import enum
 import os
 import re
-import sqlite3
 from dataclasses import dataclass
 
 from groundtruth.providers import (
@@ -128,7 +127,12 @@ def check_signature_break(
         if sig_arity is None:
             continue
         callers = caller_code_provider(
-            db_path, canon, fn, repo_root, seen_files=seen_files, limit=5,
+            db_path,
+            canon,
+            fn,
+            repo_root,
+            seen_files=seen_files,
+            limit=5,
         )
         for c in callers:
             call_arity = _extract_old_call_arity(c.code, fn)
@@ -169,7 +173,10 @@ def check_co_change_miss(
         return []
     edited_set_canon = {canonical_repo_path(f, repo_root) for f in state.edited_files}
     co = co_change_provider(
-        repo_root, edited_canon, edited_files=sorted(edited_set_canon), min_cooccurrence=min_cooccurrence,
+        repo_root,
+        edited_canon,
+        edited_files=sorted(edited_set_canon),
+        min_cooccurrence=min_cooccurrence,
     )
     warnings: list[PostEditWarning] = []
     for partner in co:

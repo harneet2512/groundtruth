@@ -108,6 +108,7 @@ directly — its former ``Addition`` capsule was REPLACED (option (b), 2026-07-1
 :func:`derive_dedup_key`'s five-component derivation here. This module still does NOT
 import ``gateway.py`` (the dependency points one way: gateway -> envelope).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -195,14 +196,20 @@ _EVENTS: frozenset[str] = frozenset(
 # any other state is a CLAIM that bytes reached the model, so it REQUIRES delivery
 # evidence (rendered_bytes_hash) by validate() law (e).
 RECEIPT_NONE = "none"
-RECEIPT_DELIVERED = "delivered"       # bytes appended into the observation
-RECEIPT_REFERENCED = "referenced"     # the agent quoted / read the delivered fact
-RECEIPT_ACTED = "acted"               # the agent took an action following the fact
+RECEIPT_DELIVERED = "delivered"  # bytes appended into the observation
+RECEIPT_REFERENCED = "referenced"  # the agent quoted / read the delivered fact
+RECEIPT_ACTED = "acted"  # the agent took an action following the fact
 RECEIPT_RESOLVED_STATE = "resolved_state"  # the run reached a resolved state after it
-RECEIPT_CAUSAL = "causal"             # counterfactually attributed (paired evidence)
+RECEIPT_CAUSAL = "causal"  # counterfactually attributed (paired evidence)
 _RECEIPT_STATES: frozenset[str] = frozenset(
-    {RECEIPT_NONE, RECEIPT_DELIVERED, RECEIPT_REFERENCED, RECEIPT_ACTED,
-     RECEIPT_RESOLVED_STATE, RECEIPT_CAUSAL}
+    {
+        RECEIPT_NONE,
+        RECEIPT_DELIVERED,
+        RECEIPT_REFERENCED,
+        RECEIPT_ACTED,
+        RECEIPT_RESOLVED_STATE,
+        RECEIPT_CAUSAL,
+    }
 )
 
 # THE LADDER'S ORDER, DECLARED ONCE (2026-07-28).
@@ -241,9 +248,7 @@ RECEIPT_RANK: Mapping[str, int] = MappingProxyType(
 # definition is implemented offline in `fair_probe_result._treatment_acted` as
 # `ON_TIME AND registry-receipt-predicate AND delivery_index < action_index <=
 # decision_commit_index`. One concept, one authority.
-RUNTIME_EMITTABLE_RECEIPT_STATES: frozenset[str] = frozenset(
-    {RECEIPT_NONE, RECEIPT_DELIVERED}
-)
+RUNTIME_EMITTABLE_RECEIPT_STATES: frozenset[str] = frozenset({RECEIPT_NONE, RECEIPT_DELIVERED})
 
 # VERIFIED / HYPOTHESIS pivot (parity with the fact-tier conf floor used across GT).
 _VERIFIED_MIN_CONF = 0.7
@@ -293,7 +298,9 @@ class ObservationBinding:
 
 
 def policy_observation_id(
-    start_iteration: int, parent_sha256: str, action_sha256: str,
+    start_iteration: int,
+    parent_sha256: str,
+    action_sha256: str,
 ) -> str:
     """Framed identity for one parent-policy observation and its exact action batch."""
     framed = (
@@ -332,13 +339,9 @@ def observation_candidate_id(candidate_id: str) -> str:
     """
     if not isinstance(candidate_id, str) or not candidate_id:
         raise ValueError("candidate_id must be non-empty text")
-    if len(candidate_id) in {16, 64} and all(
-        char in "0123456789abcdef" for char in candidate_id
-    ):
+    if len(candidate_id) in {16, 64} and all(char in "0123456789abcdef" for char in candidate_id):
         return candidate_id
-    return hashlib.sha256(
-        candidate_id.encode("utf-8", "surrogatepass")
-    ).hexdigest()
+    return hashlib.sha256(candidate_id.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def build_observation_binding(
@@ -366,21 +369,22 @@ def build_observation_binding(
         raise ValueError("candidate_kind must be non-empty text")
     if not isinstance(candidate_id, str) or not candidate_id:
         raise ValueError("candidate_id must be non-empty text")
-    kind_sha256 = hashlib.sha256(
-        candidate_kind.encode("utf-8", "surrogatepass")
-    ).hexdigest()
-    dedup_sha256 = hashlib.sha256(
-        candidate_id.encode("utf-8", "surrogatepass")
-    ).hexdigest()
+    kind_sha256 = hashlib.sha256(candidate_kind.encode("utf-8", "surrogatepass")).hexdigest()
+    dedup_sha256 = hashlib.sha256(candidate_id.encode("utf-8", "surrogatepass")).hexdigest()
     canonical_candidate_id = observation_candidate_id(candidate_id)
     observation_id = policy_observation_id(
-        batch_start_iteration, parent_policy_sha256, action_batch_sha256,
+        batch_start_iteration,
+        parent_policy_sha256,
+        action_batch_sha256,
     )
     return ObservationBinding(
         schema=OBSERVATION_BINDING_SCHEMA,
         observation_id=observation_id,
         opportunity_id=feature_opportunity_id(
-            observation_id, candidate_ordinal, kind_sha256, dedup_sha256,
+            observation_id,
+            candidate_ordinal,
+            kind_sha256,
+            dedup_sha256,
         ),
         batch_start_iteration=batch_start_iteration,
         parent_policy_sha256=parent_policy_sha256,
@@ -394,7 +398,9 @@ def build_observation_binding(
 
 
 def validate_observation_binding(
-    binding: ObservationBinding, *, expected_candidate_id: str | None = None,
+    binding: ObservationBinding,
+    *,
+    expected_candidate_id: str | None = None,
 ) -> list[str]:
     """Return every binding violation in deterministic order."""
     issues: list[str] = []
@@ -403,14 +409,20 @@ def validate_observation_binding(
     if binding.schema != OBSERVATION_BINDING_SCHEMA:
         issues.append("observation_binding:schema")
     for field_name in (
-        "observation_id", "opportunity_id", "parent_policy_sha256",
-        "action_batch_sha256", "candidate_kind_sha256", "candidate_dedup_sha256",
+        "observation_id",
+        "opportunity_id",
+        "parent_policy_sha256",
+        "action_batch_sha256",
+        "candidate_kind_sha256",
+        "candidate_dedup_sha256",
     ):
         value = getattr(binding, field_name, "")
         if not isinstance(value, str) or not value or not _is_hash_shaped(value):
             issues.append(f"observation_binding:{field_name}")
     for field_name in (
-        "batch_start_iteration", "parent_policy_chars", "candidate_ordinal",
+        "batch_start_iteration",
+        "parent_policy_chars",
+        "candidate_ordinal",
     ):
         value = getattr(binding, field_name, None)
         if type(value) is not int or value < 0:
@@ -539,9 +551,9 @@ class _UnencodableContent(ValueError):
 
 def _encode_commitment(obj: dict[str, Any]) -> bytes:
     try:
-        return json.dumps(
-            obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
+        return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8"
+        )
     except UnicodeEncodeError as e:
         # Dedicated subclass (Fable re-review F-B): validate()'s totality catch must
         # match ONLY the encode failure — an off-type int("abc") ValueError from the
@@ -594,9 +606,9 @@ def derive_dedup_key(
     escapes every non-ASCII code point (including lone surrogates), so the derivation
     is TOTAL — it never raises on any str input (W1)."""
     raw = json.dumps(
-        [producer or "", evidence_type or "", target or "", fact_id or "",
-         content or ""],
-        ensure_ascii=True, separators=(",", ":"),
+        [producer or "", evidence_type or "", target or "", fact_id or "", content or ""],
+        ensure_ascii=True,
+        separators=(",", ":"),
     ).encode("ascii")
     return hashlib.sha256(raw).hexdigest()[:16]
 
@@ -721,9 +733,7 @@ def runtime_witness_violations(
         or not witness.content_sha256
         or not _is_hash_shaped(witness.content_sha256)
     ):
-        violations.append(
-            "runtime witness content_sha256 must be exactly 64 lowercase hex"
-        )
+        violations.append("runtime witness content_sha256 must be exactly 64 lowercase hex")
 
     if witness.kind == _RUNTIME_WITNESS_DIAGNOSTIC:
         path = witness.source_path
@@ -738,27 +748,18 @@ def runtime_witness_violations(
             or _leaky_path(path)
         ):
             violations.append(
-                "runtime diagnostic source path must be relative, normalized, "
-                "and deliverable"
+                "runtime diagnostic source path must be relative, normalized, and deliverable"
             )
         if type(witness.source_line) is not int or witness.source_line < 1:
             violations.append("runtime diagnostic source line must be positive")
         if type(witness.source_column) is not int or witness.source_column < 0:
-            violations.append(
-                "runtime diagnostic source column must be non-negative"
-            )
+            violations.append("runtime diagnostic source column must be non-negative")
     elif witness.kind in {
         _RUNTIME_WITNESS_EVENT,
         _RUNTIME_WITNESS_COMPUTATION,
     }:
-        if (
-            witness.source_path
-            or witness.source_line != 0
-            or witness.source_column != 0
-        ):
-            violations.append(
-                "event/computation runtime witness cannot carry source location"
-            )
+        if witness.source_path or witness.source_line != 0 or witness.source_column != 0:
+            violations.append("event/computation runtime witness cannot carry source location")
     return violations
 
 
@@ -840,9 +841,7 @@ class EvidenceEnvelope:
     # hash-, and serialization-neutral.  Its integrity is enforced by build() and
     # validate(); consumers may turn a validated witness into host-only audit
     # provenance, but it never enters model-visible bytes.
-    runtime_witnesses: "tuple[CanonicalRuntimeWitness, ...]" = field(
-        default=(), compare=False
-    )
+    runtime_witnesses: "tuple[CanonicalRuntimeWitness, ...]" = field(default=(), compare=False)
 
     # explicit field order — the source of deterministic (de)serialization order.
     # ClassVar so it is NOT a dataclass field (never in __init__/__eq__/to_dict).
@@ -994,9 +993,7 @@ def validate(env: EvidenceEnvelope) -> list[str]:
     if env.tier not in _TIERS:
         violations.append(f"tier: unknown tier {env.tier!r}")
     if env.blocking_eligibility not in _BLOCKING_LEVELS:
-        violations.append(
-            f"blocking_eligibility: unknown level {env.blocking_eligibility!r}"
-        )
+        violations.append(f"blocking_eligibility: unknown level {env.blocking_eligibility!r}")
     if env.preferred_event not in _EVENTS:
         violations.append(f"preferred_event: unknown event {env.preferred_event!r}")
 
@@ -1009,9 +1006,7 @@ def validate(env: EvidenceEnvelope) -> list[str]:
         violations.append(f"leak: target {env.target!r} is a test/demo/vendored path")
     for f, ln in env.provenance:
         if _leaky_path(f):
-            violations.append(
-                f"leak: provenance {f!r}:{ln} is a test/demo/vendored path"
-            )
+            violations.append(f"leak: provenance {f!r}:{ln} is a test/demo/vendored path")
 
     # Runtime-witness integrity is independent of the evidence tier. A malformed
     # sidecar cannot rescue otherwise unsupported evidence.
@@ -1022,23 +1017,17 @@ def validate(env: EvidenceEnvelope) -> list[str]:
     if env.tier == VERIFIED:
         if not env.provenance and not env.runtime_witnesses:
             violations.append(
-                "tier: VERIFIED requires nonempty provenance or a canonical "
-                "runtime witness"
+                "tier: VERIFIED requires nonempty provenance or a canonical runtime witness"
             )
         if env.confidence < _VERIFIED_MIN_CONF:
-            violations.append(
-                f"tier: VERIFIED requires confidence >= {_VERIFIED_MIN_CONF}"
-            )
+            violations.append(f"tier: VERIFIED requires confidence >= {_VERIFIED_MIN_CONF}")
     if env.tier == HYPOTHESIS and env.confidence >= _VERIFIED_MIN_CONF:
-        violations.append(
-            f"tier: HYPOTHESIS caps confidence < {_VERIFIED_MIN_CONF}"
-        )
+        violations.append(f"tier: HYPOTHESIS caps confidence < {_VERIFIED_MIN_CONF}")
 
     # (c) UNMEASURED => ADVISORY (nothing unmeasured can be enforcing).
     if env.blocking_eligibility != ADVISORY and not env.measured:
         violations.append(
-            f"authority: blocking_eligibility={env.blocking_eligibility!r} "
-            f"requires measured=True"
+            f"authority: blocking_eligibility={env.blocking_eligibility!r} requires measured=True"
         )
 
     # (d) DEDUP DETERMINISM — recomputed from the envelope's OWN stored fields
@@ -1052,7 +1041,10 @@ def validate(env: EvidenceEnvelope) -> list[str]:
     # already fail-closed via try/except).
     try:
         expected = derive_dedup_key(
-            env.producer, env.evidence_type, env.target, env.fact_id,
+            env.producer,
+            env.evidence_type,
+            env.target,
+            env.fact_id,
             content_signature(env.payload, env.provenance),
         )
     except _UnencodableContent:
@@ -1062,9 +1054,7 @@ def validate(env: EvidenceEnvelope) -> list[str]:
         )
     else:
         if env.dedup_key != expected:
-            violations.append(
-                f"dedup_key: {env.dedup_key!r} != derive_dedup_key(...) {expected!r}"
-            )
+            violations.append(f"dedup_key: {env.dedup_key!r} != derive_dedup_key(...) {expected!r}")
 
     # (e) RECEIPT EVIDENCE (TITO law 7) — receipt_state must be a legal value, and any
     # state past "none" is a CLAIM bytes reached the model, so it REQUIRES delivery
@@ -1095,17 +1085,19 @@ def validate(env: EvidenceEnvelope) -> list[str]:
     # reason) OR suppressed (with a reason), never both; both set is a contradiction.
     if env.delivery_reason and env.suppression_reason:
         violations.append(
-            "delivery_reason and suppression_reason are mutually exclusive "
-            "(both set)"
+            "delivery_reason and suppression_reason are mutually exclusive (both set)"
         )
 
     # (h) OBSERVATION BINDING — when present, the sidecar must be internally exact and
     # name this envelope's canonical candidate identity. Legacy/unbound envelopes remain
     # valid with ``None``; a partial or cross-candidate binding fails loudly.
     if env.observation_binding is not None:
-        violations.extend(validate_observation_binding(
-            env.observation_binding, expected_candidate_id=env.dedup_key,
-        ))
+        violations.extend(
+            validate_observation_binding(
+                env.observation_binding,
+                expected_candidate_id=env.dedup_key,
+            )
+        )
 
     return violations
 
@@ -1217,13 +1209,10 @@ def chain_hash(
         ("boundary", boundary),
     ):
         if not isinstance(_val, (bytes, bytearray)):
-            raise ValueError(
-                f"chain_hash: {_name} must be bytes, got {type(_val).__name__}"
-            )
+            raise ValueError(f"chain_hash: {_name} must be bytes, got {type(_val).__name__}")
     if not parent_hash:
         parent_raw = b"\x00" * 32  # genesis: the zero hash
-    elif (len(parent_hash) == _HASH_HEX_LEN
-          and all(c in "0123456789abcdef" for c in parent_hash)):
+    elif len(parent_hash) == _HASH_HEX_LEN and all(c in "0123456789abcdef" for c in parent_hash):
         parent_raw = bytes.fromhex(parent_hash)
     else:
         raise ValueError(
@@ -1231,10 +1220,7 @@ def chain_hash(
             f"hex, got {parent_hash!r}"
         )
     return hashlib.sha256(
-        parent_raw
-        + _framed(tool_output_bytes)
-        + _framed(gt_bytes)
-        + _framed(boundary)
+        parent_raw + _framed(tool_output_bytes) + _framed(gt_bytes) + _framed(boundary)
     ).hexdigest()
 
 
@@ -1271,7 +1257,8 @@ def to_dict(env: EvidenceEnvelope) -> dict[str, Any]:
         "suppression_reason": env.suppression_reason,
         "observation_binding": (
             observation_binding_to_dict(env.observation_binding)
-            if env.observation_binding is not None else None
+            if env.observation_binding is not None
+            else None
         ),
     }
 
@@ -1306,7 +1293,5 @@ def from_dict(d: dict[str, Any]) -> EvidenceEnvelope:
         receipt_state=str(d.get("receipt_state", RECEIPT_NONE)),
         delivery_reason=str(d.get("delivery_reason", "")),
         suppression_reason=str(d.get("suppression_reason", "")),
-        observation_binding=observation_binding_from_dict(
-            d.get("observation_binding")
-        ),
+        observation_binding=observation_binding_from_dict(d.get("observation_binding")),
     )

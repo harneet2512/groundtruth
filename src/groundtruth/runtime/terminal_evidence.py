@@ -305,9 +305,7 @@ class TerminalEvidenceSession:
         self._obligations[obligation_id] = updated
         return updated
 
-    def record_failure(
-        self, identity: FailureIdentity, *, remedy: str, outcome: str
-    ) -> None:
+    def record_failure(self, identity: FailureIdentity, *, remedy: str, outcome: str) -> None:
         self._recovery.record(identity, remedy=remedy, outcome=outcome)
 
     def recovery_for(self, identity: FailureIdentity) -> RecoveryOutcome | None:
@@ -382,7 +380,9 @@ class BuildConfigurationSlice:
         if not self.adapter or not self.configuration_id or not _is_sha256(self.inputs_sha256):
             raise ValueError("adapter, configuration, and inputs hash are required")
         if self.status is EvidenceStatus.EXACT and (not self.coverage_closed or self.omissions):
-            raise ValueError("exact configuration evidence requires closed coverage without omissions")
+            raise ValueError(
+                "exact configuration evidence requires closed coverage without omissions"
+            )
         for path in (*self.source_membership, *self.generated_inputs):
             _path(path)
 
@@ -407,9 +407,7 @@ def detect_build_configuration_slices(
         return ()
     rows: list[BuildConfigurationSlice] = []
     for adapter in adapters_for_repo(str(root)):
-        manifests = tuple(
-            sorted(name for name in adapter.manifests if (root / name).is_file())
-        )
+        manifests = tuple(sorted(name for name in adapter.manifests if (root / name).is_file()))
         if not manifests and adapter.name == "generic":
             continue
         digest = hashlib.sha256()
@@ -422,7 +420,8 @@ def detect_build_configuration_slices(
         members: list[str] = []
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = sorted(
-                name for name in dirnames
+                name
+                for name in dirnames
                 if not adapter.is_generated_or_vendor(
                     str((Path(dirpath) / name / "placeholder").relative_to(root))
                 )
@@ -532,9 +531,7 @@ class ClosedBlockerRegistry:
         status: EvidenceStatus,
         scope_closed: bool,
     ) -> SubmitBlocker:
-        if not all(
-            (blocker_id, producer, witness, scope, creating_revision, invalidation_rule)
-        ):
+        if not all((blocker_id, producer, witness, scope, creating_revision, invalidation_rule)):
             raise ValueError("blocker identity, witness, scope, and revision are required")
         if not _is_sha256(invalidation_key):
             raise ValueError("invalidation_key must be a SHA-256")

@@ -15,9 +15,14 @@ from pathlib import Path
 
 # Required schema columns on the edges table. Mirrors gt-index/internal/store/sqlite.go
 # edges table at the version named in REQUIRED_SCHEMA_VERSION below.
-REQUIRED_EDGE_COLUMNS: frozenset[str] = frozenset({
-    "trust_tier", "candidate_count", "evidence_type", "verification_status",
-})
+REQUIRED_EDGE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "trust_tier",
+        "candidate_count",
+        "evidence_type",
+        "verification_status",
+    }
+)
 
 # Minimum schema_version the FINAL_ARCH_V2 router pipeline requires. The Go
 # indexer writes ``schema_version`` into ``project_meta`` at build time. If the
@@ -102,13 +107,11 @@ def verify_graph_db_schema(
         )
     elif p.schema_version != required_schema_version:
         reasons.append(
-            f"schema_version={p.schema_version!r} != "
-            f"required={required_schema_version!r}"
+            f"schema_version={p.schema_version!r} != required={required_schema_version!r}"
         )
     if p.missing_columns:
         reasons.append(
-            "edges table missing required columns: "
-            + ", ".join(sorted(p.missing_columns))
+            "edges table missing required columns: " + ", ".join(sorted(p.missing_columns))
         )
     if reasons:
         raise SchemaMismatch(

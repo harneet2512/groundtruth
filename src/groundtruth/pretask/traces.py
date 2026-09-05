@@ -63,9 +63,7 @@ _REGISTRY: tuple[tuple[str, re.Pattern[str], tuple[int, int, int]], ...] = (
     # JavaScript / TypeScript V8 format: ``at fn (path:line:col)``
     (
         "javascript",
-        re.compile(
-            r"at\s+([A-Za-z_$][A-Za-z0-9_$.<>]*)\s+\(([^()\s]+):(\d+):\d+\)"
-        ),
+        re.compile(r"at\s+([A-Za-z_$][A-Za-z0-9_$.<>]*)\s+\(([^()\s]+):(\d+):\d+\)"),
         (2, 3, 1),
     ),
     # Java: ``at pkg.Class.method(File.java:line)``
@@ -89,17 +87,16 @@ _REGISTRY: tuple[tuple[str, re.Pattern[str], tuple[int, int, int]], ...] = (
     # C / C++ gdb: ``#N 0xADDR in func at path:line``
     (
         "c",
-        re.compile(
-            r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s+at\s+([^\s:]+):(\d+)"
-        ),
+        re.compile(r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+([A-Za-z_][A-Za-z0-9_]*)\s+at\s+([^\s:]+):(\d+)"),
         (2, 3, 1),
     ),
 )
 
 
-def _frames_from_text(text: str) -> list[StackFrame]:
+def extract_stack_frames(text: str) -> list[StackFrame]:
     """Run every regex in the registry over ``text`` and return raw frames.
 
+    These are unverified textual hints, not claims of repository membership.
     Frames are returned in the order they appear in the text, per regex.
     Deduplication is applied at the end (same file/line/func collapses).
     """
@@ -181,7 +178,12 @@ def _is_in_repo(path: str, repo_root: str) -> bool:
     # a third-party dep is NOT vendored (``omegaconf/`` absent under a hydra testbed).
     # Fail-closed (correct-or-quiet): drop when it does not resolve to a real repo file.
     if not os.path.isabs(path):
-        return os.path.isfile(os.path.join(repo_root, raw_norm))
+        try:
+            candidate = os.path.realpath(os.path.join(repo_root, raw_norm))
+            root = os.path.realpath(repo_root)
+            return os.path.commonpath((candidate, root)) == root and os.path.isfile(candidate)
+        except (OSError, ValueError):
+            return False
 
     return False
 
@@ -208,7 +210,7 @@ def parse_stack_traces(
     """
     if not issue_text:
         return []
-    raw = _frames_from_text(issue_text)
+    raw = extract_stack_frames(issue_text)
     # Normalize installed-package frames to repo-relative paths. In SWE-bench
     # issues, stack traces come from the reporter's INSTALLED version of the
     # package being fixed — paths like ``site-packages/loguru/_datetime.py``.
@@ -225,7 +227,7 @@ def parse_stack_traces(
         for marker in ("site-packages/", "dist-packages/"):
             idx = norm.find(marker)
             if idx >= 0:
-                f = norm[idx + len(marker):]
+                f = norm[idx + len(marker) :]
                 break
         normalized.append(StackFrame(file=f, line=fr.line, func=fr.func, lang=fr.lang))
     in_repo = [fr for fr in normalized if _is_in_repo(fr.file, repo_root)]

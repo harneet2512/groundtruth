@@ -57,11 +57,7 @@ def restrict_presubmit_plan(plan: VerificationPlan) -> VerificationPlan:
                     "config:setup_cfg",
                 }
             )
-            restricted.append(
-                check
-                if safe_pytest
-                else _skipped(check, "command_not_allowlisted")
-            )
+            restricted.append(check if safe_pytest else _skipped(check, "command_not_allowlisted"))
         else:
             restricted.append(_skipped(check, "check_kind_not_allowlisted"))
     return replace(plan, checks=tuple(restricted))
@@ -98,11 +94,7 @@ def summarize_presubmit_results(
                 else result_dict
             )
             syntax["patch_revision"] = result.patch_revision
-            if (
-                blocking is None
-                and result.executed
-                and result.verdict == "syntax_error"
-            ):
+            if blocking is None and result.executed and result.verdict == "syntax_error":
                 blocking = {
                     "blocking": True,
                     "reason": "syntax_invalid",
@@ -133,20 +125,14 @@ def summarize_presubmit_results(
         elif result.kind in {"build", "type"}:
             plan_results[result.kind] = result_dict
 
-        if (
-            not result.executed
-            or result.verdict
-            in {
-                "unknown",
-                "unavailable",
-                "partial",
-                "executed_no_tests",
-                "skipped",
-            }
-        ):
-            unknowns.append(
-                f"{result.kind}:{result.selection_basis}:{result.verdict}"
-            )
+        if not result.executed or result.verdict in {
+            "unknown",
+            "unavailable",
+            "partial",
+            "executed_no_tests",
+            "skipped",
+        }:
+            unknowns.append(f"{result.kind}:{result.selection_basis}:{result.verdict}")
 
     return PreSubmitSummary(
         blocking_failure=blocking,

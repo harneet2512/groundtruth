@@ -718,9 +718,7 @@ def select_targeted_tests(
             if f in seen:
                 continue
             seen.add(f)
-            selected.append(
-                {"file": f, "confidence": round(float(c), 8), "selection_basis": basis}
-            )
+            selected.append({"file": f, "confidence": round(float(c), 8), "selection_basis": basis})
 
     _add([(r["file"], r["confidence"]) for r in direct], _BASIS_FACT)
     _add([(r["file"], r["confidence"]) for r in closure], _BASIS_CLOSURE)
@@ -800,31 +798,45 @@ def _syntax_rung(
     """The syntax rung. Confidence reflects edit_check capability over the changed
     files' languages; UNKNOWN when no file is resolvable/checkable."""
     checkable = [
-        f for f in edited_files
-        if os.path.splitext(f)[1].lower() in _SYNTAX_CHECKABLE_EXTS
+        f for f in edited_files if os.path.splitext(f)[1].lower() in _SYNTAX_CHECKABLE_EXTS
     ]
     if not edited_files:
         return Check(
-            kind="syntax", command=None, selection_basis="edit_check",
-            covered_entities=ents, covered_obligations=obl,
-            expected_cost="low", confidence="unknown",
-            attribution_requirement="none", targets=(),
+            kind="syntax",
+            command=None,
+            selection_basis="edit_check",
+            covered_entities=ents,
+            covered_obligations=obl,
+            expected_cost="low",
+            confidence="unknown",
+            attribution_requirement="none",
+            targets=(),
             reason="no changed source files resolved from graph",
         )
     if not checkable:
         return Check(
-            kind="syntax", command=None, selection_basis="edit_check",
-            covered_entities=ents, covered_obligations=obl,
-            expected_cost="low", confidence="unknown",
-            attribution_requirement="none", targets=tuple(edited_files),
+            kind="syntax",
+            command=None,
+            selection_basis="edit_check",
+            covered_entities=ents,
+            covered_obligations=obl,
+            expected_cost="low",
+            confidence="unknown",
+            attribution_requirement="none",
+            targets=tuple(edited_files),
             reason="no syntax-checkable language among changed files",
         )
     conf = "high" if len(checkable) == len(edited_files) else "medium"
     return Check(
-        kind="syntax", command=None, selection_basis="edit_check",
-        covered_entities=ents, covered_obligations=obl,
-        expected_cost="low", confidence=conf,
-        attribution_requirement="none", targets=tuple(sorted(checkable)),
+        kind="syntax",
+        command=None,
+        selection_basis="edit_check",
+        covered_entities=ents,
+        covered_obligations=obl,
+        expected_cost="low",
+        confidence=conf,
+        attribution_requirement="none",
+        targets=tuple(sorted(checkable)),
         reason="edit_check parse-only over changed source files",
     )
 
@@ -860,26 +872,34 @@ def _unit_rungs(
     return rungs
 
 
-def _integration_rung(
-    repo_root: str, ents: tuple[str, ...], obl: tuple[str, ...]
-) -> Check:
+def _integration_rung(repo_root: str, ents: tuple[str, ...], obl: tuple[str, ...]) -> Check:
     """The whole-suite rung from discovered config (or UNKNOWN). Confidence is the
     DISCOVERY's confidence (F3): medium only for corroborated shapes, else low —
     never a blanket medium for anything a probe emitted."""
     cmd, basis, discovered_conf = discover_test_command(repo_root)
     if cmd is None:
         return Check(
-            kind="integration", command=None, selection_basis=basis,
-            covered_entities=ents, covered_obligations=obl,
-            expected_cost="high", confidence="unknown",
-            attribution_requirement="edit_attributed", targets=(),
+            kind="integration",
+            command=None,
+            selection_basis=basis,
+            covered_entities=ents,
+            covered_obligations=obl,
+            expected_cost="high",
+            confidence="unknown",
+            attribution_requirement="edit_attributed",
+            targets=(),
             reason="no test command discoverable from repo config or manifests",
         )
     return Check(
-        kind="integration", command=tuple(cmd), selection_basis=basis,
-        covered_entities=ents, covered_obligations=obl,
-        expected_cost="high", confidence=discovered_conf,
-        attribution_requirement="edit_attributed", targets=(),
+        kind="integration",
+        command=tuple(cmd),
+        selection_basis=basis,
+        covered_entities=ents,
+        covered_obligations=obl,
+        expected_cost="high",
+        confidence=discovered_conf,
+        attribution_requirement="edit_attributed",
+        targets=(),
         reason=f"whole-suite command discovered via {basis}",
     )
 
@@ -930,7 +950,9 @@ def run_plan(
             continue
         try:
             res = _run_one(
-                check, plan, executor,
+                check,
+                plan,
+                executor,
                 executor if syntax_executor is None else syntax_executor,
                 repo_root,
                 min(per_file_timeout, remaining_budget),
@@ -938,9 +960,12 @@ def run_plan(
             )
         except Exception as exc:  # noqa: BLE001 -- a rung must never brick the loop
             res = CheckResult(
-                kind=check.kind, selection_basis=check.selection_basis,
-                executed=False, verdict="unavailable",
-                graph_revision=plan.graph_revision, patch_revision=plan.patch_revision,
+                kind=check.kind,
+                selection_basis=check.selection_basis,
+                executed=False,
+                verdict="unavailable",
+                graph_revision=plan.graph_revision,
+                patch_revision=plan.patch_revision,
                 covered_entities=check.covered_entities,
                 covered_obligations=check.covered_obligations,
                 attribution_requirement=check.attribution_requirement,
@@ -962,13 +987,17 @@ def _run_one(
 ) -> CheckResult:
     def _mk(executed: bool, verdict: str, attributed: bool, detail: dict[str, Any]) -> CheckResult:
         return CheckResult(
-            kind=check.kind, selection_basis=check.selection_basis,
-            executed=executed, verdict=verdict,
-            graph_revision=plan.graph_revision, patch_revision=plan.patch_revision,
+            kind=check.kind,
+            selection_basis=check.selection_basis,
+            executed=executed,
+            verdict=verdict,
+            graph_revision=plan.graph_revision,
+            patch_revision=plan.patch_revision,
             covered_entities=check.covered_entities,
             covered_obligations=check.covered_obligations,
             attribution_requirement=check.attribution_requirement,
-            attribution_satisfied=attributed, detail=detail,
+            attribution_satisfied=attributed,
+            detail=detail,
         )
 
     if check.kind == "syntax":
@@ -978,9 +1007,7 @@ def _run_one(
         n_err = n_ok = 0
         syntax_started = time.monotonic()
         for index, f in enumerate(check.targets):
-            remaining = total_budget_seconds - (
-                time.monotonic() - syntax_started
-            )
+            remaining = total_budget_seconds - (time.monotonic() - syntax_started)
             if remaining < 1:
                 per.extend(
                     {
@@ -1021,15 +1048,21 @@ def _run_one(
         if not check.targets:
             return _mk(False, "unavailable", False, {"reason": "no targets"})
         res = run_covering_tests(
-            repo_root, list(check.targets), executor=executor,
-            per_file_timeout=per_file_timeout, total_budget_seconds=total_budget_seconds,
+            repo_root,
+            list(check.targets),
+            executor=executor,
+            per_file_timeout=per_file_timeout,
+            total_budget_seconds=total_budget_seconds,
         )
         verdict = res.get("verdict", "unavailable")
         if verdict == "fail":
             attribution = attribute_covering_red(
-                res, set(plan.edited_files),
-                test_files=list(check.targets), repo_root=repo_root,
-                covering_files=list(check.targets), executor=executor,
+                res,
+                set(plan.edited_files),
+                test_files=list(check.targets),
+                repo_root=repo_root,
+                covering_files=list(check.targets),
+                executor=executor,
             )
             attributed = attribution.attributed
             # Add producer-owned causal evidence to host-side plan telemetry.
@@ -1129,9 +1162,7 @@ def green(result: CheckResult, plan: VerificationPlan) -> GreenVerdict:
     )
     if not fresh:
         return GreenVerdict(False, "stale", kind)
-    attribution_ok = (
-        result.attribution_requirement == "none" or result.attribution_satisfied
-    )
+    attribution_ok = result.attribution_requirement == "none" or result.attribution_satisfied
     if not attribution_ok:
         return GreenVerdict(False, "attribution_unmet", kind)
     # F4 MEMBERSHIP: every claimed covered entity/obligation must be one the PLAN

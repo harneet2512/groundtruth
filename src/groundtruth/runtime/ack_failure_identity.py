@@ -4,6 +4,7 @@ This module is producer-neutral: it knows neither seam kinds nor arbitration
 classes.  It accepts only repository source identity, exact source bytes, and a
 native syntax diagnostic.  Missing or ambiguous evidence returns ``None``.
 """
+
 from __future__ import annotations
 
 import posixpath
@@ -70,7 +71,7 @@ def _repo_path(path: str, repo_root: str = "") -> str:
         prefix = compare_root.rstrip("/") + "/"
         if not compare_path.startswith(prefix):
             return ""
-        normalized = normalized[len(root.rstrip("/")) + 1:]
+        normalized = normalized[len(root.rstrip("/")) + 1 :]
     if normalized in {"", ".", ".."} or normalized.startswith("../"):
         return ""
     return normalized
@@ -91,11 +92,13 @@ def _locations(text: str, repo_root: str = "") -> list[tuple[str, str, str]]:
             location = frame.group("line")
             if frame.group("column"):
                 location += ":" + frame.group("column")
-            rows.append((
-                _repo_path(frame.group("path"), repo_root),
-                location,
-                frame.group("message").strip(),
-            ))
+            rows.append(
+                (
+                    _repo_path(frame.group("path"), repo_root),
+                    location,
+                    frame.group("message").strip(),
+                )
+            )
     return [row for row in rows if row[0]]
 
 
@@ -104,20 +107,17 @@ def implicated_source_path(
 ) -> str | None:
     """Return the one candidate named by an exact diagnostic location."""
     diagnostic = _ANSI_CSI_RE.sub("", diagnostic or "")
-    normalized_candidates = {
-        _repo_path(path, repo_root) for path in candidates or set()
-    }
+    normalized_candidates = {_repo_path(path, repo_root) for path in candidates or set()}
     normalized_candidates.discard("")
     matches = {
-        path for path, _location, _message in _locations(diagnostic, repo_root)
+        path
+        for path, _location, _message in _locations(diagnostic, repo_root)
         if path in normalized_candidates
     }
     return next(iter(matches)) if len(matches) == 1 else None
 
 
-def _normalized_syntax_diagnostic(
-    text: str, source_path: str, repo_root: str = ""
-) -> str:
+def _normalized_syntax_diagnostic(text: str, source_path: str, repo_root: str = "") -> str:
     candidates: list[str] = []
     for line in (text or "").splitlines():
         stripped = " ".join(line.strip().split())
@@ -128,8 +128,7 @@ def _normalized_syntax_diagnostic(
         if path == source_path and message and _SYNTAX_SIGNAL_RE.search(message):
             candidates.append(message)
     normalized = {
-        re.sub(r"\s*:\s*", ":", " ".join(value.split())).casefold()
-        for value in candidates if value
+        re.sub(r"\s*:\s*", ":", " ".join(value.split())).casefold() for value in candidates if value
     }
     return next(iter(normalized)) if len(normalized) == 1 else ""
 
@@ -148,7 +147,8 @@ def build_syntax_failure_identity(
     if not path or not _SHA256_RE.fullmatch(digest):
         return None
     matching_locations = {
-        location for found_path, location, _message in _locations(diagnostic, repo_root)
+        location
+        for found_path, location, _message in _locations(diagnostic, repo_root)
         if found_path == path and location
     }
     if len(matching_locations) != 1:
@@ -165,9 +165,7 @@ def build_syntax_failure_identity(
     )
 
 
-def syntax_payload_is_exhausted(
-    identity: FailureIdentity | None, semantic_payload: str
-) -> bool:
+def syntax_payload_is_exhausted(identity: FailureIdentity | None, semantic_payload: str) -> bool:
     """Whether every rendered semantic line is already contained in ``identity``.
 
     The caller removes producer framing first. This kernel admits only the exact

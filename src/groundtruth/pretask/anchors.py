@@ -23,9 +23,7 @@ from groundtruth.confidence import is_seed_pollutant
 # Identifier surface forms we care about: CamelCase, snake_case, dotted (a.b.c).
 # Min length 3 to drop "is", "to", etc. Keeps leading underscore for dunder
 # attrs (``_fd``, ``__init__``).
-_IDENT_RE = re.compile(
-    r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b"
-)
+_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b")
 
 # Backtick-wrapped paths OR bare paths with known source extensions.
 _PATH_EXTS = (
@@ -52,17 +50,17 @@ _PATH_RE = re.compile(
 # URLs — a repo-relative path never starts with ``//host/`` — so legitimate
 # paths that merely contain a ``src/`` segment are untouched.
 _FORGE_BLOB_URL_RE = re.compile(
-    r"^(?:https?:)?//[^/]+/"                       # optional scheme + // + host
-    r".+?/"                                         # <owner>/<repo> (+ group nesting)
-    r"(?:-/)?(?:blob|raw|blame|tree|src|HEAD)/"     # vcs view segment (GitLab ``-/``)
-    r"[^/]+/"                                        # <ref> (branch / tag / sha)
-    r"(.+)$"                                         # repo-relative tail (captured)
+    r"^(?:https?:)?//[^/]+/"  # optional scheme + // + host
+    r".+?/"  # <owner>/<repo> (+ group nesting)
+    r"(?:-/)?(?:blob|raw|blame|tree|src|HEAD)/"  # vcs view segment (GitLab ``-/``)
+    r"[^/]+/"  # <ref> (branch / tag / sha)
+    r"(.+)$"  # repo-relative tail (captured)
 )
 # ``raw.githubusercontent.com`` has no view segment: ``/<owner>/<repo>/<ref>/<path>``.
 _RAW_GHUC_URL_RE = re.compile(
     r"^(?:https?:)?//raw\.githubusercontent\.com/"
-    r"[^/]+/[^/]+/[^/]+/"                            # <owner>/<repo>/<ref>
-    r"(.+)$"                                         # repo-relative tail (captured)
+    r"[^/]+/[^/]+/[^/]+/"  # <owner>/<repo>/<ref>
+    r"(.+)$"  # repo-relative tail (captured)
 )
 
 
@@ -81,6 +79,7 @@ def _normalize_forge_url(path: str) -> str:
             return tail or path
     return path
 
+
 # Pytest-style test names (test_*, *_test).
 _TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 
@@ -92,19 +91,92 @@ _TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]+|[A-Za-z0-9_]+_test)\b")
 # NOT here: whether they are anchors is decided by the graph cross-check + per-repo
 # symbol_specificity (see _drop_generic_hubs), not by a static blocklist. The old
 # 190-word _STOPWORDS dropped real short/domain symbols — the false-negative poison.
-_NL_FUNCTION_WORDS: frozenset[str] = frozenset({
-    "the", "and", "for", "nor", "but", "yet",
-    "this", "that", "these", "those", "there", "here",
-    "with", "without", "within", "from", "into", "onto", "over", "under",
-    "about", "after", "before", "between", "through", "during", "against",
-    "are", "was", "were", "been", "being", "has", "have", "had",
-    "will", "would", "shall", "should", "can", "could", "may", "might", "must",
-    "does", "did", "not", "yes",
-    "then", "than", "when", "where", "why", "how", "which", "what",
-    "who", "whom", "whose", "they", "them", "their", "its", "our", "your",
-    "very", "just", "only", "also", "too", "more", "most", "less",
-    "some", "any", "all", "each", "both", "few", "many", "such", "same",
-})
+_NL_FUNCTION_WORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "nor",
+        "but",
+        "yet",
+        "this",
+        "that",
+        "these",
+        "those",
+        "there",
+        "here",
+        "with",
+        "without",
+        "within",
+        "from",
+        "into",
+        "onto",
+        "over",
+        "under",
+        "about",
+        "after",
+        "before",
+        "between",
+        "through",
+        "during",
+        "against",
+        "are",
+        "was",
+        "were",
+        "been",
+        "being",
+        "has",
+        "have",
+        "had",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "can",
+        "could",
+        "may",
+        "might",
+        "must",
+        "does",
+        "did",
+        "not",
+        "yes",
+        "then",
+        "than",
+        "when",
+        "where",
+        "why",
+        "how",
+        "which",
+        "what",
+        "who",
+        "whom",
+        "whose",
+        "they",
+        "them",
+        "their",
+        "its",
+        "our",
+        "your",
+        "very",
+        "just",
+        "only",
+        "also",
+        "too",
+        "more",
+        "most",
+        "less",
+        "some",
+        "any",
+        "all",
+        "each",
+        "both",
+        "few",
+        "many",
+        "such",
+        "same",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -118,41 +190,222 @@ _NL_FUNCTION_WORDS: frozenset[str] = frozenset({
 _STOPWORDS: frozenset[str] = frozenset(
     {
         # English filler
-        "the", "and", "for", "this", "that", "with", "from", "into", "have",
-        "has", "had", "was", "were", "will", "would", "should", "could",
-        "does", "did", "are", "but", "not", "can", "may", "might", "must",
-        "use", "used", "uses", "using", "see", "any", "all", "some", "one",
-        "two", "three", "four", "five", "ten", "now", "new", "old", "yes",
-        "off", "out", "via", "per", "non", "yet", "say", "set", "get",
-        "put", "let", "got", "make", "made", "want", "need", "give", "find",
-        "back", "down", "over", "such", "then", "than", "very", "much",
-        "more", "less", "well", "long", "high", "low", "left", "right",
-        "same", "different", "still", "even", "thus", "also", "again",
+        "the",
+        "and",
+        "for",
+        "this",
+        "that",
+        "with",
+        "from",
+        "into",
+        "have",
+        "has",
+        "had",
+        "was",
+        "were",
+        "will",
+        "would",
+        "should",
+        "could",
+        "does",
+        "did",
+        "are",
+        "but",
+        "not",
+        "can",
+        "may",
+        "might",
+        "must",
+        "use",
+        "used",
+        "uses",
+        "using",
+        "see",
+        "any",
+        "all",
+        "some",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "ten",
+        "now",
+        "new",
+        "old",
+        "yes",
+        "off",
+        "out",
+        "via",
+        "per",
+        "non",
+        "yet",
+        "say",
+        "set",
+        "get",
+        "put",
+        "let",
+        "got",
+        "make",
+        "made",
+        "want",
+        "need",
+        "give",
+        "find",
+        "back",
+        "down",
+        "over",
+        "such",
+        "then",
+        "than",
+        "very",
+        "much",
+        "more",
+        "less",
+        "well",
+        "long",
+        "high",
+        "low",
+        "left",
+        "right",
+        "same",
+        "different",
+        "still",
+        "even",
+        "thus",
+        "also",
+        "again",
         # issue/bug filler
-        "fix", "fixed", "fixing", "bug", "bugs", "issue", "issues",
-        "error", "errors", "fail", "fails", "failed", "failure", "failures",
-        "broken", "break", "breaks", "expected", "actual", "result",
-        "results", "value", "values", "implementation", "behavior",
-        "behaviour", "problem", "problems", "regression", "regressions",
-        "crash", "crashes", "wrong", "incorrect", "correct", "correctly",
-        "since", "before", "after", "while", "when", "where", "why", "how",
-        "what", "which", "whose", "whom",
+        "fix",
+        "fixed",
+        "fixing",
+        "bug",
+        "bugs",
+        "issue",
+        "issues",
+        "error",
+        "errors",
+        "fail",
+        "fails",
+        "failed",
+        "failure",
+        "failures",
+        "broken",
+        "break",
+        "breaks",
+        "expected",
+        "actual",
+        "result",
+        "results",
+        "value",
+        "values",
+        "implementation",
+        "behavior",
+        "behaviour",
+        "problem",
+        "problems",
+        "regression",
+        "regressions",
+        "crash",
+        "crashes",
+        "wrong",
+        "incorrect",
+        "correct",
+        "correctly",
+        "since",
+        "before",
+        "after",
+        "while",
+        "when",
+        "where",
+        "why",
+        "how",
+        "what",
+        "which",
+        "whose",
+        "whom",
         # generic noun-ish
-        "test", "tests", "testing", "code", "codes", "file", "files",
-        "function", "functions", "class", "classes", "method", "methods",
-        "type", "types", "object", "objects", "exception", "exceptions",
-        "raise", "raises", "raised", "return", "returns", "returned",
-        "import", "imports", "imported", "module", "modules", "package",
-        "packages", "library", "libraries", "version", "versions",
+        "test",
+        "tests",
+        "testing",
+        "code",
+        "codes",
+        "file",
+        "files",
+        "function",
+        "functions",
+        "class",
+        "classes",
+        "method",
+        "methods",
+        "type",
+        "types",
+        "object",
+        "objects",
+        "exception",
+        "exceptions",
+        "raise",
+        "raises",
+        "raised",
+        "return",
+        "returns",
+        "returned",
+        "import",
+        "imports",
+        "imported",
+        "module",
+        "modules",
+        "package",
+        "packages",
+        "library",
+        "libraries",
+        "version",
+        "versions",
         # python keywords / builtins seen in prose
-        "true", "false", "none", "null", "self", "cls", "args", "kwargs",
-        "python", "java", "javascript", "typescript", "rust", "golang",
+        "true",
+        "false",
+        "none",
+        "null",
+        "self",
+        "cls",
+        "args",
+        "kwargs",
+        "python",
+        "java",
+        "javascript",
+        "typescript",
+        "rust",
+        "golang",
         # boilerplate verbs
-        "called", "called", "calling", "called", "ran", "run", "running",
-        "found", "see", "look", "looking", "looked", "show", "shows",
-        "showed", "follow", "follows", "followed", "throw", "throws",
-        "thrown", "catch", "caught", "log", "logs", "logged", "print",
-        "prints", "printed",
+        "called",
+        "called",
+        "calling",
+        "called",
+        "ran",
+        "run",
+        "running",
+        "found",
+        "see",
+        "look",
+        "looking",
+        "looked",
+        "show",
+        "shows",
+        "showed",
+        "follow",
+        "follows",
+        "followed",
+        "throw",
+        "throws",
+        "thrown",
+        "catch",
+        "caught",
+        "log",
+        "logs",
+        "logged",
+        "print",
+        "prints",
+        "printed",
     }
 )
 
@@ -249,26 +502,91 @@ _BACKTICK_CODE_RE = re.compile(r"`([^`\n]+)`")
 # never reached _resolve_qualified_dotted; `Context` died as a homonym). The
 # pair is harvested here and confirmed through the SAME graph probes as dotted
 # pairs — correct-or-quiet, never minted from string shape alone.
-_QUALIFIED_COLON_RE = re.compile(
-    r"\b([A-Za-z_][A-Za-z0-9_]{2,})::([A-Za-z_][A-Za-z0-9_]{2,})\b"
-)
+_QUALIFIED_COLON_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,})::([A-Za-z_][A-Za-z0-9_]{2,})\b")
 
 # Cross-language type/keyword tokens that are never localization anchors even
 # with explicit code provenance (they appear inside backticked SIGNATURES —
 # `BeginRepl(args []string, version string)` — as parameter/type syntax, not
 # as symbols). Static by design: language syntax invariants, not domain words.
-_LANG_KEYWORD_TOKENS: frozenset[str] = frozenset({
-    "string", "str", "int", "int8", "int16", "int32", "int64", "uint",
-    "float", "float32", "float64", "double", "bool", "boolean", "void",
-    "char", "byte", "rune", "number", "object", "array", "vec", "map",
-    "list", "dict", "tuple", "option", "result", "nil", "null", "none",
-    "true", "false", "self", "cls", "this", "args", "kwargs", "argv",
-    "func", "function", "def", "let", "mut", "pub", "const", "var",
-    "class", "struct", "enum", "impl", "trait", "interface", "type",
-    "import", "from", "use", "mod", "package", "return", "yield",
-    "async", "await", "static", "public", "private", "protected",
-    "new", "make", "err", "error", "ctx", "context", "val", "key",
-})
+_LANG_KEYWORD_TOKENS: frozenset[str] = frozenset(
+    {
+        "string",
+        "str",
+        "int",
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint",
+        "float",
+        "float32",
+        "float64",
+        "double",
+        "bool",
+        "boolean",
+        "void",
+        "char",
+        "byte",
+        "rune",
+        "number",
+        "object",
+        "array",
+        "vec",
+        "map",
+        "list",
+        "dict",
+        "tuple",
+        "option",
+        "result",
+        "nil",
+        "null",
+        "none",
+        "true",
+        "false",
+        "self",
+        "cls",
+        "this",
+        "args",
+        "kwargs",
+        "argv",
+        "func",
+        "function",
+        "def",
+        "let",
+        "mut",
+        "pub",
+        "const",
+        "var",
+        "class",
+        "struct",
+        "enum",
+        "impl",
+        "trait",
+        "interface",
+        "type",
+        "import",
+        "from",
+        "use",
+        "mod",
+        "package",
+        "return",
+        "yield",
+        "async",
+        "await",
+        "static",
+        "public",
+        "private",
+        "protected",
+        "new",
+        "make",
+        "err",
+        "error",
+        "ctx",
+        "context",
+        "val",
+        "key",
+    }
+)
 
 
 def _extract_code_region_identifiers(text: str) -> set[str]:
@@ -665,12 +983,10 @@ def extract_issue_anchors(
     # dotted form, and confirm through the SAME graph probes — a confirmed pair
     # is exempt from the generic-hub/prose gates exactly like a confirmed
     # dotted pair (qualification disambiguates). Unconfirmed pairs stay out.
-    _colon_pairs = {
-        f"{m.group(1)}.{m.group(2)}"
-        for m in _QUALIFIED_COLON_RE.finditer(issue_text)
-    }
+    _colon_pairs = {f"{m.group(1)}.{m.group(2)}" for m in _QUALIFIED_COLON_RE.finditer(issue_text)}
     _colon_confirmed = _resolve_qualified_dotted(
-        {t for t in _colon_pairs if t not in resolved_graph}, graph_db_path,
+        {t for t in _colon_pairs if t not in resolved_graph},
+        graph_db_path,
     )
     _qualified_dotted |= _colon_confirmed
     resolved_graph |= _colon_confirmed
@@ -714,8 +1030,7 @@ def extract_issue_anchors(
             _gc_conn = sqlite3.connect(graph_db_path)
             try:
                 _graph_confirmed_unique = {
-                    s for s in resolved
-                    if not is_seed_pollutant(s, _gc_conn)
+                    s for s in resolved if not is_seed_pollutant(s, _gc_conn)
                 }
             finally:
                 _gc_conn.close()

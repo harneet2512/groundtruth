@@ -131,11 +131,13 @@ def classify_environment_failure(
     strings. Returns None when output looks like an ordinary test failure.
     """
     hay = "\n".join(
-        part for part in (
+        part
+        for part in (
             " ".join(command or []),
             spawn_error or "",
             text or "",
-        ) if part
+        )
+        if part
     ).lower()
     if not hay:
         return None
@@ -279,7 +281,9 @@ def execute_test_command(
         except subprocess.TimeoutExpired:
             return _emit_exec(
                 _timeout_result(
-                    command, mode, selected_contract_files,
+                    command,
+                    mode,
+                    selected_contract_files,
                     int((time.perf_counter() - start) * 1000),
                 ),
                 log_dir,
@@ -288,7 +292,10 @@ def execute_test_command(
         except Exception as exc:  # noqa: BLE001 -- any executor fault -> safe spawn_error
             return _emit_exec(
                 _spawn_error_result(
-                    command, mode, selected_contract_files, str(exc),
+                    command,
+                    mode,
+                    selected_contract_files,
+                    str(exc),
                     int((time.perf_counter() - start) * 1000),
                 ),
                 log_dir,
@@ -296,13 +303,13 @@ def execute_test_command(
             )
     else:
         try:
-            exit_code, stdout, stderr = _run_subprocess(
-                command, repo_root, timeout_seconds
-            )
+            exit_code, stdout, stderr = _run_subprocess(command, repo_root, timeout_seconds)
         except subprocess.TimeoutExpired:
             return _emit_exec(
                 _timeout_result(
-                    command, mode, selected_contract_files,
+                    command,
+                    mode,
+                    selected_contract_files,
                     int((time.perf_counter() - start) * 1000),
                 ),
                 log_dir,
@@ -311,7 +318,10 @@ def execute_test_command(
         except (OSError, FileNotFoundError) as exc:
             return _emit_exec(
                 _spawn_error_result(
-                    command, mode, selected_contract_files, str(exc),
+                    command,
+                    mode,
+                    selected_contract_files,
+                    str(exc),
                     int((time.perf_counter() - start) * 1000),
                 ),
                 log_dir,
@@ -411,8 +421,7 @@ def _unpack_executor_result(ret: Any) -> tuple[int, str, str]:
     executor can never crash the gate."""
     if not isinstance(ret, (tuple, list)) or len(ret) != 3:
         raise ValueError(
-            f"executor must return a (exit_code, stdout, stderr) triple, "
-            f"got {type(ret).__name__}"
+            f"executor must return a (exit_code, stdout, stderr) triple, got {type(ret).__name__}"
         )
     code, out, err = ret
     return (
@@ -422,9 +431,7 @@ def _unpack_executor_result(ret: Any) -> tuple[int, str, str]:
     )
 
 
-def _run_subprocess(
-    command: list[str], cwd: str, timeout_seconds: int
-) -> tuple[int, str, str]:
+def _run_subprocess(command: list[str], cwd: str, timeout_seconds: int) -> tuple[int, str, str]:
     """Default (host) executor: run ``command`` capturing stdout/stderr, and on
     timeout kill the whole process GROUP (POSIX) / process TREE (Windows) so a
     hung test's grandchildren cannot outlive the timeout.
@@ -532,6 +539,7 @@ def make_env_executor(
     ``shlex.join`` (the container runs a POSIX shell). ``cwd`` is passed via the
     ``cwd_kwarg`` keyword when the callable accepts it; otherwise it is folded
     into the command as a leading ``cd -- <cwd> &&``."""
+
     def _executor(command: list[str], cwd: str, timeout: int) -> tuple[int, str, str]:
         cmd_str = shlex.join(list(command))
         run_str = f"{cmd_str} ; echo {_EXIT_MARKER_ECHO}" if use_exit_marker else cmd_str
@@ -541,9 +549,7 @@ def make_env_executor(
             code, out = _split_exit_marker(out)
             return code, out, err
         if rc is None:
-            raise ValueError(
-                "environment execute returned no exit code and use_exit_marker=False"
-            )
+            raise ValueError("environment execute returned no exit code and use_exit_marker=False")
         return int(rc), out, err
 
     return _executor
@@ -579,8 +585,11 @@ def _extract_env_result(ret: Any) -> tuple[str, str, int | None]:
         if out is None:
             out = ret.get("stdout")
         rc = _coerce_exit_code(
-            ret.get("returncode"), ret.get("return_code"),
-            ret.get("exit_code"), ret.get("code"), ret.get("status"),
+            ret.get("returncode"),
+            ret.get("return_code"),
+            ret.get("exit_code"),
+            ret.get("code"),
+            ret.get("status"),
         )
         return _as_text(out), _as_text(ret.get("stderr")), rc
     if isinstance(ret, str):
@@ -604,8 +613,10 @@ def _extract_env_result(ret: Any) -> tuple[str, str, int | None]:
     if out is None:
         out = getattr(ret, "stdout", None)
     rc = _coerce_exit_code(
-        getattr(ret, "returncode", None), getattr(ret, "return_code", None),
-        getattr(ret, "exit_code", None), getattr(ret, "code", None),
+        getattr(ret, "returncode", None),
+        getattr(ret, "return_code", None),
+        getattr(ret, "exit_code", None),
+        getattr(ret, "code", None),
         getattr(ret, "status", None),
     )
     return _as_text(out), _as_text(getattr(ret, "stderr", None)), rc
@@ -661,8 +672,18 @@ def _detect_runner(command: list[str]) -> str:
         if base == "cargo":
             return "cargo"
         if base in {
-            "npm", "pnpm", "yarn", "jest", "vitest", "mocha",
-            "bun", "deno", "node", "jasmine", "npx", "bunx",
+            "npm",
+            "pnpm",
+            "yarn",
+            "jest",
+            "vitest",
+            "mocha",
+            "bun",
+            "deno",
+            "node",
+            "jasmine",
+            "npx",
+            "bunx",
         }:
             return "jsnode"
         if base in {"mvn", "mvnw", "gradle", "gradlew"}:
@@ -708,9 +729,7 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
     # cargo: "test result: ok. X passed; Y failed; ..." — SUM across every target
     # (Fable F5d: a multi-crate run whose FIRST line is 0/0 must not hide a later fail).
     if runner == "cargo":
-        for p, f in re.findall(
-            r"test result:.*?(\d+)\s+passed;\s*(\d+)\s+failed", text
-        ):
+        for p, f in re.findall(r"test result:.*?(\d+)\s+passed;\s*(\d+)\s+failed", text):
             counts["passed"] += int(p)
             counts["failed"] += int(f)
 
@@ -728,9 +747,7 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
 
     # maven surefire: "Tests run: X, Failures: Y, Errors: Z" (per module -> sum).
     if runner == "mvn":
-        for m in re.finditer(
-            r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)", text
-        ):
+        for m in re.finditer(r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)", text):
             run_n, fail_n, err_n = int(m.group(1)), int(m.group(2)), int(m.group(3))
             counts["failed"] += fail_n
             counts["errored"] += err_n

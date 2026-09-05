@@ -57,6 +57,7 @@ Rendering is intentionally NOT this module's job: an envelope is a minimal decis
 capsule (target + change context + facts + provenance). No ``<gt-*>`` tags,
 no agent-facing string assembly beyond deterministic ``file:line`` row formatting.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -179,13 +180,28 @@ __all__ = [
     # B-GW committed-delivery mediation recorder
     "record_committed_delivery",
     "GATEWAY_COMMITTED_SITE",
-    "ROUTE_DELIVER", "ROUTE_DEFER", "ROUTE_EXPIRED_LATE", "ROUTE_STALE",
+    "ROUTE_DELIVER",
+    "ROUTE_DEFER",
+    "ROUTE_EXPIRED_LATE",
+    "ROUTE_STALE",
     "ROUTE_REGISTRY_ERROR",
     # kinds
-    "KIND_SEARCH", "KIND_VIEW", "KIND_EDIT", "KIND_TEST", "KIND_SUBMIT", "KIND_OTHER",
+    "KIND_SEARCH",
+    "KIND_VIEW",
+    "KIND_EDIT",
+    "KIND_TEST",
+    "KIND_SUBMIT",
+    "KIND_OTHER",
     # outcome states
-    "EXACT_HIT", "SATISFIED", "AMBIGUOUS_HIT", "FLOOD", "WRONG_SURFACE", "TRACE_HIT",
-    "ZERO_NAME", "ZERO_BEHAVIOR", "ZERO_ABSENT",
+    "EXACT_HIT",
+    "SATISFIED",
+    "AMBIGUOUS_HIT",
+    "FLOOD",
+    "WRONG_SURFACE",
+    "TRACE_HIT",
+    "ZERO_NAME",
+    "ZERO_BEHAVIOR",
+    "ZERO_ABSENT",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -198,15 +214,15 @@ KIND_TEST = "test"
 KIND_SUBMIT = "submit"
 KIND_OTHER = "other"
 
-EXACT_HIT = "EXACT_HIT"           # silence — the agent already has the def
-SATISFIED = "SATISFIED"           # silence — nothing to add
-AMBIGUOUS_HIT = "AMBIGUOUS_HIT"   # def spans 2-3 files -> def/ref partition
-FLOOD = "FLOOD"                   # a very large raw hit set -> cut with the def
-WRONG_SURFACE = "WRONG_SURFACE"   # every hit is test/vendored; the def is elsewhere
-TRACE_HIT = "TRACE_HIT"           # output carries an in-repo stack trace
-ZERO_NAME = "ZERO_NAME"           # empty grep; name exists under a fold variant
-ZERO_BEHAVIOR = "ZERO_BEHAVIOR"   # empty grep; concept only in function bodies
-ZERO_ABSENT = "ZERO_ABSENT"       # empty grep; name+path+body all miss (truly absent)
+EXACT_HIT = "EXACT_HIT"  # silence — the agent already has the def
+SATISFIED = "SATISFIED"  # silence — nothing to add
+AMBIGUOUS_HIT = "AMBIGUOUS_HIT"  # def spans 2-3 files -> def/ref partition
+FLOOD = "FLOOD"  # a very large raw hit set -> cut with the def
+WRONG_SURFACE = "WRONG_SURFACE"  # every hit is test/vendored; the def is elsewhere
+TRACE_HIT = "TRACE_HIT"  # output carries an in-repo stack trace
+ZERO_NAME = "ZERO_NAME"  # empty grep; name exists under a fold variant
+ZERO_BEHAVIOR = "ZERO_BEHAVIOR"  # empty grep; concept only in function bodies
+ZERO_ABSENT = "ZERO_ABSENT"  # empty grep; name+path+body all miss (truly absent)
 
 # Trust tiers come from the canonical envelope module (imported above): VERIFIED /
 # WARNING / INFO / HYPOTHESIS — a single vocabulary, never re-declared here.
@@ -215,8 +231,12 @@ ZERO_ABSENT = "ZERO_ABSENT"       # empty grep; name+path+body all miss (truly a
 # >= 0.7 with provenance; HYPOTHESIS < 0.7). A producer with a REAL measured
 # confidence (patch_delta's FACT edges) passes it explicitly instead.
 _TIER_DEFAULT_CONF: dict[str, float] = {
-    VERIFIED: 0.9, WARNING: 0.7, INFO: 0.5, HYPOTHESIS: 0.5,
+    VERIFIED: 0.9,
+    WARNING: 0.7,
+    INFO: 0.5,
+    HYPOTHESIS: 0.5,
 }
+
 
 # --------------------------------------------------------------------------- #
 # dataclasses
@@ -359,17 +379,12 @@ def _producer_audit(
     """Create one optional, behavior-neutral producer invocation trace."""
 
     return ProducerAudit(
-        recorder=(
-            state.producer_recorder
-            if callable(state.producer_recorder)
-            else None
-        ),
+        recorder=(state.producer_recorder if callable(state.producer_recorder) else None),
         producer=producer,
         evidence_types=evidence_types,
         invocation_site=invocation_site,
         event_type=str(
-            event.primary_boundary
-            or (event.semantic_events[0] if event.semantic_events else "")
+            event.primary_boundary or (event.semantic_events[0] if event.semantic_events else "")
         ),
         subject=subject,
         action_index=event.action_index,
@@ -421,14 +436,16 @@ def _repo_head(repo_root: str) -> str:
     head = ""
     try:
         import subprocess
+
         proc = subprocess.run(
             ["git", "-C", repo_root, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         out = (proc.stdout or "").strip()
-        if proc.returncode == 0 and len(out) == 40 and all(
-            c in "0123456789abcdef" for c in out
-        ):
+        if proc.returncode == 0 and len(out) == 40 and all(c in "0123456789abcdef" for c in out):
             head = out
     except Exception:  # noqa: BLE001 — git absent/slow/erroring is not a signal
         head = ""
@@ -471,7 +488,11 @@ def _registry_enforce() -> bool:
     Gateway is byte-identical to pre-SM-0 (only ``renderable`` membership + the self-stamped
     ``preferred_event`` timing)."""
     return os.environ.get("GT_REGISTRY_ENFORCE", "").strip().lower() not in (
-        "", "0", "false", "no", "off"
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -481,9 +502,7 @@ def _episode_overlay_on() -> bool:
     model-facing value: a base-read fact that is STALE against the CURRENT edit state is
     dropped, not shipped. Default OFF ⇒ ``route_delivery`` is byte-identical (the overlay is
     never consulted)."""
-    return os.environ.get("GT_EDIT_OVERLAY", "").strip().lower() in (
-        "1", "true", "yes", "on"
-    )
+    return os.environ.get("GT_EDIT_OVERLAY", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _loc_reslot_on() -> bool:
@@ -494,7 +513,11 @@ def _loc_reslot_on() -> bool:
     brief tag. Default OFF ⇒ the producer is never dispatched from :func:`augment` ⇒
     byte-identical (no ``localization`` envelope is ever produced by the Gateway)."""
     return os.environ.get("GT_LOC_RESLOT", "").strip().lower() not in (
-        "", "0", "false", "no", "off"
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -506,7 +529,11 @@ def _ss_arbiter_v2_on() -> bool:
     delivery). Default OFF ⇒ the guard is skipped ⇒ :func:`augment` is byte-identical. The
     same flag is read by ``global_arbiter.arbitrate`` (the ranked-competition v2 branches)."""
     return os.environ.get("GT_SS_ARBITER_V2", "").strip().lower() not in (
-        "", "0", "false", "no", "off"
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -524,7 +551,11 @@ def _xsession_on() -> bool:
     NEVER once consumed and RANK-UP a class it historically acted on. Default OFF (and an
     empty policy) ⇒ :func:`_apply_xsession_policy` is a byte-identical no-op."""
     return os.environ.get("GT_XSESSION_MEMORY", "").strip().lower() not in (
-        "", "0", "false", "no", "off"
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -613,7 +644,9 @@ def record_committed_delivery(
         if registration is None or not candidate_id:
             return
         recorder(
-            "GT_GATEWAY", GATEWAY_COMMITTED_SITE, decision,
+            "GT_GATEWAY",
+            GATEWAY_COMMITTED_SITE,
+            decision,
             candidate_bytes=final_bytes,
             fact_class=registration.fact_class,
             candidate_id=candidate_id,
@@ -668,20 +701,21 @@ def _apply_xsession_policy(
     for a in out:
         try:
             canon = _xm_canonical(a.evidence_type)
-            inert = bool(
-                canon in _XSESSION_POLICY_CLASSES and _xm_inert(policy, canon)
-            )
+            inert = bool(canon in _XSESSION_POLICY_CLASSES and _xm_inert(policy, canon))
         except Exception as exc:
             _record_control(
-                state, "GT_XSESSION_MEMORY",
-                "gateway.xsession_policy.inert_suppression", "ERROR",
+                state,
+                "GT_XSESSION_MEMORY",
+                "gateway.xsession_policy.inert_suppression",
+                "ERROR",
                 reason=f"policy_error:{type(exc).__name__}",
             )
             kept.append(a)
             continue
         if canon in _XSESSION_POLICY_CLASSES:
             _record_control(
-                state, "GT_XSESSION_MEMORY",
+                state,
+                "GT_XSESSION_MEMORY",
                 "gateway.xsession_policy.inert_suppression",
                 "APPLIED" if inert else "NO_EFFECT",
                 reason="inert_class" if inert else "class_not_inert",
@@ -692,11 +726,13 @@ def _apply_xsession_policy(
     # LEARNED RANK-UP: stable sort (Python sort is stable) by descending policy rank; a
     # non-policy / non-consumed class has rank 0 and keeps its original relative order.
     kept.sort(
-        key=lambda a: -_xm_rank(
-            policy,
-            _xm_canonical(a.evidence_type)
-            if _xm_canonical(a.evidence_type) in _XSESSION_POLICY_CLASSES
-            else None,
+        key=lambda a: (
+            -_xm_rank(
+                policy,
+                _xm_canonical(a.evidence_type)
+                if _xm_canonical(a.evidence_type) in _XSESSION_POLICY_CLASSES
+                else None,
+            )
         )
     )
     return kept
@@ -710,7 +746,11 @@ def _xsession_rankup_on() -> bool:
     (the order-independent arbiter ignores list order). Default OFF (and an empty policy) ⇒
     :func:`_apply_xsession_rankup` is a byte-identical no-op (nothing stamped)."""
     return os.environ.get("GT_XSESSION_RANKUP", "").strip().lower() not in (
-        "", "0", "false", "no", "off"
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -758,15 +798,22 @@ def _apply_xsession_rankup(
             try:
                 candidate_bytes, fact_class = _candidate_control_identity(a)
                 _record_control(
-                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
-                    "NO_EFFECT", candidate_bytes=candidate_bytes,
-                    fact_class=fact_class, candidate_id=a.dedup_key,
+                    state,
+                    "GT_XSESSION_RANKUP",
+                    "gateway.xsession_rankup.boost",
+                    "NO_EFFECT",
+                    candidate_bytes=candidate_bytes,
+                    fact_class=fact_class,
+                    candidate_id=a.dedup_key,
                     reason="cold_policy",
                 )
             except Exception as exc:  # noqa: BLE001 — measurement never changes delivery
                 _record_control(
-                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
-                    "ERROR", reason=f"identity_error:{type(exc).__name__}",
+                    state,
+                    "GT_XSESSION_RANKUP",
+                    "gateway.xsession_rankup.boost",
+                    "ERROR",
+                    reason=f"identity_error:{type(exc).__name__}",
                 )
         return out
     changed = False
@@ -783,15 +830,22 @@ def _apply_xsession_rankup(
             try:
                 candidate_bytes, fact_class = _candidate_control_identity(boosted)
                 _record_control(
-                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
-                    "APPLIED", candidate_bytes=candidate_bytes,
-                    fact_class=fact_class, candidate_id=boosted.dedup_key,
+                    state,
+                    "GT_XSESSION_RANKUP",
+                    "gateway.xsession_rankup.boost",
+                    "APPLIED",
+                    candidate_bytes=candidate_bytes,
+                    fact_class=fact_class,
+                    candidate_id=boosted.dedup_key,
                     reason=f"ladder_boost:{int(boost)}",
                 )
             except Exception as exc:
                 _record_control(
-                    state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
-                    "ERROR", reason=f"identity_error:{type(exc).__name__}",
+                    state,
+                    "GT_XSESSION_RANKUP",
+                    "gateway.xsession_rankup.boost",
+                    "ERROR",
+                    reason=f"identity_error:{type(exc).__name__}",
                 )
         else:
             stamped.append(a)
@@ -799,15 +853,22 @@ def _apply_xsession_rankup(
                 try:
                     candidate_bytes, fact_class = _candidate_control_identity(a)
                     _record_control(
-                        state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
-                        "NO_EFFECT", candidate_bytes=candidate_bytes,
-                        fact_class=fact_class, candidate_id=a.dedup_key,
+                        state,
+                        "GT_XSESSION_RANKUP",
+                        "gateway.xsession_rankup.boost",
+                        "NO_EFFECT",
+                        candidate_bytes=candidate_bytes,
+                        fact_class=fact_class,
+                        candidate_id=a.dedup_key,
                         reason="no_ladder_boost",
                     )
                 except Exception as exc:
                     _record_control(
-                        state, "GT_XSESSION_RANKUP", "gateway.xsession_rankup.boost",
-                        "ERROR", reason=f"identity_error:{type(exc).__name__}",
+                        state,
+                        "GT_XSESSION_RANKUP",
+                        "gateway.xsession_rankup.boost",
+                        "ERROR",
+                        reason=f"identity_error:{type(exc).__name__}",
                     )
     return stamped if changed else out  # SAME object when nothing stamped (byte-identical)
 
@@ -848,11 +909,11 @@ def _to_repo_rel(f: str, root: str) -> str:
     if nf.startswith("/"):
         for cr in _CONTAINER_ROOTS:
             if nf.startswith(cr):
-                return nf[len(cr):]
+                return nf[len(cr) :]
         if root:
             nroot = root.replace("\\", "/").rstrip("/") + "/"
             if nf.startswith(nroot):
-                return nf[len(nroot):]
+                return nf[len(nroot) :]
         try:
             return os.path.relpath(f, root) if root else f
         except (ValueError, TypeError):
@@ -887,10 +948,22 @@ class FrameOrigin(str, Enum):
 
 
 # Path SEGMENTS (never substrings) that mark third-party/installed code.
-_VENDOR_SEGMENTS: frozenset[str] = frozenset({
-    "site-packages", "dist-packages", "node_modules", "vendor", ".venv", "venv",
-    ".tox", ".cargo", ".gem", ".pub-cache", "bower_components", "third_party",
-})
+_VENDOR_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "site-packages",
+        "dist-packages",
+        "node_modules",
+        "vendor",
+        ".venv",
+        "venv",
+        ".tox",
+        ".cargo",
+        ".gem",
+        ".pub-cache",
+        "bower_components",
+        "third_party",
+    }
+)
 # Segments marking machine-emitted / build-output code the agent must not be sent to.
 _GENERATED_SEGMENTS: frozenset[str] = frozenset({"build", "dist"})
 
@@ -977,23 +1050,48 @@ _GREP_HEAD_RE = re.compile(r"(?:^|[|&;]\s*)(?:grep|egrep|fgrep|rg)\b")
 _BARE_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{2,}$")
 # Flags that CONSUME the next token as a value (so it is never mistaken for the
 # pattern operand). -E / -T are DELIBERATELY absent (valueless in GNU grep).
-_GREP_VALUE_FLAGS = frozenset({
-    "-e", "--regexp", "-f", "--file", "-m", "--max-count",
-    "-A", "-B", "-C", "--context", "--after-context", "--before-context", "-d",
-    "-t", "--type", "--type-not", "-g", "--glob", "--iglob",
-    "--include", "--exclude", "--exclude-dir", "--exclude-from",
-    "-M", "--max-columns", "-j", "--threads", "--encoding",
-})
+_GREP_VALUE_FLAGS = frozenset(
+    {
+        "-e",
+        "--regexp",
+        "-f",
+        "--file",
+        "-m",
+        "--max-count",
+        "-A",
+        "-B",
+        "-C",
+        "--context",
+        "--after-context",
+        "--before-context",
+        "-d",
+        "-t",
+        "--type",
+        "--type-not",
+        "-g",
+        "--glob",
+        "--iglob",
+        "--include",
+        "--exclude",
+        "--exclude-dir",
+        "--exclude-from",
+        "-M",
+        "--max-columns",
+        "-j",
+        "--threads",
+        "--encoding",
+    }
+)
 
 
 @dataclass(frozen=True)
 class SearchQuery:
     """The normalized shape of a grep/rg command."""
 
-    pattern: str                    # bare-symbol operand (== search_pattern), else ""
-    raw_operand: str                # dequoted operand even when not a bare symbol
-    scope: tuple[str, ...]          # path operands
-    filters: tuple[str, ...]        # flag tokens (best-effort)
+    pattern: str  # bare-symbol operand (== search_pattern), else ""
+    raw_operand: str  # dequoted operand even when not a bare symbol
+    scope: tuple[str, ...]  # path operands
+    filters: tuple[str, ...]  # flag tokens (best-effort)
 
 
 def _search_operand_raw(cmd: str) -> str | None:
@@ -1003,7 +1101,7 @@ def _search_operand_raw(cmd: str) -> str | None:
     if not m:
         return None
     try:
-        toks = shlex.split(head[m.end():])
+        toks = shlex.split(head[m.end() :])
     except ValueError:
         return None
     pat: str | None = None
@@ -1051,7 +1149,7 @@ def normalize_search(cmd: str) -> SearchQuery | None:
     head = (cmd or "").split("\n", 1)[0]
     m = _GREP_HEAD_RE.search(head)
     try:
-        toks = shlex.split(head[m.end():]) if m else []
+        toks = shlex.split(head[m.end() :]) if m else []
     except ValueError:
         toks = []
     scope: list[str] = []
@@ -1117,8 +1215,14 @@ _VIEW_SEG_RE = re.compile(r"^\s*(?:cat|less|more|head|tail|nl|sed\s+-n|view|open
 _GREP_BINS = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack"})
 _FIND_BINS = frozenset({"find", "fd"})
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_KIND_PRECEDENCE = {KIND_SUBMIT: 5, KIND_TEST: 4, KIND_EDIT: 3,
-                    KIND_SEARCH: 2, KIND_VIEW: 1, KIND_OTHER: 0}
+_KIND_PRECEDENCE = {
+    KIND_SUBMIT: 5,
+    KIND_TEST: 4,
+    KIND_EDIT: 3,
+    KIND_SEARCH: 2,
+    KIND_VIEW: 1,
+    KIND_OTHER: 0,
+}
 
 
 def _split_segments(cmd: str) -> list[str]:
@@ -1235,8 +1339,9 @@ def _grep_result_empty(cmd: str, out: str) -> bool:
         return True
     seg = _GREP_PIPE_SPLIT_RE.split(head)[-1]
     if _grep_is_count(seg):
-        return all(ln.strip() == "0" or ln.strip().endswith(":0")
-                   for ln in s.splitlines() if ln.strip())
+        return all(
+            ln.strip() == "0" or ln.strip().endswith(":0") for ln in s.splitlines() if ln.strip()
+        )
     return False
 
 
@@ -1400,8 +1505,7 @@ def _read_meta_revisions(state: GatewayState) -> tuple[str, dict[str, str]]:
         return "", {}
     try:
         rows = con.execute(
-            "SELECT key, value FROM project_meta "
-            "WHERE key = 'post_revision' OR key LIKE 'subrev_%'"
+            "SELECT key, value FROM project_meta WHERE key = 'post_revision' OR key LIKE 'subrev_%'"
         ).fetchall()
     except sqlite3.Error:
         return "", {}
@@ -1414,7 +1518,7 @@ def _read_meta_revisions(state: GatewayState) -> tuple[str, dict[str, str]]:
         if ks == "post_revision":
             post = str(v or "")
         elif ks.startswith("subrev_"):
-            subs[ks[len("subrev_"):]] = str(v or "")
+            subs[ks[len("subrev_") :]] = str(v or "")
     return post, subs
 
 
@@ -1444,9 +1548,7 @@ def _revisions_for(state: GatewayState, fact_class: str) -> tuple[str, str]:
     has no sub-revisions (old graph.db) or the class is unmapped — preserving the legacy
     invariant ``valid_until == graph_revision``. An explicit ``state.graph_revision`` override
     wins (used by tests / a caller that pins the revision)."""
-    canonical_graph = str(
-        getattr(state.canonical_revision, "graph", "") or ""
-    )
+    canonical_graph = str(getattr(state.canonical_revision, "graph", "") or "")
     if canonical_graph:
         return canonical_graph, canonical_graph
     if state.graph_revision:
@@ -1481,8 +1583,7 @@ def _graph_revision(state: GatewayState) -> str:
 # --------------------------------------------------------------------------- #
 # graph queries (read-only) — def/ref partition, name-fold, body FTS.
 # --------------------------------------------------------------------------- #
-_DEF_LABELS = ("Function", "Method", "Class", "Interface", "Struct", "Enum",
-               "Trait", "Constructor")
+_DEF_LABELS = ("Function", "Method", "Class", "Interface", "Struct", "Enum", "Trait", "Constructor")
 _FACT_CONF_FLOOR = 0.7
 _FLOOD_HITS = 20  # distinct raw hit paths above which a search is a FLOOD
 
@@ -1544,6 +1645,7 @@ def defined_symbols_for_file(
             con.close()
         except Exception:  # noqa: BLE001 -- close failure must not raise into the agent loop
             pass
+
     def _rel(path: object) -> str:
         # Same normalization the gateway's own graph readers use. `repo_root` is optional:
         # graph rows may store absolute or repo-relative paths, and `_to_repo_rel` is what
@@ -1655,7 +1757,8 @@ def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
             f"SELECT id, file_path, start_line, label FROM nodes "
             f"WHERE name=? AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
             f"AND label IN ({labels_sql}) ORDER BY file_path, start_line",
-            (symbol, *_DEF_LABELS)).fetchall()
+            (symbol, *_DEF_LABELS),
+        ).fetchall()
     except sqlite3.Error:
         return None
     rows = [r for r in rows if not _is_leaky(_to_repo_rel(r[1] or "", root))]
@@ -1669,8 +1772,7 @@ def _resolve_symbol_defs(con, symbol: str, root: str) -> dict | None:
     # built from — node id + label (kind) preserved for the producer attestation. A bare
     # def-node lookup carries no edge resolution, so confidence/resolution_method stay None.
     def_rows = [
-        (symbol, _to_repo_rel(r[1] or "", root), int(r[2] or 0),
-         str(r[3] or ""), int(r[0]))
+        (symbol, _to_repo_rel(r[1] or "", root), int(r[2] or 0), str(r[3] or ""), int(r[0]))
         for r in rows
     ]
     callers, receiver_types = _fact_callers(con, def_ids)
@@ -1747,19 +1849,28 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
     callers: list[dict] = []
     receivers: set[str] = set()
     for (
-        name, fp, line, meta, confidence, resolution_method, edge_id,
-        target_id, source_id,
+        name,
+        fp,
+        line,
+        meta,
+        confidence,
+        resolution_method,
+        edge_id,
+        target_id,
+        source_id,
     ) in rows:
-        callers.append({
-            "name": name or "",
-            "file": fp or "",
-            "line": int(line or 0),
-            "confidence": float(confidence),
-            "resolution_method": str(resolution_method or ""),
-            "edge_id": int(edge_id) if edge_id is not None else None,
-            "definition_id": int(target_id) if target_id is not None else None,
-            "caller_node_id": int(source_id) if source_id is not None else None,
-        })
+        callers.append(
+            {
+                "name": name or "",
+                "file": fp or "",
+                "line": int(line or 0),
+                "confidence": float(confidence),
+                "resolution_method": str(resolution_method or ""),
+                "edge_id": int(edge_id) if edge_id is not None else None,
+                "definition_id": int(target_id) if target_id is not None else None,
+                "caller_node_id": int(source_id) if source_id is not None else None,
+            }
+        )
         if meta:
             if use_em:
                 receivers.add(str(meta))  # em.value IS the normalized receiver_type
@@ -1780,7 +1891,9 @@ def _test_ref_count(con, def_ids: list[int]) -> int:
             f"JOIN nodes sn ON sn.id=e.source_id "
             f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
             f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det_in_sql()}') "
-            f"AND COALESCE(sn.is_test,0)=1", def_ids).fetchone()
+            f"AND COALESCE(sn.is_test,0)=1",
+            def_ids,
+        ).fetchone()
         return int(row[0] or 0)
     except sqlite3.Error:
         return 0
@@ -1792,8 +1905,9 @@ def _name_or_path_matches(con, sym: str) -> bool:
             if con.execute("SELECT 1 FROM nodes WHERE name=? LIMIT 1", (variant,)).fetchone():
                 return True
         low = sym.lower()
-        if con.execute("SELECT 1 FROM nodes WHERE LOWER(file_path) LIKE '%'||?||'%' LIMIT 1",
-                       (low,)).fetchone():
+        if con.execute(
+            "SELECT 1 FROM nodes WHERE LOWER(file_path) LIKE '%'||?||'%' LIMIT 1", (low,)
+        ).fetchone():
             return True
     except sqlite3.Error:
         return True  # fail toward suppression (no false absence)
@@ -1802,9 +1916,13 @@ def _name_or_path_matches(con, sym: str) -> bool:
 
 def _has_content_fts(con) -> bool:
     try:
-        return con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' "
-            "AND name='symbol_content_fts' LIMIT 1").fetchone() is not None
+        return (
+            con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='symbol_content_fts' LIMIT 1"
+            ).fetchone()
+            is not None
+        )
     except sqlite3.Error:
         return False
 
@@ -1816,7 +1934,8 @@ def _content_passages_ready(con) -> bool:
     try:
         row = con.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
-            "AND name IN ('content_passages','content_passages_fts')").fetchone()
+            "AND name IN ('content_passages','content_passages_fts')"
+        ).fetchone()
     except sqlite3.Error:
         return False
     return bool(row) and int(row[0] or 0) == 2
@@ -1829,10 +1948,11 @@ def _passage_line(con, node_id: int, sym: str) -> int:
     miss/error/absent passage surface."""
     try:
         row = con.execute(
-            'SELECT p.start_line, p.end_line, p.content, p.content_hash '
-            'FROM content_passages_fts f JOIN content_passages p ON p.passage_id=f.rowid '
-            'WHERE p.node_id=? AND f.content MATCH ? ORDER BY f.rank LIMIT 1',
-            (node_id, '"' + sym.replace('"', "") + '"')).fetchone()
+            "SELECT p.start_line, p.end_line, p.content, p.content_hash "
+            "FROM content_passages_fts f JOIN content_passages p ON p.passage_id=f.rowid "
+            "WHERE p.node_id=? AND f.content MATCH ? ORDER BY f.rank LIMIT 1",
+            (node_id, '"' + sym.replace('"', "") + '"'),
+        ).fetchone()
     except sqlite3.Error:
         return 0
     return int(row[0]) if row and row[0] else 0
@@ -1841,11 +1961,12 @@ def _passage_line(con, node_id: int, sym: str) -> int:
 def _body_rows(con, sym: str, root: str) -> list[tuple]:
     try:
         raw = con.execute(
-            'SELECT n.id, n.file_path, n.start_line, n.name, n.label '
-            'FROM symbol_content_fts f JOIN nodes n ON n.id=f.rowid '
-            'WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test,0)=0 '
-            'ORDER BY n.file_path, n.start_line LIMIT 26',
-            ('"' + sym.replace('"', "") + '"',)).fetchall()
+            "SELECT n.id, n.file_path, n.start_line, n.name, n.label "
+            "FROM symbol_content_fts f JOIN nodes n ON n.id=f.rowid "
+            "WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
+            "ORDER BY n.file_path, n.start_line LIMIT 26",
+            ('"' + sym.replace('"', "") + '"',),
+        ).fetchall()
     except sqlite3.Error:
         return []
     # B-23: after the symbol_content_fts hit, cite the EXACT matching passage line from
@@ -1870,8 +1991,9 @@ def _namefold_hit(con, sym: str, root: str) -> tuple[str, dict] | None:
     """First fold variant that resolves to a deliverable def -> (variant, info)."""
     for variant in _fold_variants(sym):
         try:
-            hit = con.execute("SELECT 1 FROM nodes WHERE name=? AND COALESCE(is_test,0)=0 LIMIT 1",
-                              (variant,)).fetchone()
+            hit = con.execute(
+                "SELECT 1 FROM nodes WHERE name=? AND COALESCE(is_test,0)=0 LIMIT 1", (variant,)
+            ).fetchone()
         except sqlite3.Error:
             return None
         if not hit:
@@ -1914,8 +2036,11 @@ def classify_outcome(event: ToolEvent, state: GatewayState) -> str:
         if empty:
             if _namefold_hit(con, sym, root) is not None:
                 return ZERO_NAME
-            if _has_content_fts(con) and not _name_or_path_matches(con, sym) \
-                    and _body_rows(con, sym, root):
+            if (
+                _has_content_fts(con)
+                and not _name_or_path_matches(con, sym)
+                and _body_rows(con, sym, root)
+            ):
                 return ZERO_BEHAVIOR
             return ZERO_ABSENT
         # non-empty (hits)
@@ -1973,9 +2098,7 @@ _SEMANTIC_BOUNDARY_ORDER = (
 )
 
 
-def _observe_semantic_events(
-    event: ToolEvent, state: GatewayState
-) -> frozenset[str]:
+def _observe_semantic_events(event: ToolEvent, state: GatewayState) -> frozenset[str]:
     """Complete and cache the event's fine semantic truth exactly once.
 
     The environment seam may supply an authoritative set from exact pre/post
@@ -1988,17 +2111,14 @@ def _observe_semantic_events(
         if event.kind == KIND_EDIT:
             events.add("edit_result")
         elif event.kind == KIND_TEST and (
-            event.test_outcome in {"pass", "fail", "env_fail"}
-            or event.covering is not None
+            event.test_outcome in {"pass", "fail", "env_fail"} or event.covering is not None
         ):
             events.add("test_result")
         elif event.kind == KIND_VIEW:
             events.add("file_view")
         elif event.kind == KIND_SUBMIT:
             events.add("submit")
-    if event.kind == KIND_SEARCH and not (
-        {"failed_search", "search_result"} & events
-    ):
+    if event.kind == KIND_SEARCH and not ({"failed_search", "search_result"} & events):
         events.add(
             "failed_search"
             if _grep_result_empty(event.command, event.output or "")
@@ -2007,9 +2127,7 @@ def _observe_semantic_events(
     if event.kind != KIND_SEARCH and EVENT_FAILURE_OBS not in events:
         if _has_repo_trace(event, state):
             events.add(EVENT_FAILURE_OBS)
-    ordered = tuple(
-        boundary for boundary in _SEMANTIC_BOUNDARY_ORDER if boundary in events
-    )
+    ordered = tuple(boundary for boundary in _SEMANTIC_BOUNDARY_ORDER if boundary in events)
     event.semantic_events = ordered
     if not event.carrier_kind:
         event.carrier_kind = event.kind
@@ -2048,8 +2166,7 @@ def _event_actual(event: ToolEvent) -> str:
         if boundary in (event.semantic_events or ()):
             return boundary
     k = (event.kind or "").strip().lower()
-    return k if k in (KIND_SEARCH, KIND_VIEW, KIND_EDIT, KIND_TEST, KIND_SUBMIT) \
-        else EVENT_STEP0
+    return k if k in (KIND_SEARCH, KIND_VIEW, KIND_EDIT, KIND_TEST, KIND_SUBMIT) else EVENT_STEP0
 
 
 def _event_pref(event: ToolEvent) -> str:
@@ -2073,18 +2190,27 @@ def _event_pref(event: ToolEvent) -> str:
     }.get(actual, actual)
 
 
-def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: str,
-            body_lines: list[str], evidence: list[tuple[str, int]], tier: str,
-            producer: str, symbol: str = "",
-            confidence: float | None = None,
-            native_args: "dict | None" = None,
-            producer_inputs: "ProducerInputs | None" = None,
-            cap_feature_ids: "tuple[str, ...]" = (),
-             actual_event: str = "",
-             canonical_claim: str = "",
-             canonical_consequence: str = "",
-             canonical_subject: str = "",
-             observed_substrates: tuple[str, ...] = ()) -> EvidenceEnvelope:
+def _mk_add(
+    state: GatewayState,
+    event: ToolEvent,
+    *,
+    fact_kind: str,
+    target: str,
+    body_lines: list[str],
+    evidence: list[tuple[str, int]],
+    tier: str,
+    producer: str,
+    symbol: str = "",
+    confidence: float | None = None,
+    native_args: "dict | None" = None,
+    producer_inputs: "ProducerInputs | None" = None,
+    cap_feature_ids: "tuple[str, ...]" = (),
+    actual_event: str = "",
+    canonical_claim: str = "",
+    canonical_consequence: str = "",
+    canonical_subject: str = "",
+    observed_substrates: tuple[str, ...] = (),
+) -> EvidenceEnvelope:
     """Build the CANONICAL EvidenceEnvelope for one fact. Leak filtering happens
     HERE, before the build, so the derived dedup key hashes exactly the shipped
     payload+provenance (the F1 content discipline). The symbol rides ``fact_id``.
@@ -2101,9 +2227,7 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
     # on). Keyed by evidence_type, NOT producer, so two classes of one producer stale
     # independently. valid_until == graph_rev on an old graph.db (no sub-revs).
     graph_rev, valid_until = _revisions_for(state, fact_kind)
-    canonical_graph_revision = str(
-        getattr(state.canonical_revision, "graph", "") or ""
-    )
+    canonical_graph_revision = str(getattr(state.canonical_revision, "graph", "") or "")
     if canonical_graph_revision:
         graph_rev = canonical_graph_revision
         valid_until = canonical_graph_revision
@@ -2134,18 +2258,11 @@ def _mk_add(state: GatewayState, event: ToolEvent, *, fact_kind: str, target: st
         )
         revision = state.canonical_revision
         if contract is not None and isinstance(revision, RevisionVector):
-            subject = (
-                canonical_subject
-                or target
-                or symbol
-                or lineage.fact_class
-            ).strip()
+            subject = (canonical_subject or target or symbol or lineage.fact_class).strip()
             claim = canonical_claim.strip()
             consequence = canonical_consequence.strip()
             if not claim or not consequence:
-                raise ValueError(
-                    "canonical evidence requires producer-owned decision semantics"
-                )
+                raise ValueError("canonical evidence requires producer-owned decision semantics")
             canonical_semantics = CanonicalEvidenceSemantics(
                 decision_context=contract.decision_context,
                 roles=contract.roles,
@@ -2212,7 +2329,10 @@ def _def_partition_body(info: dict) -> list[str]:
 
 
 def _def_partition_inputs(
-    state: GatewayState, fact_kind: str, query: str, def_rows: "list[tuple]",
+    state: GatewayState,
+    fact_kind: str,
+    query: str,
+    def_rows: "list[tuple]",
 ) -> "ProducerInputs | None":
     """Build the render-neutral producer sidecar for a def-partition fact.
 
@@ -2253,7 +2373,9 @@ def _def_partition_inputs(
     )
 
 
-def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: str = "") -> list[EvidenceEnvelope]:
+def _produce_def_ref_partition(
+    event: ToolEvent, state: GatewayState, *, note: str = ""
+) -> list[EvidenceEnvelope]:
     audit = _producer_audit(
         state,
         event,
@@ -2283,28 +2405,31 @@ def _produce_def_ref_partition(event: ToolEvent, state: GatewayState, *, note: s
     body = ([note] if note else []) + _def_partition_body(info)
     target = info["def_sites"][0][0]
     inputs = _def_partition_inputs(state, "def_ref_partition", sym, info.get("def_rows") or [])
-    return audit.finish([_mk_add(
-        state,
-        event,
-        fact_kind="def_ref_partition",
-        target=target,
-        body_lines=body,
-        evidence=info["def_sites"],
-        tier=VERIFIED,
-        producer="def_ref_partition",
-        symbol=sym,
-        producer_inputs=inputs,
-        observed_substrates=("graph",),
-        canonical_subject=sym,
-        canonical_claim=(
-            f"{sym} resolves to {len(info['def_sites'])} "
-            "production definition site(s)."
-        ),
-        canonical_consequence=(
-            "Select the definition on the active execution path; "
-            "do not patch a test, vendored, or unrelated copy."
-        ),
-    )])
+    return audit.finish(
+        [
+            _mk_add(
+                state,
+                event,
+                fact_kind="def_ref_partition",
+                target=target,
+                body_lines=body,
+                evidence=info["def_sites"],
+                tier=VERIFIED,
+                producer="def_ref_partition",
+                symbol=sym,
+                producer_inputs=inputs,
+                observed_substrates=("graph",),
+                canonical_subject=sym,
+                canonical_claim=(
+                    f"{sym} resolves to {len(info['def_sites'])} production definition site(s)."
+                ),
+                canonical_consequence=(
+                    "Select the definition on the active execution path; "
+                    "do not patch a test, vendored, or unrelated copy."
+                ),
+            )
+        ]
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2340,7 +2465,9 @@ class SearchScopeSelection:
 
 
 def _record_scope_certification(
-    state: GatewayState, anchor_file: str, selection: SearchScopeSelection,
+    state: GatewayState,
+    anchor_file: str,
+    selection: SearchScopeSelection,
 ) -> None:
     """Emit the typed GT_SCOPE_NATIVE scope-certification decision (REFEREE-3 terminal).
 
@@ -2371,7 +2498,10 @@ def _record_scope_certification(
     if not anchor or _is_leaky(anchor):
         return
     _record_control(
-        state, "GT_SCOPE_NATIVE", "mini_seam.scope.native_render", "NO_EFFECT",
+        state,
+        "GT_SCOPE_NATIVE",
+        "mini_seam.scope.native_render",
+        "NO_EFFECT",
         candidate_bytes="",
         fact_class="localization",
         candidate_id=f"localization:{anchor}",
@@ -2380,7 +2510,8 @@ def _record_scope_certification(
 
 
 def _certified_search_scope(
-    state: GatewayState, anchor_file: str,
+    state: GatewayState,
+    anchor_file: str,
 ) -> SearchScopeSelection:
     """Return certified structural neighbours for the ranked top file.
 
@@ -2389,8 +2520,7 @@ def _certified_search_scope(
     revision, weak/name-match relations, and unsafe paths all fail closed.
     """
     db = state.graph_db or ""
-    if (not db or not anchor_file or _is_leaky(anchor_file)
-            or not os.path.isfile(db)):
+    if not db or not anchor_file or _is_leaky(anchor_file) or not os.path.isfile(db):
         return SearchScopeSelection()
     con = _connect_ro(db)
     if con is None:
@@ -2403,12 +2533,18 @@ def _certified_search_scope(
         revision = str(revision_row[0] or "") if revision_row else ""
         if not revision:
             return SearchScopeSelection()
-        graph_paths = [str(row[0] or "") for row in con.execute(
-            "SELECT DISTINCT file_path FROM nodes WHERE file_path IS NOT NULL"
-        )]
+        graph_paths = [
+            str(row[0] or "")
+            for row in con.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE file_path IS NOT NULL"
+            )
+        ]
         anchor_norm = _norm_fp(anchor_file)
-        anchors = [path for path in graph_paths
-                   if _norm_fp(_to_repo_rel(path, state.repo_root)) == anchor_norm]
+        anchors = [
+            path
+            for path in graph_paths
+            if _norm_fp(_to_repo_rel(path, state.repo_root)) == anchor_norm
+        ]
         if len(anchors) != 1:
             return SearchScopeSelection(graph_revision=revision)
         graph_anchor = anchors[0]
@@ -2424,8 +2560,7 @@ def _certified_search_scope(
             f"AND UPPER(COALESCE(e.type,'')) IN ('CALLS','IMPORTS') "
             f"AND LOWER(TRIM(COALESCE(e.resolution_method,''))) IN ({marks}) "
             f"AND COALESCE(e.confidence,0)>=?",
-            (graph_anchor, graph_anchor, graph_anchor, *methods,
-             _CERTIFIED_SCOPE_CONFIDENCE),
+            (graph_anchor, graph_anchor, graph_anchor, *methods, _CERTIFIED_SCOPE_CONFIDENCE),
         ).fetchall()
         best: dict[str, SearchScopeRelation] = {}
         for edge_id, method, confidence, raw_related in rows:
@@ -2435,22 +2570,33 @@ def _certified_search_scope(
             relation = SearchScopeRelation(
                 related_file=related,
                 resolution_method=str(method or "").strip().lower(),
-                confidence=float(confidence), edge_id=int(edge_id),
+                confidence=float(confidence),
+                edge_id=int(edge_id),
             )
             current = best.get(_norm_fp(related))
             if current is None or (
-                -relation.confidence, relation.related_file,
-                relation.resolution_method, relation.edge_id
+                -relation.confidence,
+                relation.related_file,
+                relation.resolution_method,
+                relation.edge_id,
             ) < (
-                -current.confidence, current.related_file,
-                current.resolution_method, current.edge_id
+                -current.confidence,
+                current.related_file,
+                current.resolution_method,
+                current.edge_id,
             ):
                 best[_norm_fp(related)] = relation
-        selected = tuple(sorted(
-            best.values(),
-            key=lambda row: (-row.confidence, row.related_file,
-                             row.resolution_method, row.edge_id),
-        )[:_SEARCH_SCOPE_TOPN])
+        selected = tuple(
+            sorted(
+                best.values(),
+                key=lambda row: (
+                    -row.confidence,
+                    row.related_file,
+                    row.resolution_method,
+                    row.edge_id,
+                ),
+            )[:_SEARCH_SCOPE_TOPN]
+        )
         selection = SearchScopeSelection(revision, selected)
         # The certification RAN to completion: record the correctly-silent NO_EFFECT
         # mediation (empty selection) so GT_SCOPE_NATIVE's terminal has a typed receipt.
@@ -2475,7 +2621,8 @@ def _pick_candidate_symbol(con, file_path: str, anchors: set[str]) -> "tuple[str
             f"SELECT name, start_line FROM nodes "
             f"WHERE file_path=? AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
             f"AND label IN ({labels_sql}) ORDER BY start_line",
-            (file_path, *_DEF_LABELS)).fetchall()
+            (file_path, *_DEF_LABELS),
+        ).fetchall()
     except sqlite3.Error:
         return None
     if not rows:
@@ -2483,7 +2630,7 @@ def _pick_candidate_symbol(con, file_path: str, anchors: set[str]) -> "tuple[str
     for name, ln in rows:  # prefer an anchor-named def (the file's issue reason)
         if name and (name or "").lower() in anchors:
             return (name, int(ln or 0))
-    name, ln = rows[0]                                     # else the first def
+    name, ln = rows[0]  # else the first def
     return (name, int(ln or 0)) if name else None
 
 
@@ -2538,14 +2685,14 @@ def _compute_ranked_localization_rows(
                     audit.note("candidate_path_empty", category="authority")
                 continue
             rel = _to_repo_rel(raw_fp, state.repo_root)
-            if _is_leaky(rel):        # firewall #1 (producer): a test/vendored candidate is
+            if _is_leaky(rel):  # firewall #1 (producer): a test/vendored candidate is
                 if audit is not None:
                     audit.note(
                         "candidate_path_leaky",
                         category="authority",
                         detail={"path": rel},
                     )
-                continue              # never a row (the localizer already demotes tests).
+                continue  # never a row (the localizer already demotes tests).
             picked = _pick_candidate_symbol(con, raw_fp, anchors)
             if picked is None:
                 if audit is not None:
@@ -2628,23 +2775,35 @@ def _produce_ranked_localization(event: ToolEvent, state: GatewayState) -> list[
     if not rows:
         return audit.finish([])
     top_file, _top_line, top_sym = rows[0]
-    body = [f"{p}:{ln}:{s}" for p, ln, s in rows]      # tag-free grep rows (hedge-free)
+    body = [f"{p}:{ln}:{s}" for p, ln, s in rows]  # tag-free grep rows (hedge-free)
     evidence = [(p, ln) for p, ln, _s in rows]
-    return audit.finish([_mk_add(state, event, fact_kind="localization", target=top_file,
-                    body_lines=body, evidence=evidence, tier=HYPOTHESIS,
-                    producer="ranked_localization", symbol=top_sym,
-                    cap_feature_ids=("GT_LOC_RESLOT",),
-                    native_args={"rows": rows},
-                    observed_substrates=("fts5", "graph"),
-                    canonical_subject=top_file,
-                    canonical_claim=(
-                        f"{top_file} is the highest-ranked production target; "
-                        f"{len(rows)} ranked candidate file(s) remain."
-                    ),
-                    canonical_consequence=(
-                        "Inspect the ranked target and its listed symbol before "
-                        "opening a broader repository branch."
-                    ))])
+    return audit.finish(
+        [
+            _mk_add(
+                state,
+                event,
+                fact_kind="localization",
+                target=top_file,
+                body_lines=body,
+                evidence=evidence,
+                tier=HYPOTHESIS,
+                producer="ranked_localization",
+                symbol=top_sym,
+                cap_feature_ids=("GT_LOC_RESLOT",),
+                native_args={"rows": rows},
+                observed_substrates=("fts5", "graph"),
+                canonical_subject=top_file,
+                canonical_claim=(
+                    f"{top_file} is the highest-ranked production target; "
+                    f"{len(rows)} ranked candidate file(s) remain."
+                ),
+                canonical_consequence=(
+                    "Inspect the ranked target and its listed symbol before "
+                    "opening a broader repository branch."
+                ),
+            )
+        ]
+    )
 
 
 def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -2678,30 +2837,40 @@ def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[Eviden
             category="correct_quiet",
         )
         return audit.finish([])
-    body = ['your hits are all test/vendored copies; the definition is here']
+    body = ["your hits are all test/vendored copies; the definition is here"]
     body += [f"def: {fp}:{ln}" for fp, ln in novel[:3]]
     # Only the NOVEL def-sites (not among the agent's grep hits) are the delivered fact,
     # so the sidecar carries exactly those rows.
     novel_norm = {(_norm_fp(fp), int(ln)) for fp, ln in novel}
     novel_rows = [
-        r for r in (info.get("def_rows") or [])
-        if (_norm_fp(r[1]), int(r[2])) in novel_norm
+        r for r in (info.get("def_rows") or []) if (_norm_fp(r[1]), int(r[2])) in novel_norm
     ]
     inputs = _def_partition_inputs(state, "wrong_surface", sym, novel_rows)
-    return audit.finish([_mk_add(state, event, fact_kind="wrong_surface", target=novel[0][0],
-                    body_lines=body, evidence=novel, tier=VERIFIED,
-                    producer="wrong_surface", symbol=sym,
-                    producer_inputs=inputs,
-                    observed_substrates=("graph",),
-                    canonical_subject=sym,
-                    canonical_claim=(
-                        f"The observed hits for {sym} exclude its production "
-                        f"definition; {len(novel)} production site(s) are listed."
-                    ),
-                    canonical_consequence=(
-                        "Move target selection to a listed production definition "
-                        "before editing."
-                    ))])
+    return audit.finish(
+        [
+            _mk_add(
+                state,
+                event,
+                fact_kind="wrong_surface",
+                target=novel[0][0],
+                body_lines=body,
+                evidence=novel,
+                tier=VERIFIED,
+                producer="wrong_surface",
+                symbol=sym,
+                producer_inputs=inputs,
+                observed_substrates=("graph",),
+                canonical_subject=sym,
+                canonical_claim=(
+                    f"The observed hits for {sym} exclude its production "
+                    f"definition; {len(novel)} production site(s) are listed."
+                ),
+                canonical_consequence=(
+                    "Move target selection to a listed production definition before editing."
+                ),
+            )
+        ]
+    )
 
 
 def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -2736,19 +2905,29 @@ def _produce_name_fold(event: ToolEvent, state: GatewayState) -> list[EvidenceEn
     # The fold resolves ``sym`` to the INDEXED name ``variant``; the def rows are keyed on
     # ``variant`` (``_resolve_symbol_defs(con, variant)``), so the query identity is variant.
     inputs = _def_partition_inputs(state, "name_fold", variant, info.get("def_rows") or [])
-    return audit.finish([_mk_add(state, event, fact_kind="name_fold", target=info["def_sites"][0][0],
-                    body_lines=body, evidence=info["def_sites"], tier=VERIFIED,
-                    producer="name_fold", symbol=sym,
-                    producer_inputs=inputs,
-                    observed_substrates=("graph",),
-                    canonical_subject=sym,
-                    canonical_claim=(
-                        f"{sym} resolves in the repository index as {variant}."
-                    ),
-                    canonical_consequence=(
-                        f"Use the indexed identity {variant} and its production "
-                        "definition sites for the next lookup."
-                    ))])
+    return audit.finish(
+        [
+            _mk_add(
+                state,
+                event,
+                fact_kind="name_fold",
+                target=info["def_sites"][0][0],
+                body_lines=body,
+                evidence=info["def_sites"],
+                tier=VERIFIED,
+                producer="name_fold",
+                symbol=sym,
+                producer_inputs=inputs,
+                observed_substrates=("graph",),
+                canonical_subject=sym,
+                canonical_claim=(f"{sym} resolves in the repository index as {variant}."),
+                canonical_consequence=(
+                    f"Use the indexed identity {variant} and its production "
+                    "definition sites for the next lookup."
+                ),
+            )
+        ]
+    )
 
 
 def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
@@ -2793,21 +2972,33 @@ def _produce_body(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelop
         if name and node_id > 0
     ]
     inputs = _def_partition_inputs(state, "body_concept", sym, def_rows)
-    return audit.finish([_mk_add(state, event, fact_kind="body_concept", target=rows[0][0],
-                    body_lines=body, evidence=evidence, tier=INFO,
-                    producer="body_concept", symbol=sym,
-                    native_args={"rows": native_rows},
-                    producer_inputs=inputs,
-                    observed_substrates=("graph",),
-                    canonical_subject=sym,
-                    canonical_claim=(
-                        f"{len(rows)} production function body/bodies mention "
-                        f"the behavior concept {sym}."
-                    ),
-                    canonical_consequence=(
-                        "Use the listed concept-bearing functions as localization "
-                        "candidates; identity resolution remains uncertain."
-                    ))])
+    return audit.finish(
+        [
+            _mk_add(
+                state,
+                event,
+                fact_kind="body_concept",
+                target=rows[0][0],
+                body_lines=body,
+                evidence=evidence,
+                tier=INFO,
+                producer="body_concept",
+                symbol=sym,
+                native_args={"rows": native_rows},
+                producer_inputs=inputs,
+                observed_substrates=("graph",),
+                canonical_subject=sym,
+                canonical_claim=(
+                    f"{len(rows)} production function body/bodies mention "
+                    f"the behavior concept {sym}."
+                ),
+                canonical_consequence=(
+                    "Use the listed concept-bearing functions as localization "
+                    "candidates; identity resolution remains uncertain."
+                ),
+            )
+        ]
+    )
 
 
 def _edit_related_to_stem(edit_blob: str, sym: str) -> bool:
@@ -2834,14 +3025,18 @@ def _zero_absent_repeat_ok(event: ToolEvent, state: GatewayState) -> bool:
         e = state.ledger.get(_norm_stem(tok))
         if not e:
             continue
-        prior_zero = [i for i, o in zip(e["probe_indices"], e["outcomes"])
-                      if o == "zero" and i < event.action_index]
+        prior_zero = [
+            i
+            for i, o in zip(e["probe_indices"], e["outcomes"])
+            if o == "zero" and i < event.action_index
+        ]
         if not prior_zero:
             continue
         prev = max(prior_zero)
-        if any(prev < ee["index"] < event.action_index
-               and _edit_related_to_stem(ee["blob"], tok)
-               for ee in state.edit_events):
+        if any(
+            prev < ee["index"] < event.action_index and _edit_related_to_stem(ee["blob"], tok)
+            for ee in state.edit_events
+        ):
             continue  # a RELATED edit intervened -> the agent may have created it
         return True
     return False
@@ -2899,10 +3094,14 @@ def _destination_already_exists(suggested_path: str, state: GatewayState) -> boo
         return False
 
 
-def _produce_change_surface(event: ToolEvent, state: GatewayState,
-                            *, require_repeat: bool = True,
-                            drop_existing_destinations: bool = False,
-                            post_creation: bool = False) -> list[EvidenceEnvelope]:
+def _produce_change_surface(
+    event: ToolEvent,
+    state: GatewayState,
+    *,
+    require_repeat: bool = True,
+    drop_existing_destinations: bool = False,
+    post_creation: bool = False,
+) -> list[EvidenceEnvelope]:
     # ``require_repeat`` guards ONLY the search-probe ordering predicate, which is meaningless for
     # an edit event (there is no probe to repeat). The edit-path caller passes False; the
     # ZERO_ABSENT caller keeps the historical True => byte-identical on that route.
@@ -2937,21 +3136,18 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState,
         body += [ev for ev in d.evidence[:4] if not _body_line_leaky(ev)]
         repository_witness_rows: list[RepositoryWitnessRow] = []
         for witness in getattr(d, "repository_witnesses", ()) or ():
-            witness_file = _to_repo_rel(
-                str(getattr(witness, "file", "") or ""), state.repo_root
-            )
+            witness_file = _to_repo_rel(str(getattr(witness, "file", "") or ""), state.repo_root)
             witness_line = getattr(witness, "line", 0)
             witness_kind = str(getattr(witness, "kind", "") or "").strip()
-            witness_identity = str(
-                getattr(witness, "identity", "") or ""
-            ).strip()
+            witness_identity = str(getattr(witness, "identity", "") or "").strip()
             if (
                 not witness_file
                 or _is_leaky(witness_file)
                 or not isinstance(witness_line, int)
                 or isinstance(witness_line, bool)
                 or witness_line <= 0
-                or witness_kind not in {
+                or witness_kind
+                not in {
                     "template_definition",
                     "template_lexical_reference",
                     "registration_reference",
@@ -2968,18 +3164,18 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState,
             )
             if source_state is None:
                 continue
-            repository_witness_rows.append(RepositoryWitnessRow(
-                file=witness_file,
-                line=witness_line,
-                kind=witness_kind,
-                identity=witness_identity,
-                source_state=source_state,
-            ))
+            repository_witness_rows.append(
+                RepositoryWitnessRow(
+                    file=witness_file,
+                    line=witness_line,
+                    kind=witness_kind,
+                    identity=witness_identity,
+                    source_state=source_state,
+                )
+            )
         producer_inputs = None
         if repository_witness_rows:
-            graph_revision, _valid_until = _revisions_for(
-                state, "new_file_destination"
-            )
+            graph_revision, _valid_until = _revisions_for(state, "new_file_destination")
             producer_inputs = ProducerInputs(
                 schema=PRODUCER_INPUTS_SCHEMA,
                 evidence_type="new_file_destination",
@@ -2988,49 +3184,65 @@ def _produce_change_surface(event: ToolEvent, state: GatewayState,
                 after_state=None,
                 caller_rows=(),
                 graph_revision=graph_revision,
-                repository_witness_rows=tuple(
-                    sorted(set(repository_witness_rows))
+                repository_witness_rows=tuple(sorted(set(repository_witness_rows))),
+            )
+        out.append(
+            _mk_add(
+                state,
+                event,
+                fact_kind="new_file_destination",
+                target=d.suggested_path,
+                body_lines=body,
+                evidence=[],
+                tier=HYPOTHESIS,
+                producer="change_surface",
+                symbol=d.entity,
+                producer_inputs=producer_inputs,
+                observed_substrates=("graph",),
+                cap_feature_ids=("GT_CHANGE_SURFACE",),
+                canonical_subject=d.entity,
+                canonical_claim=(
+                    f"{d.suggested_path} is the repository-derived "
+                    f"destination for the missing {d.entity} surface."
+                ),
+                canonical_consequence=(
+                    "Follow the listed sibling/template and registration "
+                    "precedent when creating the new surface."
                 ),
             )
-        out.append(_mk_add(state, event, fact_kind="new_file_destination", target=d.suggested_path,
-                           body_lines=body, evidence=[], tier=HYPOTHESIS,
-                           producer="change_surface", symbol=d.entity,
-                           producer_inputs=producer_inputs,
-                           observed_substrates=("graph",),
-                           cap_feature_ids=("GT_CHANGE_SURFACE",),
-                           canonical_subject=d.entity,
-                           canonical_claim=(
-                               f"{d.suggested_path} is the repository-derived "
-                               f"destination for the missing {d.entity} surface."
-                           ),
-                           canonical_consequence=(
-                               "Follow the listed sibling/template and registration "
-                               "precedent when creating the new surface."
-                           )))
+        )
     for m in res.missing_roles:
         tgt = m.registration_file or (m.sibling_files[0] if m.sibling_files else m.entity)
         if _is_leaky(tgt):
             continue
-        ev_rows = [(m.registration_file, ln) for ln, _ in m.registration_lines] if m.registration_file else []
+        ev_rows = (
+            [(m.registration_file, ln) for ln, _ in m.registration_lines]
+            if m.registration_file
+            else []
+        )
         body = [ev for ev in m.evidence[:4] if not _body_line_leaky(ev)]
         missing_role_kind = (
-            f"missing_role_postcreate:{m.role}"
-            if post_creation else f"missing_role:{m.role}"
+            f"missing_role_postcreate:{m.role}" if post_creation else f"missing_role:{m.role}"
         )
-        env = _mk_add(state, event, fact_kind=missing_role_kind, target=tgt,
-                      body_lines=body, evidence=ev_rows,
-                      tier=HYPOTHESIS, producer="change_surface", symbol=m.entity,
-                      observed_substrates=("graph",),
-                      cap_feature_ids=("GT_CHANGE_SURFACE",),
-                      canonical_subject=m.entity,
-                      canonical_claim=(
-                          f"{m.entity} is missing the repository role {m.role} "
-                          f"at {tgt}."
-                      ),
-                      canonical_consequence=(
-                          "Complete the missing companion or registration role "
-                          "before treating the new-file change as integrated."
-                      ))
+        env = _mk_add(
+            state,
+            event,
+            fact_kind=missing_role_kind,
+            target=tgt,
+            body_lines=body,
+            evidence=ev_rows,
+            tier=HYPOTHESIS,
+            producer="change_surface",
+            symbol=m.entity,
+            observed_substrates=("graph",),
+            cap_feature_ids=("GT_CHANGE_SURFACE",),
+            canonical_subject=m.entity,
+            canonical_claim=(f"{m.entity} is missing the repository role {m.role} at {tgt}."),
+            canonical_consequence=(
+                "Complete the missing companion or registration role "
+                "before treating the new-file change as integrated."
+            ),
+        )
         out.append(env)
         # B-NFP: capture the producer-owned registration snapshot (the exact registry bytes,
         # sibling members, and git commit anchor the claim derives from) so the offline
@@ -3046,11 +3258,14 @@ def _capture_registration_snapshot(res, missing_role, state, candidate_id: str) 
     """Build + stash the newfile_precedent registration snapshot for one delivered claim.
     Correct-or-quiet: any capture fault leaves nothing stashed (no attestation persisted)."""
     try:
-        from groundtruth.runtime.newfile_precedent_attestation import (
-            build_registration_snapshot)
+        from groundtruth.runtime.newfile_precedent_attestation import build_registration_snapshot
+
         members = next(
-            (g["members"] for g in res.sibling_groups
-             if g.get("registry_file") == missing_role.registration_file),
+            (
+                g["members"]
+                for g in res.sibling_groups
+                if g.get("registry_file") == missing_role.registration_file
+            ),
             [],
         )
         snapshot = build_registration_snapshot(
@@ -3082,8 +3297,11 @@ def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelo
     root = (state.repo_root or "").strip()
     if not root or root.replace("\\", "/") == "/":
         _record_control(
-            state, "GT_GATEWAY", "gateway.augment.candidate_admission",
-            "SUPPRESSED", fact_class="localization",
+            state,
+            "GT_GATEWAY",
+            "gateway.augment.candidate_admission",
+            "SUPPRESSED",
+            fact_class="localization",
             candidate_id="trace_frame:root_unresolved",
             reason="repo_root_unresolved_sentinel",
         )
@@ -3113,27 +3331,37 @@ def _produce_trace(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelo
         origin = classify_frame_origin(rel, state.repo_root)
         if origin is not FrameOrigin.REPOSITORY:
             _record_control(
-                state, "GT_GATEWAY", "gateway.augment.candidate_admission",
-                "SUPPRESSED", fact_class="localization",
+                state,
+                "GT_GATEWAY",
+                "gateway.augment.candidate_admission",
+                "SUPPRESSED",
+                fact_class="localization",
                 candidate_id=f"trace_frame:{_norm_fp(rel)}:{fr.line}",
                 reason=f"frame_origin:{origin.value}",
             )
             continue
         loc = f"{rel}:{fr.line}" + (f" in {fr.func}" if fr.func else "")
-        return [_mk_add(state, event, fact_kind="trace_frame", target=rel,
-                        body_lines=[f"deepest in-repo frame: {loc}"],
-                        evidence=[(rel, fr.line)], tier=WARNING, producer="trace",
-                        symbol=fr.func or rel, actual_event=EVENT_FAILURE_OBS,
-                        observed_substrates=("repository_paths",),
-                        canonical_subject=fr.func or rel,
-                        canonical_claim=(
-                            f"{loc} is the deepest observed in-repository "
-                            "failure frame."
-                        ),
-                        canonical_consequence=(
-                            "Prioritize this executed frame for failure "
-                            "localization before weaker static candidates."
-                        ))]
+        return [
+            _mk_add(
+                state,
+                event,
+                fact_kind="trace_frame",
+                target=rel,
+                body_lines=[f"deepest in-repo frame: {loc}"],
+                evidence=[(rel, fr.line)],
+                tier=WARNING,
+                producer="trace",
+                symbol=fr.func or rel,
+                actual_event=EVENT_FAILURE_OBS,
+                observed_substrates=("repository_paths",),
+                canonical_subject=fr.func or rel,
+                canonical_claim=(f"{loc} is the deepest observed in-repository failure frame."),
+                canonical_consequence=(
+                    "Prioritize this executed frame for failure "
+                    "localization before weaker static candidates."
+                ),
+            )
+        ]
     return []
 
 
@@ -3173,46 +3401,63 @@ def _produce_patch_delta_inner(event: ToolEvent, state: GatewayState) -> list[Ev
     for sm in res.signature_mismatches:
         if _is_leaky(sm.caller_file):
             continue
-        body = [f"{sm.caller}() call passes {sm.positional_args} positional arg(s); "
-                f"{sm.symbol}() now takes {sm.new_min_params}-{sm.new_max_params}",
-                sm.call_site_text]
+        body = [
+            f"{sm.caller}() call passes {sm.positional_args} positional arg(s); "
+            f"{sm.symbol}() now takes {sm.new_min_params}-{sm.new_max_params}",
+            sm.call_site_text,
+        ]
         # SM-10: attach the STRUCTURED arity fields so the adapter can render the SM-1
         # mypy/gopls arity diagnostic natively (native_render.render_signature_delta_native)
         # instead of _render_generic prose. Side-car only — identity/dedup UNCHANGED.
         graph_revision, _valid_until = _revisions_for(state, "signature_mismatch")
-        before_state = SourceState(
-            file=sm.edited_file,
-            sha256=getattr(sm, "before_sha256", ""),
-            revision=f"edit:{event.action_index}:before",
-        ) if getattr(sm, "before_sha256", "") else None
-        after_state = SourceState(
-            file=sm.edited_file,
-            sha256=getattr(sm, "after_sha256", ""),
-            revision=f"edit:{event.action_index}:after",
-        ) if getattr(sm, "after_sha256", "") else None
-        caller_state = SourceState(
-            file=sm.caller_file,
-            sha256=getattr(sm, "caller_source_sha256", ""),
-            revision="source:" + getattr(sm, "caller_source_sha256", ""),
-        ) if getattr(sm, "caller_source_sha256", "") else None
+        before_state = (
+            SourceState(
+                file=sm.edited_file,
+                sha256=getattr(sm, "before_sha256", ""),
+                revision=f"edit:{event.action_index}:before",
+            )
+            if getattr(sm, "before_sha256", "")
+            else None
+        )
+        after_state = (
+            SourceState(
+                file=sm.edited_file,
+                sha256=getattr(sm, "after_sha256", ""),
+                revision=f"edit:{event.action_index}:after",
+            )
+            if getattr(sm, "after_sha256", "")
+            else None
+        )
+        caller_state = (
+            SourceState(
+                file=sm.caller_file,
+                sha256=getattr(sm, "caller_source_sha256", ""),
+                revision="source:" + getattr(sm, "caller_source_sha256", ""),
+            )
+            if getattr(sm, "caller_source_sha256", "")
+            else None
+        )
         producer_inputs = ProducerInputs(
             schema=PRODUCER_INPUTS_SCHEMA,
             evidence_type="signature_mismatch",
             candidate_id="",
             before_state=before_state,
             after_state=after_state,
-            caller_rows=(CallerEvidenceRow(
-                identity=sm.caller,
-                file=sm.caller_file,
-                line=sm.caller_line,
-                confidence=sm.confidence,
-                resolution_method=getattr(sm, "resolution_method", "") or None,
-                source_state=caller_state,
-                edge_id=getattr(sm, "edge_id", None),
-                definition_id=getattr(sm, "definition_id", None),
-            ),),
-                graph_revision=graph_revision,
-                signature_changes=(SignatureChange(
+            caller_rows=(
+                CallerEvidenceRow(
+                    identity=sm.caller,
+                    file=sm.caller_file,
+                    line=sm.caller_line,
+                    confidence=sm.confidence,
+                    resolution_method=getattr(sm, "resolution_method", "") or None,
+                    source_state=caller_state,
+                    edge_id=getattr(sm, "edge_id", None),
+                    definition_id=getattr(sm, "definition_id", None),
+                ),
+            ),
+            graph_revision=graph_revision,
+            signature_changes=(
+                SignatureChange(
                     symbol=sm.symbol,
                     edited_file=getattr(sm, "edited_file", ""),
                     before_parameters=None,
@@ -3222,34 +3467,45 @@ def _produce_patch_delta_inner(event: ToolEvent, state: GatewayState) -> list[Ev
                     new_min_params=getattr(sm, "new_min_params", None),
                     new_max_params=getattr(sm, "new_max_params", None),
                     positional_args=getattr(sm, "positional_args", None),
-                ),),
+                ),
+            ),
         )
-        out.append(_mk_add(state, event, fact_kind="signature_mismatch", target=sm.caller_file,
-                           body_lines=body, evidence=[(sm.caller_file, sm.caller_line)],
-                           tier=WARNING, producer="patch_delta", symbol=sm.symbol,
-                            confidence=max(0.0, min(1.0, sm.confidence)),
-                            cap_feature_ids=("GT_PATCH_DELTA",),
-                            producer_inputs=producer_inputs,
-                            observed_substrates=("graph",),
-                            native_args={
-                               "caller_file": sm.caller_file,
-                               "caller_line": sm.caller_line,
-                               "symbol": sm.symbol,
-                               "positional_args": sm.positional_args,
-                               "new_min_params": sm.new_min_params,
-                               "new_max_params": sm.new_max_params,
-                           },
-                           canonical_subject=sm.symbol,
-                           canonical_claim=(
-                               f"{sm.caller_file}:{sm.caller_line} passes "
-                               f"{sm.positional_args} positional argument(s) to "
-                               f"{sm.symbol}, whose edited signature accepts "
-                               f"{sm.new_min_params}-{sm.new_max_params}."
-                           ),
-                           canonical_consequence=(
-                               "Update the impacted caller or restore a compatible "
-                               "signature before validating the patch."
-                           )))
+        out.append(
+            _mk_add(
+                state,
+                event,
+                fact_kind="signature_mismatch",
+                target=sm.caller_file,
+                body_lines=body,
+                evidence=[(sm.caller_file, sm.caller_line)],
+                tier=WARNING,
+                producer="patch_delta",
+                symbol=sm.symbol,
+                confidence=max(0.0, min(1.0, sm.confidence)),
+                cap_feature_ids=("GT_PATCH_DELTA",),
+                producer_inputs=producer_inputs,
+                observed_substrates=("graph",),
+                native_args={
+                    "caller_file": sm.caller_file,
+                    "caller_line": sm.caller_line,
+                    "symbol": sm.symbol,
+                    "positional_args": sm.positional_args,
+                    "new_min_params": sm.new_min_params,
+                    "new_max_params": sm.new_max_params,
+                },
+                canonical_subject=sm.symbol,
+                canonical_claim=(
+                    f"{sm.caller_file}:{sm.caller_line} passes "
+                    f"{sm.positional_args} positional argument(s) to "
+                    f"{sm.symbol}, whose edited signature accepts "
+                    f"{sm.new_min_params}-{sm.new_max_params}."
+                ),
+                canonical_consequence=(
+                    "Update the impacted caller or restore a compatible "
+                    "signature before validating the patch."
+                ),
+            )
+        )
     for cs in res.companion_surfaces:
         if _is_leaky(cs.file):
             continue
@@ -3260,26 +3516,35 @@ def _produce_patch_delta_inner(event: ToolEvent, state: GatewayState) -> list[Ev
         # so it supplies render_registration_native's args directly via native_args (no
         # re-parsing of GT's own prose). ``line`` = the first referencing line (the surface
         # location); absent -> the renderer abstains ("") -> generic fallback.
-        out.append(_mk_add(state, event, fact_kind="companion_surface", target=cs.file,
-                           body_lines=body, evidence=ev_rows,
-                           tier=WARNING, producer="patch_delta", symbol=cs.symbol,
-                           cap_feature_ids=("GT_PATCH_DELTA",),
-                           observed_substrates=("graph",),
-                           native_args={
-                               "file": cs.file,
-                               "line": (ev_rows[0][1] if ev_rows else None),
-                               "symbol": cs.symbol,
-                               "siblings": list(cs.siblings),
-                           },
-                           canonical_subject=cs.symbol,
-                           canonical_claim=(
-                               f"{cs.file} registers sibling surfaces but does "
-                               f"not register {cs.symbol}."
-                           ),
-                           canonical_consequence=(
-                               "Update the companion registration surface so the "
-                               "new or changed symbol participates in integration."
-                           )))
+        out.append(
+            _mk_add(
+                state,
+                event,
+                fact_kind="companion_surface",
+                target=cs.file,
+                body_lines=body,
+                evidence=ev_rows,
+                tier=WARNING,
+                producer="patch_delta",
+                symbol=cs.symbol,
+                cap_feature_ids=("GT_PATCH_DELTA",),
+                observed_substrates=("graph",),
+                native_args={
+                    "file": cs.file,
+                    "line": (ev_rows[0][1] if ev_rows else None),
+                    "symbol": cs.symbol,
+                    "siblings": list(cs.siblings),
+                },
+                canonical_subject=cs.symbol,
+                canonical_claim=(
+                    f"{cs.file} registers sibling surfaces but does not register {cs.symbol}."
+                ),
+                canonical_consequence=(
+                    "Update the companion registration surface so the "
+                    "new or changed symbol participates in integration."
+                ),
+            )
+        )
     # cochange is an INTERNAL RANKING SIGNAL ONLY — it has NO model-facing native form
     # (SM-1 ``native_render.render_cochange_native`` returns "" by construction; the
     # doctrine pins co-change as a ranking prior, never a delivered fact). Wave-2
@@ -3313,7 +3578,7 @@ def _produce_patch_delta_inner(event: ToolEvent, state: GatewayState) -> list[Ev
 _DEF_HEAD_RE = re.compile(
     r"(?:^|[^.\w])"
     r"(?:def|func|fn|function|fun|proc|sub)\s+"
-    r"(?:\([^()]*\)\s*)?"                      # optional Go receiver `(r *T) `
+    r"(?:\([^()]*\)\s*)?"  # optional Go receiver `(r *T) `
     r"(?P<name>[A-Za-z_]\w*)\s*\("
 )
 _PARAM_LEAD_IDENT_RE = re.compile(r"[*&\s]*([A-Za-z_]\w*)")
@@ -3329,7 +3594,7 @@ def _balanced_parens(s: str, open_idx: int) -> str | None:
         elif c == ")":
             depth -= 1
             if depth == 0:
-                return s[open_idx + 1:i]
+                return s[open_idx + 1 : i]
     return None
 
 
@@ -3407,7 +3672,8 @@ def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[
             f"SELECT id FROM nodes WHERE name=? AND file_path=? "
             f"AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
             f"AND label IN ({labels_sql})",
-            (sym, rel, *_DEF_LABELS)).fetchall()
+            (sym, rel, *_DEF_LABELS),
+        ).fetchall()
     except sqlite3.Error:
         return []
     def_ids = [r[0] for r in drows]
@@ -3419,35 +3685,45 @@ def _fact_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[
     out: list[dict] = []
     for c in callers:
         cf = _norm_fp(_to_repo_rel(c.get("file") or "", root))
-        if not cf or cf == nrel:            # cross-file only
+        if not cf or cf == nrel:  # cross-file only
             continue
-        if _is_leaky(cf):                   # leak law: never a test/vendored caller
+        if _is_leaky(cf):  # leak law: never a test/vendored caller
             continue
         key = (c.get("name") or "", cf)
         if key in seen:
             continue
         seen.add(key)
-        out.append({
-            "identity": c.get("name") or "",
-            "file": cf,
-            "line": int(c.get("line") or 0),
-            "confidence": c.get("confidence"),
-            "resolution_method": c.get("resolution_method") or None,
-            "edge_id": c.get("edge_id"),
-            "definition_id": c.get("definition_id"),
-            "caller_node_id": c.get("caller_node_id"),
-        })
+        out.append(
+            {
+                "identity": c.get("name") or "",
+                "file": cf,
+                "line": int(c.get("line") or 0),
+                "confidence": c.get("confidence"),
+                "resolution_method": c.get("resolution_method") or None,
+                "edge_id": c.get("edge_id"),
+                "definition_id": c.get("definition_id"),
+                "caller_node_id": c.get("caller_node_id"),
+            }
+        )
     out.sort(key=lambda row: (row["file"], row["line"], row["identity"]))
     return out
 
 
-_CALLER_USAGE_KINDS = frozenset({
-    "boolean_check", "destructure_tuple", "exception_guard", "iterated",
-})
+_CALLER_USAGE_KINDS = frozenset(
+    {
+        "boolean_check",
+        "destructure_tuple",
+        "exception_guard",
+        "iterated",
+    }
+)
 
 
 def _typed_caller_usage_rows(
-    con: sqlite3.Connection, sites: list[dict], symbol: str, graph_revision: str,
+    con: sqlite3.Connection,
+    sites: list[dict],
+    symbol: str,
+    graph_revision: str,
 ) -> tuple[CallerUsageEvidenceRow, ...]:
     """Return exact, source-attributed usage properties for these caller rows.
 
@@ -3457,14 +3733,19 @@ def _typed_caller_usage_rows(
     therefore remain quiet rather than upgrading a parsed string into truth.
     """
     try:
-        columns = {
-            str(row[1]) for row in con.execute("PRAGMA table_info(properties)")
-        }
+        columns = {str(row[1]) for row in con.execute("PRAGMA table_info(properties)")}
     except sqlite3.Error:
         return ()
     required = {
-        "id", "node_id", "kind", "value", "line", "confidence",
-        "extractor", "evidence_method", "source_revision",
+        "id",
+        "node_id",
+        "kind",
+        "value",
+        "line",
+        "confidence",
+        "extractor",
+        "evidence_method",
+        "source_revision",
     }
     if not required.issubset(columns):
         return ()
@@ -3489,8 +3770,14 @@ def _typed_caller_usage_rows(
         return ()
     out: list[CallerUsageEvidenceRow] = []
     for (
-        property_id, node_id, value, line, confidence, extractor,
-        evidence_method, source_revision,
+        property_id,
+        node_id,
+        value,
+        line,
+        confidence,
+        extractor,
+        evidence_method,
+        source_revision,
     ) in rows:
         if not isinstance(value, str) or ":" not in value:
             continue
@@ -3505,11 +3792,15 @@ def _typed_caller_usage_rows(
             or callee != symbol
             or not separator
             or not call_site.strip()
-            or not isinstance(property_id, int) or isinstance(property_id, bool)
+            or not isinstance(property_id, int)
+            or isinstance(property_id, bool)
             or property_id <= 0
-            or not isinstance(line, int) or isinstance(line, bool) or line <= 0
+            or not isinstance(line, int)
+            or isinstance(line, bool)
+            or line <= 0
             or not isinstance(confidence, (int, float))
-            or isinstance(confidence, bool) or float(confidence) < 0.7
+            or isinstance(confidence, bool)
+            or float(confidence) < 0.7
             or not all(
                 isinstance(item, str) and item.strip()
                 for item in (extractor, evidence_method, source_revision)
@@ -3517,20 +3808,22 @@ def _typed_caller_usage_rows(
             or source_revision.strip() != graph_revision
         ):
             continue
-        out.append(CallerUsageEvidenceRow(
-            property_id=property_id,
-            caller_node_id=node_id,
-            caller_identity=str(site["identity"]),
-            caller_file=str(site["file"]),
-            usage_kind=usage_kind,
-            callee=callee,
-            call_site=call_site.strip(),
-            line=line,
-            confidence=float(confidence),
-            source_revision=source_revision.strip(),
-            extractor=extractor.strip(),
-            evidence_method=evidence_method.strip(),
-        ))
+        out.append(
+            CallerUsageEvidenceRow(
+                property_id=property_id,
+                caller_node_id=node_id,
+                caller_identity=str(site["identity"]),
+                caller_file=str(site["file"]),
+                usage_kind=usage_kind,
+                callee=callee,
+                call_site=call_site.strip(),
+                line=line,
+                confidence=float(confidence),
+                source_revision=source_revision.strip(),
+                extractor=extractor.strip(),
+                evidence_method=evidence_method.strip(),
+            )
+        )
     return tuple(sorted(set(out)))
 
 
@@ -3618,12 +3911,8 @@ def _produce_caller_contract_view(
         if not rel:
             return ""
         try:
-            root = os.path.normcase(
-                os.path.realpath(os.path.abspath(state.repo_root))
-            )
-            candidate = os.path.normcase(
-                os.path.realpath(os.path.abspath(os.path.join(root, rel)))
-            )
+            root = os.path.normcase(os.path.realpath(os.path.abspath(state.repo_root)))
+            candidate = os.path.normcase(os.path.realpath(os.path.abspath(os.path.join(root, rel))))
             if os.path.commonpath((root, candidate)) != root:
                 return ""
         except (OSError, TypeError, ValueError):
@@ -3642,11 +3931,7 @@ def _produce_caller_contract_view(
         invocation_site="gateway.view.caller_contract_view",
     )
     viewed = tuple(
-        dict.fromkeys(
-            rel
-            for path in event.viewed_files
-            if (rel := confined_repo_file(path))
-        )
+        dict.fromkeys(rel for path in event.viewed_files if (rel := confined_repo_file(path)))
     )
     if not viewed:
         audit.note("no_confined_viewed_file", category="dependency_failure")
@@ -3700,13 +3985,16 @@ def _produce_caller_contract_view(
                 definitions.append((name, line))
             contracts: list[tuple[str, list[dict]]] = []
             for symbol, definition_line in definitions:
-                if _validated_repository_witness_state(
-                    event,
-                    state,
-                    rel,
-                    definition_line,
-                    symbol,
-                ) is None:
+                if (
+                    _validated_repository_witness_state(
+                        event,
+                        state,
+                        rel,
+                        definition_line,
+                        symbol,
+                    )
+                    is None
+                ):
                     continue
                 sites: list[dict] = []
                 for site in _fact_callers_of_symbol_in_file(
@@ -3748,17 +4036,19 @@ def _produce_caller_contract_view(
                     )
                     if source_state is None:
                         continue
-                    sites.append({
-                        **site,
-                        "identity": identity,
-                        "file": caller_file,
-                        "line": line,
-                        "confidence": float(confidence),
-                        "resolution_method": resolution_method,
-                        "edge_id": edge_id,
-                        "definition_id": definition_id,
-                        "source_state": source_state,
-                    })
+                    sites.append(
+                        {
+                            **site,
+                            "identity": identity,
+                            "file": caller_file,
+                            "line": line,
+                            "confidence": float(confidence),
+                            "resolution_method": resolution_method,
+                            "edge_id": edge_id,
+                            "definition_id": definition_id,
+                            "source_state": source_state,
+                        }
+                    )
                 if sites:
                     contracts.append((symbol, sites))
             if not contracts:
@@ -3768,11 +4058,7 @@ def _produce_caller_contract_view(
                     detail={"file": rel, "definitions": len(definitions)},
                 )
                 continue
-            all_sites = [
-                (symbol, site)
-                for symbol, sites in contracts
-                for site in sites
-            ]
+            all_sites = [(symbol, site) for symbol, sites in contracts for site in sites]
             # A source view with a very broad public surface needs a narrower
             # symbol decision; a truncated caller set would be misleading.
             if len(all_sites) > 12:
@@ -3810,9 +4096,7 @@ def _produce_caller_contract_view(
                 for _symbol, site in all_sites
             )
             symbols = tuple(symbol for symbol, _sites in contracts)
-            n_files = len(
-                {str(site["file"]) for _symbol, site in all_sites}
-            )
+            n_files = len({str(site["file"]) for _symbol, site in all_sites})
             body = [
                 (
                     f"{symbol}() has {len(sites)} production caller(s) "
@@ -3830,9 +4114,7 @@ def _produce_caller_contract_view(
                 graph_revision=graph_revision,
                 caller_usage_rows=usage_rows,
             )
-            minimum_confidence = min(
-                float(site["confidence"]) for _symbol, site in all_sites
-            )
+            minimum_confidence = min(float(site["confidence"]) for _symbol, site in all_sites)
             out.append(
                 _mk_add(
                     state,
@@ -3841,20 +4123,11 @@ def _produce_caller_contract_view(
                     target=rel,
                     body_lines=body,
                     evidence=[
-                        (str(site["file"]), int(site["line"]))
-                        for _symbol, site in all_sites
+                        (str(site["file"]), int(site["line"])) for _symbol, site in all_sites
                     ],
-                    tier=(
-                        VERIFIED
-                        if minimum_confidence >= 0.9
-                        else WARNING
-                    ),
+                    tier=(VERIFIED if minimum_confidence >= 0.9 else WARNING),
                     producer="caller_contract",
-                    symbol=(
-                        symbols[0]
-                        if len(symbols) == 1
-                        else "viewed_file_contract"
-                    ),
+                    symbol=(symbols[0] if len(symbols) == 1 else "viewed_file_contract"),
                     confidence=minimum_confidence,
                     native_args={
                         "caller_rows": tuple(
@@ -3952,11 +4225,16 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                     continue
                 n_callers = len(sites)
                 n_files = len({site["file"] for site in sites})
-                body = [f"{sym}() signature changed — {n_callers} caller(s) in "
-                        f"{n_files} file(s); update the call sites"]
+                body = [
+                    f"{sym}() signature changed — {n_callers} caller(s) in "
+                    f"{n_files} file(s); update the call sites"
+                ]
                 graph_revision, _valid_until = _revisions_for(state, "caller_break")
                 caller_usage_rows = _typed_caller_usage_rows(
-                    con, sites, sym, graph_revision,
+                    con,
+                    sites,
+                    sym,
+                    graph_revision,
                 )
                 signature_change = SignatureChange(
                     symbol=sym,
@@ -3985,11 +4263,14 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                     ),
                     caller_rows=tuple(
                         CallerEvidenceRow(
-                            identity=site["identity"], file=site["file"],
-                            line=site["line"], confidence=site["confidence"],
+                            identity=site["identity"],
+                            file=site["file"],
+                            line=site["line"],
+                            confidence=site["confidence"],
                             resolution_method=site["resolution_method"],
                             source_state=_source_state_for_file(event, state, site["file"]),
-                            edge_id=site["edge_id"], definition_id=site["definition_id"],
+                            edge_id=site["edge_id"],
+                            definition_id=site["definition_id"],
                         )
                         for site in sites
                     ),
@@ -3997,38 +4278,48 @@ def _produce_caller_contract(event: ToolEvent, state: GatewayState) -> list[Evid
                     signature_changes=(signature_change,),
                     caller_usage_rows=caller_usage_rows,
                 )
-                out.append(_mk_add(state, event, fact_kind="caller_break", target=rel,
-                                   body_lines=body,
-                                   evidence=[(site["file"], site["line"]) for site in sites],
-                                   tier=WARNING, producer="caller_contract", symbol=sym,
-                                   native_args={
-                                       "before_parameters": signature_change.before_parameters,
-                                       "after_parameters": signature_change.after_parameters,
-                                       "caller_rows": tuple(
-                                           (site["file"], site["line"], site["identity"])
-                                           for site in sites
-                                       ),
-                                       "caller_usage_rows": tuple(
-                                           (
-                                               row.caller_file, row.line, row.callee,
-                                               row.usage_kind,
-                                           )
-                                           for row in caller_usage_rows
-                                       ),
-                                   },
-                                   producer_inputs=producer_inputs,
-                                   observed_substrates=("graph",),
-                                   canonical_subject=sym,
-                                   canonical_claim=(
-                                       f"{sym} changed signature and has "
-                                       f"{n_callers} production caller(s) across "
-                                       f"{n_files} file(s)."
-                                   ),
-                                   canonical_consequence=(
-                                       "Preserve the caller-visible contract or "
-                                       "update every listed affected caller before "
-                                       "continuing validation."
-                                   )))
+                out.append(
+                    _mk_add(
+                        state,
+                        event,
+                        fact_kind="caller_break",
+                        target=rel,
+                        body_lines=body,
+                        evidence=[(site["file"], site["line"]) for site in sites],
+                        tier=WARNING,
+                        producer="caller_contract",
+                        symbol=sym,
+                        native_args={
+                            "before_parameters": signature_change.before_parameters,
+                            "after_parameters": signature_change.after_parameters,
+                            "caller_rows": tuple(
+                                (site["file"], site["line"], site["identity"]) for site in sites
+                            ),
+                            "caller_usage_rows": tuple(
+                                (
+                                    row.caller_file,
+                                    row.line,
+                                    row.callee,
+                                    row.usage_kind,
+                                )
+                                for row in caller_usage_rows
+                            ),
+                        },
+                        producer_inputs=producer_inputs,
+                        observed_substrates=("graph",),
+                        canonical_subject=sym,
+                        canonical_claim=(
+                            f"{sym} changed signature and has "
+                            f"{n_callers} production caller(s) across "
+                            f"{n_files} file(s)."
+                        ),
+                        canonical_consequence=(
+                            "Preserve the caller-visible contract or "
+                            "update every listed affected caller before "
+                            "continuing validation."
+                        ),
+                    )
+                )
     finally:
         con.close()
     return audit.finish(out)
@@ -4069,29 +4360,38 @@ def _produce_covering_inner(event: ToolEvent, state: GatewayState) -> list[Evide
         return []
     if not rendered:
         return []
-    return [_mk_add(state, event, fact_kind="covering_verdict", target=cov.target,
-                    body_lines=rendered.splitlines(), evidence=list(cov.evidence),
-                    tier=cov.tier or WARNING, producer="covering",
-                    symbol=cov.verdict or cov.target,
-                    observed_substrates=("structured_test_result",),
-                    canonical_subject=cov.target,
-                    canonical_claim=(
-                        f"The executed covering validation for {cov.target} "
-                        f"finished with verdict {cov.verdict}."
-                    ),
-                    canonical_consequence=(
-                        "Use this executed verdict as the validation constraint "
-                        "for the current patch decision."
-                    ))]
+    return [
+        _mk_add(
+            state,
+            event,
+            fact_kind="covering_verdict",
+            target=cov.target,
+            body_lines=rendered.splitlines(),
+            evidence=list(cov.evidence),
+            tier=cov.tier or WARNING,
+            producer="covering",
+            symbol=cov.verdict or cov.target,
+            observed_substrates=("structured_test_result",),
+            canonical_subject=cov.target,
+            canonical_claim=(
+                f"The executed covering validation for {cov.target} "
+                f"finished with verdict {cov.verdict}."
+            ),
+            canonical_consequence=(
+                "Use this executed verdict as the validation constraint "
+                "for the current patch decision."
+            ),
+        )
+    ]
 
 
 # --------------------------------------------------------------------------- #
 # DELIVERY ROUTING (B-12 timing + freshness) + the B-21 revision-scoped latch key.
 # --------------------------------------------------------------------------- #
-ROUTE_DELIVER = "deliver"            # on-time, fresh, right decision point -> ship bytes
-ROUTE_DEFER = "defer"                # event < available_at -> too early; re-offer later
+ROUTE_DELIVER = "deliver"  # on-time, fresh, right decision point -> ship bytes
+ROUTE_DEFER = "defer"  # event < available_at -> too early; re-offer later
 ROUTE_EXPIRED_LATE = "expired_late"  # event > deliver_by -> too late; explicit non-delivery
-ROUTE_STALE = "stale"                # a depended sub-rev changed -> discard/recompute
+ROUTE_STALE = "stale"  # a depended sub-rev changed -> discard/recompute
 ROUTE_REGISTRY_ERROR = "registry_error"  # registry authority unavailable -> fail closed
 
 # The decision-lifecycle order of the coarse observation boundaries. A fact ABOUT an
@@ -4100,15 +4400,18 @@ ROUTE_REGISTRY_ERROR = "registry_error"  # registry authority unavailable -> fai
 # is strictly BEFORE (defer) or AFTER (expire) that single boundary. ``other`` / unknown
 # maps to step0 so a producer firing on a non-core event still routes deterministically.
 _ROUTE_EVENT_ORDER: dict[str, int] = {
-    EVENT_STEP0: 0, "search": 1, "view": 2, "edit": 3, "test": 4, "submit": 5,
+    EVENT_STEP0: 0,
+    "search": 1,
+    "view": 2,
+    "edit": 3,
+    "test": 4,
+    "submit": 5,
 }
 
 
 def _event_ordinal(name: str) -> int:
     normalized = (name or "").strip().lower()
-    return _FINE_EVENT_TO_COARSE_ORDINAL.get(
-        normalized, _ROUTE_EVENT_ORDER.get(normalized, 0)
-    )
+    return _FINE_EVENT_TO_COARSE_ORDINAL.get(normalized, _ROUTE_EVENT_ORDER.get(normalized, 0))
 
 
 # SM-0: the registry's FINE §1 delivery boundary (fact_registry.EVENTS) -> the COARSE
@@ -4119,15 +4422,15 @@ def _event_ordinal(name: str) -> int:
 # command observation; ``first_view_edit`` is realized by the patch_delta producer on the
 # EDIT event (view precedes edit, so binding it to edit is the producer's true realization).
 _FINE_EVENT_TO_COARSE_ORDINAL: dict[str, int] = {
-    "task_start": 0,        # EVENT_TASK_START  -> step0
-    "search_result": 1,     # EVENT_SEARCH_RESULT
-    "failed_search": 1,     # EVENT_FAILED_SEARCH (an empty search is still a search)
-    "file_view": 2,         # EVENT_FILE_VIEW
-    "first_view_edit": 3,   # EVENT_FIRST_VIEW_EDIT (realized on the edit event)
-    "edit_result": 3,       # EVENT_EDIT_RESULT
-    "test_result": 4,       # EVENT_TEST_RESULT
-    "failure_obs": 4,       # EVENT_FAILURE_OBS (a trace/error rides a test/command obs)
-    "submit": 5,            # EVENT_SUBMIT
+    "task_start": 0,  # EVENT_TASK_START  -> step0
+    "search_result": 1,  # EVENT_SEARCH_RESULT
+    "failed_search": 1,  # EVENT_FAILED_SEARCH (an empty search is still a search)
+    "file_view": 2,  # EVENT_FILE_VIEW
+    "first_view_edit": 3,  # EVENT_FIRST_VIEW_EDIT (realized on the edit event)
+    "edit_result": 3,  # EVENT_EDIT_RESULT
+    "test_result": 4,  # EVENT_TEST_RESULT
+    "failure_obs": 4,  # EVENT_FAILURE_OBS (a trace/error rides a test/command obs)
+    "submit": 5,  # EVENT_SUBMIT
 }
 
 
@@ -4166,7 +4469,8 @@ def _registry_want_ordinal(evidence_type: str) -> int | None:
 
 
 def _reactive_semantic_event(
-        env: EvidenceEnvelope, event: ToolEvent, state: GatewayState) -> str | None:
+    env: EvidenceEnvelope, event: ToolEvent, state: GatewayState
+) -> str | None:
     """Return the classifier-proven fine event for a reactive candidate.
 
     Carrier kinds such as ``test`` and ``other`` are not evidence that a failure
@@ -4228,7 +4532,8 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                     edited_now = {_norm_fp(f) for f in (event.changed_files or ())}
                     stale = tf not in edited_now
             _record_control(
-                state, "GT_EDIT_OVERLAY",
+                state,
+                "GT_EDIT_OVERLAY",
                 "gateway.route_delivery.episode_overlay",
                 "APPLIED" if stale else "NO_EFFECT",
                 reason="stale_base_fact" if stale else "fresh_or_untracked_target",
@@ -4237,14 +4542,15 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 return ROUTE_STALE
         except Exception as exc:
             _record_control(
-                state, "GT_EDIT_OVERLAY",
-                "gateway.route_delivery.episode_overlay", "ERROR",
+                state,
+                "GT_EDIT_OVERLAY",
+                "gateway.route_delivery.episode_overlay",
+                "ERROR",
                 reason=f"overlay_error:{type(exc).__name__}",
             )
     observed_semantics = _observe_semantic_events(event, state)
     primary = event.primary_boundary or ""
-    cur = _FINE_EVENT_TO_COARSE_ORDINAL.get(
-        primary, _event_ordinal(event.kind))
+    cur = _FINE_EVENT_TO_COARSE_ORDINAL.get(primary, _event_ordinal(event.kind))
     want: int | None = None
     registry_on = _registry_enforce()
     registry_error = False
@@ -4258,8 +4564,10 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                 actual = _reactive_semantic_event(env, event, state)
                 if actual is None or actual != required:
                     _record_control(
-                        state, "GT_REGISTRY_ENFORCE",
-                        "gateway.route_delivery.registry_timing", "APPLIED",
+                        state,
+                        "GT_REGISTRY_ENFORCE",
+                        "gateway.route_delivery.registry_timing",
+                        "APPLIED",
                         reason="reactive_semantic_event_unproven",
                     )
                     return ROUTE_DEFER
@@ -4280,19 +4588,21 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
                     and required not in observed_semantics
                 ):
                     _record_control(
-                        state, "GT_REGISTRY_ENFORCE",
-                        "gateway.route_delivery.registry_timing", "APPLIED",
+                        state,
+                        "GT_REGISTRY_ENFORCE",
+                        "gateway.route_delivery.registry_timing",
+                        "APPLIED",
                         reason="semantic_event_unproven",
                     )
                     return ROUTE_DEFER
-                want = (
-                    cur if required in observed_semantics else declared_want
-                )
+                want = cur if required in observed_semantics else declared_want
         except Exception as exc:
             registry_error = True
             _record_control(
-                state, "GT_REGISTRY_ENFORCE",
-                "gateway.route_delivery.registry_timing", "ERROR",
+                state,
+                "GT_REGISTRY_ENFORCE",
+                "gateway.route_delivery.registry_timing",
+                "ERROR",
                 reason=f"registry_timing_error:{type(exc).__name__}",
             )
             # Registry metadata is the authority under enforcement. Never fall back to
@@ -4304,11 +4614,17 @@ def route_delivery(env: EvidenceEnvelope, event: ToolEvent, state: GatewayState)
         want = _event_ordinal(env.preferred_event)  # OFF / unregistered -> byte-identical
     if registry_on and not registry_error:
         _record_control(
-            state, "GT_REGISTRY_ENFORCE",
+            state,
+            "GT_REGISTRY_ENFORCE",
             "gateway.route_delivery.registry_timing",
             "APPLIED" if cur != want else "NO_EFFECT",
-            reason=("too_early" if cur < want else
-                    "too_late" if cur > want else "declared_boundary_match"),
+            reason=(
+                "too_early"
+                if cur < want
+                else "too_late"
+                if cur > want
+                else "declared_boundary_match"
+            ),
         )
     if cur < want:
         return ROUTE_DEFER
@@ -4358,10 +4674,12 @@ def _produce_raw_candidates(
         if event.edit_before_after:
             for _f, (_bef, aft) in sorted(event.edit_before_after.items()):
                 parts.append(aft or "")
-        state.edit_events.append({
-            "index": event.action_index,
-            "blob": "\n".join(parts).lower(),
-        })
+        state.edit_events.append(
+            {
+                "index": event.action_index,
+                "blob": "\n".join(parts).lower(),
+            }
+        )
 
     outcome = classify_outcome(event, state)
 
@@ -4391,20 +4709,24 @@ def _produce_raw_candidates(
         # registration evidence is maximally useful and needs no search. ADDITIVE: obligations keeps
         # task-start, patch_delta/caller_contract keep their edit slots, ZERO_ABSENT is untouched —
         # this competes for the SAME <=1 dose through the normal arbiter, displacing nothing.
-        if (_change_surface_producer_on() and _cs_edit_trigger_on()
-                and _event_creates_new_file(event)):
-            produced = _produce_change_surface(event, state, require_repeat=False,
-                                               drop_existing_destinations=True,
-                                               post_creation=True)
+        if (
+            _change_surface_producer_on()
+            and _cs_edit_trigger_on()
+            and _event_creates_new_file(event)
+        ):
+            produced = _produce_change_surface(
+                event,
+                state,
+                require_repeat=False,
+                drop_existing_destinations=True,
+                post_creation=True,
+            )
             additions += produced
             if event.edit_before_after:
                 edit_bridge_candidates += produced
     elif "test_result" in event.semantic_events:
         additions += _produce_covering(event, state)
-    elif (
-        {"search_result", "failed_search"} & set(event.semantic_events)
-        and _loc_reslot_on()
-    ):
+    elif {"search_result", "failed_search"} & set(event.semantic_events) and _loc_reslot_on():
         # T0->T2 re-slot (2026-07-12, GT_LOC_RESLOT, default OFF -> byte-identical): GT's
         # ranked localization ANSWER, delivered reactively at the D2/post-search boundary
         # (issue-keyed, INDEPENDENT of the search-outcome lattice below — fires even on a
@@ -4500,9 +4822,12 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
             try:
                 _cand_bytes, _fc = _candidate_control_identity(a)
                 _record_control(
-                    state, "GT_SS_ARBITER_V2",
-                    "gateway.augment.empty_payload_guard", "APPLIED",
-                    candidate_bytes=_cand_bytes, fact_class=_fc,
+                    state,
+                    "GT_SS_ARBITER_V2",
+                    "gateway.augment.empty_payload_guard",
+                    "APPLIED",
+                    candidate_bytes=_cand_bytes,
+                    fact_class=_fc,
                     candidate_id=getattr(a, "dedup_key", "") or "",
                     reason="empty_payload_dropped",
                 )
@@ -4518,24 +4843,25 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         # never rejects a real fact — it guards a future renderer-less / mis-declared class.
         if _registry_enforce():
             try:
-                renderer_missing = (
-                    _fr_registration_for(a.evidence_type) is None
-                    or not _fr_required_renderer(a.evidence_type)
-                )
+                renderer_missing = _fr_registration_for(
+                    a.evidence_type
+                ) is None or not _fr_required_renderer(a.evidence_type)
                 _record_control(
-                    state, "GT_REGISTRY_ENFORCE",
+                    state,
+                    "GT_REGISTRY_ENFORCE",
                     "gateway.augment.renderer_enforcement",
                     "APPLIED" if renderer_missing else "NO_EFFECT",
-                    reason=("renderer_missing" if renderer_missing
-                            else "renderer_available"),
+                    reason=("renderer_missing" if renderer_missing else "renderer_available"),
                 )
             except Exception as exc:
                 # Existing enforcement is fail-closed; preserve that behavior,
                 # but distinguish the failed measurement from a valid drop.
                 renderer_missing = True
                 _record_control(
-                    state, "GT_REGISTRY_ENFORCE",
-                    "gateway.augment.renderer_enforcement", "ERROR",
+                    state,
+                    "GT_REGISTRY_ENFORCE",
+                    "gateway.augment.renderer_enforcement",
+                    "ERROR",
                     reason=f"registry_renderer_error:{type(exc).__name__}",
                 )
             if renderer_missing:
@@ -4566,13 +4892,21 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
         try:
             candidate_bytes, fact_class = _candidate_control_identity(candidate)
             _record_control(
-                state, "GT_GATEWAY", "gateway.augment.candidate_admission", "APPLIED",
-                candidate_bytes=candidate_bytes, fact_class=fact_class,
-                candidate_id=candidate.dedup_key, reason="candidate_admitted",
+                state,
+                "GT_GATEWAY",
+                "gateway.augment.candidate_admission",
+                "APPLIED",
+                candidate_bytes=candidate_bytes,
+                fact_class=fact_class,
+                candidate_id=candidate.dedup_key,
+                reason="candidate_admitted",
             )
         except Exception as exc:
             _record_control(
-                state, "GT_GATEWAY", "gateway.augment.candidate_admission", "ERROR",
+                state,
+                "GT_GATEWAY",
+                "gateway.augment.candidate_admission",
+                "ERROR",
                 reason=f"identity_error:{type(exc).__name__}",
             )
     for candidate in edit_bridge_candidates:
@@ -4580,17 +4914,21 @@ def augment(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
             candidate_bytes, fact_class = _candidate_control_identity(candidate)
             admitted = candidate.dedup_key in final_keys
             _record_control(
-                state, "GT_GATEWAY_EDIT_BRIDGES",
+                state,
+                "GT_GATEWAY_EDIT_BRIDGES",
                 "gateway.augment.edit_bridge_candidate",
                 "APPLIED" if admitted else "SUPPRESSED",
                 candidate_bytes=candidate_bytes if admitted else "",
-                fact_class=fact_class, candidate_id=candidate.dedup_key,
+                fact_class=fact_class,
+                candidate_id=candidate.dedup_key,
                 reason="candidate_admitted" if admitted else "candidate_filtered",
             )
         except Exception as exc:
             _record_control(
-                state, "GT_GATEWAY_EDIT_BRIDGES",
-                "gateway.augment.edit_bridge_candidate", "ERROR",
+                state,
+                "GT_GATEWAY_EDIT_BRIDGES",
+                "gateway.augment.edit_bridge_candidate",
+                "ERROR",
                 reason=f"identity_error:{type(exc).__name__}",
             )
     return final

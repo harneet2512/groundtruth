@@ -4,6 +4,7 @@ For each pytest-style or test_*-style name extracted from issue text, score
 candidate source files by the likelihood that they're the file-under-test.
 Returns per-file 0-1 score for use as a multiplicative file-rank boost.
 """
+
 from __future__ import annotations
 
 import re
@@ -14,7 +15,9 @@ from groundtruth.pretask.v2_types import QueryObject
 _TEST_PREFIX_RE = re.compile(r"^[Tt]est[_]?")
 _TEST_SUFFIX_RE = re.compile(r"[_]?[Tt]est$")
 _CAMEL_SPLIT_RE = re.compile(r"(?<!^)(?=[A-Z])")
-_TEST_TOKEN_RE = re.compile(r"\b(?:test_[A-Za-z_][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*_test|test[A-Z][A-Za-z0-9]*|Test[A-Z][A-Za-z0-9]*)\b")
+_TEST_TOKEN_RE = re.compile(
+    r"\b(?:test_[A-Za-z_][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*_test|test[A-Z][A-Za-z0-9]*|Test[A-Z][A-Za-z0-9]*)\b"
+)
 
 
 def _normalize_path(p: str) -> str:
@@ -92,13 +95,13 @@ def candidate_source_stems(test_name: str) -> set[str]:
     core = test_name
 
     if core.startswith("test_"):
-        core = core[len("test_"):]
+        core = core[len("test_") :]
     elif core.endswith("_test"):
         core = core[: -len("_test")]
     elif core.startswith("Test") and len(core) > 4 and core[4].isupper():
-        core = core[len("Test"):]
+        core = core[len("Test") :]
     elif core.startswith("test") and len(core) > 4 and core[4].isupper():
-        core = core[len("test"):]
+        core = core[len("test") :]
 
     if not core:
         return set()

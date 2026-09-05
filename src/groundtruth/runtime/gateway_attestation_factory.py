@@ -57,15 +57,20 @@ _SUPPORTED: dict[str, str] = {
 # The def-partition family: search-based facts (no before/after edit state, no caller
 # rows, no signature change) — their truth basis is the typed DefinitionRow set + the
 # graph revision they were read at + the exact query identity.
-_DEF_PARTITION_EVIDENCE: frozenset[str] = frozenset({
-    "def_ref_partition", "name_fold", "wrong_surface", "body_concept",
-})
+_DEF_PARTITION_EVIDENCE: frozenset[str] = frozenset(
+    {
+        "def_ref_partition",
+        "name_fold",
+        "wrong_surface",
+        "body_concept",
+    }
+)
 
 
 def _canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
 
 def _source_dict(state: SourceState | None) -> dict[str, Any] | None:
@@ -96,12 +101,10 @@ def _change_dict(change: SignatureChange) -> dict[str, Any]:
         "symbol": change.symbol,
         "edited_file": change.edited_file,
         "before_parameters": (
-            list(change.before_parameters)
-            if change.before_parameters is not None else None
+            list(change.before_parameters) if change.before_parameters is not None else None
         ),
         "after_parameters": (
-            list(change.after_parameters)
-            if change.after_parameters is not None else None
+            list(change.after_parameters) if change.after_parameters is not None else None
         ),
         "old_min_params": change.old_min_params,
         "old_max_params": change.old_max_params,
@@ -169,21 +172,15 @@ def _input_payload(
         "after_state": _source_dict(inputs.after_state),
         "caller_rows": [_caller_dict(row) for row in inputs.caller_rows],
         "graph_revision": inputs.graph_revision,
-        "signature_changes": [
-            _change_dict(change) for change in inputs.signature_changes
-        ],
-        "caller_usage_rows": [
-            _usage_dict(row) for row in inputs.caller_usage_rows
-        ],
+        "signature_changes": [_change_dict(change) for change in inputs.signature_changes],
+        "caller_usage_rows": [_usage_dict(row) for row in inputs.caller_usage_rows],
     }
     # def-partition structured search evidence — additive keys emitted ONLY when the
     # producer carried them, so every edit-fact (caller_break / signature_mismatch)
     # canonical byte payload is byte-identical to the pre-def-partition era.
     if inputs.definition_rows or inputs.query_identity:
         payload["query_identity"] = inputs.query_identity
-        payload["definition_rows"] = [
-            _definition_dict(row) for row in inputs.definition_rows
-        ]
+        payload["definition_rows"] = [_definition_dict(row) for row in inputs.definition_rows]
     return payload
 
 
@@ -257,8 +254,10 @@ def _caller_change_complete(change: SignatureChange) -> bool:
         and all(
             value is None
             for value in (
-                change.old_min_params, change.old_max_params,
-                change.new_min_params, change.new_max_params,
+                change.old_min_params,
+                change.old_max_params,
+                change.new_min_params,
+                change.new_max_params,
                 change.positional_args,
             )
         )
@@ -267,8 +266,11 @@ def _caller_change_complete(change: SignatureChange) -> bool:
 
 def _signature_change_complete(change: SignatureChange) -> bool:
     values = (
-        change.old_min_params, change.old_max_params,
-        change.new_min_params, change.new_max_params, change.positional_args,
+        change.old_min_params,
+        change.old_max_params,
+        change.new_min_params,
+        change.new_max_params,
+        change.positional_args,
     )
     if not (
         change.symbol.strip()
@@ -290,19 +292,25 @@ def _signature_change_complete(change: SignatureChange) -> bool:
 
 def _complete_usage(row: CallerUsageEvidenceRow) -> bool:
     return bool(
-        isinstance(row.property_id, int) and not isinstance(row.property_id, bool)
+        isinstance(row.property_id, int)
+        and not isinstance(row.property_id, bool)
         and row.property_id > 0
         and isinstance(row.caller_node_id, int)
         and not isinstance(row.caller_node_id, bool)
         and row.caller_node_id > 0
         and row.caller_identity.strip()
         and row.caller_file.strip()
-        and row.usage_kind in {
-            "boolean_check", "destructure_tuple", "exception_guard", "iterated",
+        and row.usage_kind
+        in {
+            "boolean_check",
+            "destructure_tuple",
+            "exception_guard",
+            "iterated",
         }
         and row.callee.strip()
         and row.call_site.strip()
-        and isinstance(row.line, int) and not isinstance(row.line, bool)
+        and isinstance(row.line, int)
+        and not isinstance(row.line, bool)
         and row.line > 0
         and isinstance(row.confidence, (int, float))
         and not isinstance(row.confidence, bool)
@@ -311,6 +319,8 @@ def _complete_usage(row: CallerUsageEvidenceRow) -> bool:
         and row.extractor.strip()
         and row.evidence_method.strip()
     )
+
+
 def _complete_definition(row: DefinitionRow) -> bool:
     """A def-partition definition row is complete when it names a concrete graph node.
 
@@ -320,12 +330,18 @@ def _complete_definition(row: DefinitionRow) -> bool:
     bad line can never be complete (the ``def-partition row not consumed by producer``
     mutation bites here)."""
     if not (
-        isinstance(row.identity, str) and row.identity.strip()
-        and isinstance(row.file, str) and row.file.strip()
-        and isinstance(row.line, int) and not isinstance(row.line, bool) and row.line > 0
-        and isinstance(row.kind, str) and row.kind.strip()
+        isinstance(row.identity, str)
+        and row.identity.strip()
+        and isinstance(row.file, str)
+        and row.file.strip()
+        and isinstance(row.line, int)
+        and not isinstance(row.line, bool)
+        and row.line > 0
+        and isinstance(row.kind, str)
+        and row.kind.strip()
         and isinstance(row.definition_id, int)
-        and not isinstance(row.definition_id, bool) and row.definition_id > 0
+        and not isinstance(row.definition_id, bool)
+        and row.definition_id > 0
     ):
         return False
     if row.confidence is not None and not (
@@ -354,12 +370,14 @@ def _artifact_bundle(
 
     def add(artifact_id: str, kind: str, revision: str, raw: bytes) -> None:
         artifacts[artifact_id] = raw
-        refs.append(ArtifactRef(
-            kind=kind,
-            artifact_id=artifact_id,
-            sha256=hashlib.sha256(raw).hexdigest(),
-            revision=revision,
-        ))
+        refs.append(
+            ArtifactRef(
+                kind=kind,
+                artifact_id=artifact_id,
+                sha256=hashlib.sha256(raw).hexdigest(),
+                revision=revision,
+            )
+        )
 
     identity = hashlib.sha256(candidate.encode("utf-8")).hexdigest()
     add(
@@ -375,11 +393,11 @@ def _artifact_bundle(
         shipped_bytes,
     )
     states: list[tuple[str, SourceState | None]] = [
-        ("before", inputs.before_state), ("after", inputs.after_state),
+        ("before", inputs.before_state),
+        ("after", inputs.after_state),
     ]
     states.extend(
-        (f"caller:{index}", row.source_state)
-        for index, row in enumerate(inputs.caller_rows)
+        (f"caller:{index}", row.source_state) for index, row in enumerate(inputs.caller_rows)
     )
     for index, (role, state) in enumerate(states):
         if not _complete_source(state):
@@ -402,21 +420,29 @@ def _predicate(
     rendered_length: int,
     field_paths: tuple[str, ...],
 ) -> PredicateAttestation:
-    proof_refs = tuple(sorted((
-        *(
-            ProofRef(
-                proof_type="producer_input",
-                artifact=producer_input_ref,
-                field_path=field_path,
+    proof_refs = (
+        tuple(
+            sorted(
+                (
+                    *(
+                        ProofRef(
+                            proof_type="producer_input",
+                            artifact=producer_input_ref,
+                            field_path=field_path,
+                        )
+                        for field_path in field_paths
+                    ),
+                    ProofRef(
+                        proof_type="rendered_candidate",
+                        artifact=rendered_ref,
+                        field_path=f"bytes[0:{rendered_length}]",
+                    ),
+                )
             )
-            for field_path in field_paths
-        ),
-        ProofRef(
-            proof_type="rendered_candidate",
-            artifact=rendered_ref,
-            field_path=f"bytes[0:{rendered_length}]",
-        ),
-    ))) if complete else ()
+        )
+        if complete
+        else ()
+    )
     return PredicateAttestation(
         predicate_kind=kind,
         predicate_id=predicate_id,
@@ -475,12 +501,8 @@ def build_gateway_attestation(
         open_event=open_event,
     )
     source_refs, artifacts = _artifact_bundle(envelope, raw, shipped_bytes)
-    producer_input_ref = next(
-        ref for ref in source_refs if ref.kind == "producer_inputs"
-    )
-    rendered_ref = next(
-        ref for ref in source_refs if ref.kind == "rendered_candidate"
-    )
+    producer_input_ref = next(ref for ref in source_refs if ref.kind == "producer_inputs")
+    rendered_ref = next(ref for ref in source_refs if ref.kind == "rendered_candidate")
     if envelope.evidence_type in _DEF_PARTITION_EVIDENCE:
         # def-partition (post_search) FACT: the truth basis is the typed DefinitionRow
         # set read at the graph revision the envelope shipped; no edit before/after state
@@ -488,18 +510,13 @@ def build_gateway_attestation(
         # carried no definition rows, an incomplete row, no query identity, or a graph
         # revision that does not match the delivered envelope's.
         graph_bound = bool(
-            inputs.graph_revision
-            and inputs.graph_revision == envelope.graph_revision
+            inputs.graph_revision and inputs.graph_revision == envelope.graph_revision
         )
         rows_complete = bool(
             inputs.definition_rows
             and all(_complete_definition(row) for row in inputs.definition_rows)
         )
-        truth_complete = bool(
-            graph_bound
-            and rows_complete
-            and inputs.query_identity.strip()
-        )
+        truth_complete = bool(graph_bound and rows_complete and inputs.query_identity.strip())
         # Freshness for def_partition is the graph revision the definitions were read at
         # (registry freshness_deps = nodes + edges_rev); the delivered seal proves what
         # shipped, the graph revision binds it to the exact graph snapshot.
@@ -520,8 +537,7 @@ def build_gateway_attestation(
             or (
                 all(_complete_usage(row) for row in inputs.caller_usage_rows)
                 and all(
-                    row.source_revision == inputs.graph_revision
-                    for row in inputs.caller_usage_rows
+                    row.source_revision == inputs.graph_revision for row in inputs.caller_usage_rows
                 )
                 and all(
                     any(
@@ -546,7 +562,8 @@ def build_gateway_attestation(
         truth_complete = common_complete and semantic_complete and usage_complete
         freshness_complete = common_complete and semantic_complete and usage_complete
         truth_paths = (
-            "$.caller_rows", "$.signature_changes",
+            "$.caller_rows",
+            "$.signature_changes",
             *(("$.caller_usage_rows",) if inputs.caller_usage_rows else ()),
         )
         freshness_paths = (
@@ -577,28 +594,32 @@ def build_gateway_attestation(
         candidate_id=envelope.dedup_key,
         delivery_seal=delivery_seal,
         source_artifacts=source_refs,
-        truth_predicates=(_predicate(
-            kind=TRUTH,
-            predicate_id=f"{envelope.evidence_type}.semantic_truth",
-            subject=envelope.dedup_key,
-            expectation="structured producer inputs prove the emitted semantic change",
-            complete=truth_complete,
-            producer_input_ref=producer_input_ref,
-            rendered_ref=rendered_ref,
-            rendered_length=len(shipped_bytes),
-            field_paths=truth_paths,
-        ),),
-        freshness_predicates=(_predicate(
-            kind=FRESHNESS,
-            predicate_id=f"{envelope.evidence_type}.candidate_freshness",
-            subject=envelope.dedup_key,
-            expectation="source and graph revisions bind the final candidate",
-            complete=freshness_complete,
-            producer_input_ref=producer_input_ref,
-            rendered_ref=rendered_ref,
-            rendered_length=len(shipped_bytes),
-            field_paths=freshness_paths,
-        ),),
+        truth_predicates=(
+            _predicate(
+                kind=TRUTH,
+                predicate_id=f"{envelope.evidence_type}.semantic_truth",
+                subject=envelope.dedup_key,
+                expectation="structured producer inputs prove the emitted semantic change",
+                complete=truth_complete,
+                producer_input_ref=producer_input_ref,
+                rendered_ref=rendered_ref,
+                rendered_length=len(shipped_bytes),
+                field_paths=truth_paths,
+            ),
+        ),
+        freshness_predicates=(
+            _predicate(
+                kind=FRESHNESS,
+                predicate_id=f"{envelope.evidence_type}.candidate_freshness",
+                subject=envelope.dedup_key,
+                expectation="source and graph revisions bind the final candidate",
+                complete=freshness_complete,
+                producer_input_ref=producer_input_ref,
+                rendered_ref=rendered_ref,
+                rendered_length=len(shipped_bytes),
+                field_paths=freshness_paths,
+            ),
+        ),
         decision=DecisionBinding(
             decision_key=registration.target_decision,
             open_event=open_event,
@@ -646,8 +667,7 @@ def build_caller_contract_control_participation(
         or attestation.candidate_id != envelope.dedup_key
         or not isinstance(shipped_bytes, bytes)
         or not shipped_bytes
-        or hashlib.sha256(shipped_bytes).hexdigest()[:16]
-        != attestation.delivery_seal
+        or hashlib.sha256(shipped_bytes).hexdigest()[:16] != attestation.delivery_seal
         or not isinstance(iteration, int)
         or isinstance(iteration, bool)
         or iteration < 0
@@ -656,9 +676,7 @@ def build_caller_contract_control_participation(
     try:
         from .adapters.miniswe import render_envelope
 
-        expected = render_envelope(envelope, native=True).encode(
-            "utf-8", "surrogatepass"
-        )
+        expected = render_envelope(envelope, native=True).encode("utf-8", "surrogatepass")
         input_bytes = canonical_producer_inputs_bytes(
             envelope,
             delivery_seal=attestation.delivery_seal,
@@ -681,12 +699,10 @@ def build_caller_contract_control_participation(
     if shipped_bytes not in (expected, b"\n" + expected):
         return ()
     producer_input_refs = tuple(
-        ref for ref in attestation.source_artifacts
-        if ref.kind == "producer_inputs"
+        ref for ref in attestation.source_artifacts if ref.kind == "producer_inputs"
     )
     rendered_refs = tuple(
-        ref for ref in attestation.source_artifacts
-        if ref.kind == "rendered_candidate"
+        ref for ref in attestation.source_artifacts if ref.kind == "rendered_candidate"
     )
     if (
         len(producer_input_refs) != 1
@@ -711,16 +727,18 @@ def build_caller_contract_control_participation(
         if feature_id == "GT_CONTRACT_BILATERAL" and not inputs.caller_usage_rows:
             decision = "NO_EFFECT"
             reason = "no_typed_caller_usage"
-        rows.append(build_control_participation(
-            feature_id=feature_id,
-            decision_site=_CALLER_CONTRACT_CONTROL_SITES[feature_id],
-            decision=decision,
-            iteration=iteration,
-            candidate_bytes=candidate_text,
-            fact_class="caller_contract",
-            candidate_id=envelope.dedup_key,
-            reason=reason,
-        ))
+        rows.append(
+            build_control_participation(
+                feature_id=feature_id,
+                decision_site=_CALLER_CONTRACT_CONTROL_SITES[feature_id],
+                decision=decision,
+                iteration=iteration,
+                candidate_bytes=candidate_text,
+                fact_class="caller_contract",
+                candidate_id=envelope.dedup_key,
+                reason=reason,
+            )
+        )
     return tuple(rows)
 
 

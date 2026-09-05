@@ -265,7 +265,7 @@ def test_exact_issue_named_files_short_name_needs_provenance(
 
     issue = "Grid output has wrong decimal formats\n"
     # without provenance: short name (len<5, no underscore) stays skipped
-    named_no_prov = _exact_issue_named_files(issue, class_anchor_db)
+    named_no_prov = _exact_issue_named_files(issue, class_anchor_db, issue_anchors=IssueAnchors())
     assert "io/tiny.py" not in named_no_prov
     # with title provenance: admitted (still unique-definition + non-generic)
     ia = IssueAnchors(title_symbols={"Grid"}, code_symbols={"Grid"})

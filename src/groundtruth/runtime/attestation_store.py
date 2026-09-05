@@ -41,16 +41,14 @@ class StoredAttestation:
 
 
 def _canonical_json_bytes(value: object) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
 
 def attestation_index_key(candidate_id: str, delivery_seal: str) -> str:
     """Stable full-width key for the candidate-and-final-seal identity."""
-    identity = _canonical_json_bytes(
-        {"candidate_id": candidate_id, "delivery_seal": delivery_seal}
-    )
+    identity = _canonical_json_bytes({"candidate_id": candidate_id, "delivery_seal": delivery_seal})
     return hashlib.sha256(identity).hexdigest()
 
 
@@ -155,9 +153,7 @@ def _bundle_matches(
             f"artifacts/{artifact_id}" for artifact_id in artifacts
         }
         actual_paths = {
-            path.relative_to(bundle).as_posix()
-            for path in bundle.rglob("*")
-            if path.is_file()
+            path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file()
         }
         if actual_paths != expected_paths:
             return False
@@ -214,9 +210,7 @@ def persist_attestation(
             if final.exists() and _bundle_matches(
                 final, attestation_payload, entry_payload, exact_artifacts
             ):
-                return StoredAttestation(
-                    key, final, entry_payload, canonical_sha256(attestation)
-                )
+                return StoredAttestation(key, final, entry_payload, canonical_sha256(attestation))
             raise AttestationStoreError("persist:atomic_publish_failed") from exc
     finally:
         if temporary.exists():

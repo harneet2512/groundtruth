@@ -197,9 +197,9 @@ def _maybe_record_counterfactual_pair(
             "treatment_action_sha256_16": hashlib.sha256(
                 treatment_action.encode("utf-8")
             ).hexdigest()[:16],
-            "control_action_sha256_16": hashlib.sha256(
-                control_action.encode("utf-8")
-            ).hexdigest()[:16],
+            "control_action_sha256_16": hashlib.sha256(control_action.encode("utf-8")).hexdigest()[
+                :16
+            ],
             "actions_differ": treatment_action != control_action,
             # SPEND THE PROBE ITSELF INCURRED. `_original_query` is the LOW-LEVEL `_query`;
             # LitellmModel accounts cost in the PUBLIC `query` (`_calculate_cost` ->
@@ -333,9 +333,7 @@ def _record_shadow_assignment_row(
             "task_id": str(task_id or ""),
             "model_call_id": str(getattr(compilation, "model_call_id", "") or ""),
             "observation_id": str(getattr(compilation, "observation_id", "") or ""),
-            "withheld_capsule_hash": str(
-                getattr(compilation, "capsule_hash", "") or ""
-            ),
+            "withheld_capsule_hash": str(getattr(compilation, "capsule_hash", "") or ""),
             "member_fact_classes": list(_capsule_member_classes(compilation)),
         }
         append_ledger_line(row, boundary._receipt_sink_path)
@@ -409,11 +407,7 @@ def _normalized_phrase(value: object) -> str:
 def _explicit_claim_reference(content: object, claim: object) -> bool:
     normalized_claim = _normalized_phrase(claim)
     normalized_content = _normalized_phrase(content)
-    return bool(
-        normalized_claim
-        and normalized_content
-        and normalized_claim in normalized_content
-    )
+    return bool(normalized_claim and normalized_content and normalized_claim in normalized_content)
 
 
 def _path_anchor(value: object) -> str:
@@ -423,7 +417,7 @@ def _path_anchor(value: object) -> str:
     candidate = candidate.split("::", 1)[0]
     candidate = re.sub(r":\d+(?::\d+)?$", "", candidate)
     if candidate.startswith("/testbed/"):
-        candidate = candidate[len("/testbed/"):]
+        candidate = candidate[len("/testbed/") :]
     return candidate if "/" in candidate else ""
 
 
@@ -433,11 +427,7 @@ def _symbol_anchor(value: object) -> str:
     candidate = value.rsplit("::", 1)[-1].strip()
     if "/" in candidate or "\\" in candidate:
         return ""
-    return (
-        candidate
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{2,}", candidate)
-        else ""
-    )
+    return candidate if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{2,}", candidate) else ""
 
 
 def _materially_linked_action(
@@ -458,15 +448,9 @@ def _materially_linked_action(
     )
     if not isinstance(provenance, (list, tuple)):
         return False
-    path_anchors = {
-        anchor
-        for value in (subject, *provenance)
-        if (anchor := _path_anchor(value))
-    }
+    path_anchors = {anchor for value in (subject, *provenance) if (anchor := _path_anchor(value))}
     symbol_anchors = {
-        anchor
-        for value in (subject, *provenance)
-        if (anchor := _symbol_anchor(value))
+        anchor for value in (subject, *provenance) if (anchor := _symbol_anchor(value))
     }
     for action in actions:
         if not isinstance(action, Mapping):
@@ -544,9 +528,7 @@ class MiniSweProviderBoundary:
             persisted = tuple(
                 record
                 for delivery_attempt_id in self._delivery_attempt_ids
-                for record in self.attempt_runtime.journal.delivery_history(
-                    delivery_attempt_id
-                )
+                for record in self.attempt_runtime.journal.delivery_history(delivery_attempt_id)
             )
             return persisted + tuple(self._fallback_records)
         return tuple(self._records)
@@ -630,43 +612,27 @@ class MiniSweProviderBoundary:
             # inference has not reached a terminal response.
             return
         if self._active is not None:
-            raise ValueError(
-                "observation_id already staged with a compiled capsule"
-            )
+            raise ValueError("observation_id already staged with a compiled capsule")
         if (
             compilation.state is not CapsuleCompilationState.COMPILED
             or compilation.delivery_attempt is None
             or compilation.delivery_attempt.state is not DeliveryState.COMPILED
         ):
             raise ValueError("Mini-SWE boundary requires a COMPILED capsule")
-        if any(
-            record.model_call_id == compilation.model_call_id
-            for record in self.records
-        ):
+        if any(record.model_call_id == compilation.model_call_id for record in self.records):
             raise ValueError("model_call_id already has a delivery attempt")
         if self.attempt_runtime is not None and observation_binding is None:
-            raise ValueError(
-                "canonical runtime boundary requires observation_binding"
-            )
-        if (
-            observation_binding is not None
-            and validate_observation_binding(
-                observation_binding,
-                expected_candidate_id=compilation.capsule_hash,
-            )
+            raise ValueError("canonical runtime boundary requires observation_binding")
+        if observation_binding is not None and validate_observation_binding(
+            observation_binding,
+            expected_candidate_id=compilation.capsule_hash,
         ):
-            raise ValueError(
-                "observation_binding does not identify the staged capsule"
-            )
+            raise ValueError("observation_binding does not identify the staged capsule")
         prior_for_observation = [
-            record for record in self.records
-            if record.observation_id == compilation.observation_id
+            record for record in self.records if record.observation_id == compilation.observation_id
         ]
         if prior_for_observation:
-            latest_by_call = {
-                record.model_call_id: record
-                for record in prior_for_observation
-            }
+            latest_by_call = {record.model_call_id: record for record in prior_for_observation}
             retryable_states = {
                 DeliveryState.JOIN_FAILED,
                 DeliveryState.DISPATCH_FAILED,
@@ -675,32 +641,19 @@ class MiniSweProviderBoundary:
                 DeliveryState.CANCELLED,
                 DeliveryState.PARTIAL_OUTPUT,
             }
-            if (
-                any(
-                    record.state not in retryable_states
-                    for record in latest_by_call.values()
-                )
-                or any(
-                    record.capsule_hash != compilation.capsule_hash
-                    for record in latest_by_call.values()
-                )
+            if any(
+                record.state not in retryable_states for record in latest_by_call.values()
+            ) or any(
+                record.capsule_hash != compilation.capsule_hash
+                for record in latest_by_call.values()
             ):
                 raise ValueError("observation_id already has a delivery attempt")
         if self.attempt_runtime is not None:
             if not delivery_attempt_id:
-                raise ValueError(
-                    "canonical runtime boundary requires delivery_attempt_id"
-                )
-            history = self.attempt_runtime.journal.delivery_history(
-                delivery_attempt_id
-            )
-            if (
-                not history
-                or history[-1] != compilation.delivery_attempt
-            ):
-                raise ValueError(
-                    "staged compilation does not match canonical journal"
-                )
+                raise ValueError("canonical runtime boundary requires delivery_attempt_id")
+            history = self.attempt_runtime.journal.delivery_history(delivery_attempt_id)
+            if not history or history[-1] != compilation.delivery_attempt:
+                raise ValueError("staged compilation does not match canonical journal")
             self._delivery_attempt_ids.append(delivery_attempt_id)
         self._active = compilation
         self._active_delivery_attempt_id = delivery_attempt_id
@@ -937,9 +890,8 @@ class MiniSweProviderBoundary:
         manifest_json = compilation.evidence_manifest_json
         if (
             not manifest_json
-            or hashlib.sha256(
-                manifest_json.encode("utf-8")
-            ).hexdigest() != compilation.evidence_manifest_hash
+            or hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
+            != compilation.evidence_manifest_hash
         ):
             return None
         try:
@@ -953,17 +905,14 @@ class MiniSweProviderBoundary:
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
-            ) != manifest_json
+            )
+            != manifest_json
         ):
             return None
         evidence = manifest.get("evidence")
         if not isinstance(evidence, list):
             return None
-        evidence_ids = [
-            item.get("evidence_id")
-            for item in evidence
-            if isinstance(item, Mapping)
-        ]
+        evidence_ids = [item.get("evidence_id") for item in evidence if isinstance(item, Mapping)]
         if (
             len(evidence_ids) != len(evidence)
             or evidence_ids != list(compilation.evidence_ids)
@@ -988,8 +937,7 @@ class MiniSweProviderBoundary:
             or delivery.capsule_hash != compilation.capsule_hash
             or delivery.evidence_ids != compilation.evidence_ids
             or compilation.binding is None
-            or compilation.binding.provider_payload_hash
-            != delivery.provider_payload_hash
+            or compilation.binding.provider_payload_hash != delivery.provider_payload_hash
         ):
             return False
         capsule_binding = compilation.binding
@@ -1027,13 +975,10 @@ class MiniSweProviderBoundary:
                 for candidate_id, fact_class, cap_owners in compilation.evidence_lineage
             ],
             "provider_payload_hash": delivery.provider_payload_hash,
-            "bound_provider_payload_json": (
-                compilation.bound_provider_payload_json
-            ),
+            "bound_provider_payload_json": (compilation.bound_provider_payload_json),
             "provider_response_id": delivery.provider_response_id,
             "provider_terminal_kind": (
-                delivery.terminal_kind.value
-                if delivery.terminal_kind is not None else ""
+                delivery.terminal_kind.value if delivery.terminal_kind is not None else ""
             ),
             "capsule_binding": {
                 "schema": capsule_binding.schema,
@@ -1042,19 +987,13 @@ class MiniSweProviderBoundary:
                 "decision_context": capsule_binding.decision_context.value,
                 "evidence_ids": list(capsule_binding.evidence_ids),
                 "capsule_hash": capsule_binding.capsule_hash,
-                "provider_payload_hash": (
-                    capsule_binding.provider_payload_hash
-                ),
+                "provider_payload_hash": (capsule_binding.provider_payload_hash),
                 "message_index": capsule_binding.message_index,
                 "content_index": capsule_binding.content_index,
                 "decision_id": capsule_binding.decision_id,
-                "evidence_manifest_hash": (
-                    capsule_binding.evidence_manifest_hash
-                ),
+                "evidence_manifest_hash": (capsule_binding.evidence_manifest_hash),
             },
-            "observation_binding": observation_binding_to_dict(
-                observation_binding
-            ),
+            "observation_binding": observation_binding_to_dict(observation_binding),
             "delivery_phase_ordinal": delivery_phase_ordinal,
         }
         try:
@@ -1089,30 +1028,23 @@ class MiniSweProviderBoundary:
         if (
             active is None
             or active.delivery_attempt is None
-            or active.delivery_attempt.state
-            is not DeliveryState.PROVIDER_ACCEPTED
+            or active.delivery_attempt.state is not DeliveryState.PROVIDER_ACCEPTED
         ):
-            raise ValueError(
-                "provider reconciliation requires an active "
-                "PROVIDER_ACCEPTED call"
-            )
+            raise ValueError("provider reconciliation requires an active PROVIDER_ACCEPTED call")
         accepted = active.delivery_attempt
         provider_response_id = _response_id(response)
         if not provider_response_id:
-            raise ValueError(
-                "provider_response identity is required for reconciliation"
-            )
+            raise ValueError("provider_response identity is required for reconciliation")
         if provider_response_id != accepted.provider_response_id:
-            raise ValueError(
-                "provider_response identity does not match accepted response"
-            )
+            raise ValueError("provider_response identity does not match accepted response")
 
         terminal_kind = _terminal_kind(response)
-        if (
-            terminal_kind is None
-            and _provider_status(response)
-            in {"queued", "pending", "running", "in_progress"}
-        ):
+        if terminal_kind is None and _provider_status(response) in {
+            "queued",
+            "pending",
+            "running",
+            "in_progress",
+        }:
             return accepted
         if terminal_kind is None:
             terminal_kind = ProviderTerminalKind.FAILED
@@ -1152,9 +1084,7 @@ class MiniSweProviderBoundary:
             decision_window_key = ""
             if self.attempt_runtime is not None:
                 delivered_iteration = self.attempt_runtime.work_state.sequence
-                decision_window_key = (
-                    self.attempt_runtime.work_state.decision_window_key
-                )
+                decision_window_key = self.attempt_runtime.work_state.decision_window_key
             canonical_delivery_emitted = False
             if observation_binding is not None:
                 canonical_delivery_emitted = self._emit_canonical_delivery(
@@ -1189,11 +1119,9 @@ class MiniSweProviderBoundary:
             return
         if (
             committed.state is not DeliveryState.RESPONSE_COMMITTED
-            or committed.provider_response_id
-            != delivered.provider_response_id
+            or committed.provider_response_id != delivered.provider_response_id
             or committed.response_hash != _canonical_hash(committed_message)
-            or runtime.work_state.decision_window_key
-            != pending.decision_window_key
+            or runtime.work_state.decision_window_key != pending.decision_window_key
         ):
             return
         extra = committed_message.get("extra")
@@ -1209,10 +1137,7 @@ class MiniSweProviderBoundary:
         actions = extra.get("actions")
         canonical_manifest = (
             self._canonical_manifest(pending.compilation)
-            if (
-                pending.observation_binding is not None
-                and pending.canonical_delivery_emitted
-            )
+            if (pending.observation_binding is not None and pending.canonical_delivery_emitted)
             else None
         )
         matched: list[Any] = []
@@ -1232,9 +1157,7 @@ class MiniSweProviderBoundary:
                     or not isinstance(claim, str)
                     or not isinstance(subject, str)
                     or not isinstance(provenance, list)
-                    or not all(
-                        isinstance(value, str) for value in provenance
-                    )
+                    or not all(isinstance(value, str) for value in provenance)
                 ):
                     return
                 evidence = runtime.evidence_record(evidence_id)
@@ -1287,20 +1210,14 @@ class MiniSweProviderBoundary:
                 "receipt": 3,
                 "delivery_attempt_id": pending.delivery_attempt_id,
                 "capsule_hash": pending.compilation.capsule_hash,
-                "evidence_manifest_hash": (
-                    pending.compilation.evidence_manifest_hash
-                ),
+                "evidence_manifest_hash": (pending.compilation.evidence_manifest_hash),
                 "evidence_ids": list(pending.compilation.evidence_ids),
                 "matched_evidence_id": evidence_id,
                 "provider_response_id": committed.provider_response_id,
                 "response_hash": committed.response_hash,
-                "observation_binding": observation_binding_to_dict(
-                    pending.observation_binding
-                ),
+                "observation_binding": observation_binding_to_dict(pending.observation_binding),
                 "delivery_phase_ordinal": pending.delivery_phase_ordinal,
-                "acknowledgment_phase_ordinal": (
-                    acknowledgment_phase_ordinal
-                ),
+                "acknowledgment_phase_ordinal": (acknowledgment_phase_ordinal),
                 "receipt_key": receipt_key,
             }
             append_ledger_line(row, self._receipt_sink_path)
@@ -1309,9 +1226,7 @@ class MiniSweProviderBoundary:
             return
 
         candidate_id = (
-            f"{pending.delivery_attempt_id}:"
-            f"{pending.compilation.capsule_hash}:"
-            f"{evidence_id}"
+            f"{pending.delivery_attempt_id}:{pending.compilation.capsule_hash}:{evidence_id}"
         )
         participation = build_ack_participation(
             TerminalAckIdentity(
@@ -1334,9 +1249,7 @@ class MiniSweProviderBoundary:
             "receipt": 3,
             "delivery_attempt_id": pending.delivery_attempt_id,
             "capsule_hash": pending.compilation.capsule_hash,
-            "evidence_manifest_hash": (
-                pending.compilation.evidence_manifest_hash
-            ),
+            "evidence_manifest_hash": (pending.compilation.evidence_manifest_hash),
             "evidence_id": evidence_id,
             "provider_response_id": committed.provider_response_id,
             "response_hash": committed.response_hash,
@@ -1384,17 +1297,13 @@ class MiniSweProviderBoundary:
                 # DELIVERED for bytes the model never saw, forging the exact proof this chain
                 # exists to establish. OFF unless BOTH GT_SS_SHADOW and a positive
                 # GT_SS_SHADOW_RATE, so the default path is byte-identical.
-                _task_id = str(
-                    getattr(boundary.attempt_runtime, "attempt_id", "") or ""
-                )
+                _task_id = str(getattr(boundary.attempt_runtime, "attempt_id", "") or "")
                 _verdict = _capsule_holdout_verdict(_task_id, active)
                 # Recorded on BOTH arms: a propensity cannot be estimated from the numerator
                 # alone, so the DELIVER arm must be observable too.
                 _record_shadow_assignment_row(boundary, _task_id, active, _verdict)
                 if _verdict == _SHADOW_HOLDOUT:
-                    _withheld = boundary._record_active_withheld(
-                        reason="shadow_holdout"
-                    )
+                    _withheld = boundary._record_active_withheld(reason="shadow_holdout")
                     if _withheld is not None:
                         native_messages = boundary._without_staged_capsule(
                             messages,
@@ -1417,11 +1326,9 @@ class MiniSweProviderBoundary:
                         exact_payload,
                     )
                     if boundary.attempt_runtime is not None:
-                        persisted = (
-                            boundary.attempt_runtime.bind_provider_payload(
-                                boundary._active_delivery_attempt_id,
-                                exact_payload,
-                            )
+                        persisted = boundary.attempt_runtime.bind_provider_payload(
+                            boundary._active_delivery_attempt_id,
+                            exact_payload,
                         )
                         active = boundary._replace_active_attempt(
                             active,
@@ -1451,8 +1358,7 @@ class MiniSweProviderBoundary:
                     current = boundary._active
                     current_state = (
                         current.delivery_attempt.state
-                        if current is not None
-                        and current.delivery_attempt is not None
+                        if current is not None and current.delivery_attempt is not None
                         else DeliveryState.COMPILED
                     )
                     if current_state is DeliveryState.COMPILED:
@@ -1536,11 +1442,9 @@ class MiniSweProviderBoundary:
                 return response
             try:
                 if boundary.attempt_runtime is not None:
-                    accepted = (
-                        boundary.attempt_runtime.mark_provider_accepted(
-                            boundary._active_delivery_attempt_id,
-                            provider_response_id=provider_response_id,
-                        )
+                    accepted = boundary.attempt_runtime.mark_provider_accepted(
+                        boundary._active_delivery_attempt_id,
+                        provider_response_id=provider_response_id,
                     )
                 else:
                     accepted = advance_delivery(
@@ -1554,11 +1458,12 @@ class MiniSweProviderBoundary:
                 return response
             boundary._record_local(accepted)
             boundary._replace_active_attempt(active, accepted)
-            if (
-                _terminal_kind(response) is None
-                and _provider_status(response)
-                in {"queued", "pending", "running", "in_progress"}
-            ):
+            if _terminal_kind(response) is None and _provider_status(response) in {
+                "queued",
+                "pending",
+                "running",
+                "in_progress",
+            }:
                 return response
             try:
                 boundary.reconcile_provider_response(response)
@@ -1572,12 +1477,12 @@ class MiniSweProviderBoundary:
         ) -> Mapping[str, Any] | None:
             return next(
                 (
-                    message for message in messages
+                    message
+                    for message in messages
                     if isinstance(message, Mapping)
                     and isinstance(message.get("extra"), Mapping)
                     and isinstance(message["extra"].get("response"), Mapping)
-                    and message["extra"]["response"].get("id")
-                    in boundary._pending_commits
+                    and message["extra"]["response"].get("id") in boundary._pending_commits
                 ),
                 None,
             )
@@ -1591,9 +1496,7 @@ class MiniSweProviderBoundary:
                 result = boundary._original_add_messages(*messages)
             except Exception as exc:
                 if committed_message is not None:
-                    provider_response_id = str(
-                        committed_message["extra"]["response"]["id"]
-                    )
+                    provider_response_id = str(committed_message["extra"]["response"]["id"])
                     boundary._safe_discard_pending(
                         provider_response_id,
                         reason=f"{type(exc).__name__}:{exc}",
@@ -1601,9 +1504,7 @@ class MiniSweProviderBoundary:
                 raise
             if committed_message is None:
                 return result
-            provider_response_id = str(
-                committed_message["extra"]["response"]["id"]
-            )
+            provider_response_id = str(committed_message["extra"]["response"]["id"])
             pending = boundary._pending_commits[provider_response_id]
             active = pending.compilation
             delivery_attempt_id = pending.delivery_attempt_id
@@ -1615,11 +1516,9 @@ class MiniSweProviderBoundary:
             response_hash = _canonical_hash(committed_message)
             try:
                 if boundary.attempt_runtime is not None:
-                    committed = (
-                        boundary.attempt_runtime.commit_provider_response(
-                            delivery_attempt_id,
-                            response_hash=response_hash,
-                        )
+                    committed = boundary.attempt_runtime.commit_provider_response(
+                        delivery_attempt_id,
+                        response_hash=response_hash,
                     )
                 else:
                     committed = commit_response(
@@ -1654,12 +1553,7 @@ class MiniSweProviderBoundary:
             try:
                 return boundary._original_model_query(*args, **kwargs)
             except Exception as exc:
-                new_pending = tuple(
-                    sorted(
-                        set(boundary._pending_commits)
-                        - pending_before
-                    )
-                )
+                new_pending = tuple(sorted(set(boundary._pending_commits) - pending_before))
                 for provider_response_id in new_pending:
                     boundary._safe_discard_pending(
                         provider_response_id,
@@ -1688,9 +1582,7 @@ class MiniSweProviderBoundary:
         if callable(exact_builder):
             payload = exact_builder(messages, dict(kwargs))
             if not isinstance(payload, Mapping):
-                raise TypeError(
-                    "exact provider payload builder must return a mapping"
-                )
+                raise TypeError("exact provider payload builder must return a mapping")
             return dict(payload)
 
         try:

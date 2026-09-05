@@ -47,8 +47,7 @@ class LanguageOperationCompatibility:
         return tuple(
             row.operation
             for row in self.rows
-            if row.registry_identity == registry_identity
-            and row.terminal_semantics != "removed"
+            if row.registry_identity == registry_identity and row.terminal_semantics != "removed"
         )
 
 

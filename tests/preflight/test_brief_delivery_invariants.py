@@ -23,7 +23,6 @@ output.jsonl; here we only assert _brief_max_tokens introduces no pollution.
 
 from __future__ import annotations
 
-import pytest
 
 import ast
 import re
@@ -218,10 +217,6 @@ def test_source_has_no_reorder():
     assert not offending, f"reorder reintroduced as code: {offending}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Pre-existing test drift: route/re-export prefixes dropped from G7 keep-list",
-)
 def test_post_edit_route_reexport_feature_present():
     """Anti-clobber lock (B5): the route/re-export relationship gap-fill in
     post_edit must not be silently reverted by an env/config commit again."""
@@ -230,4 +225,7 @@ def test_post_edit_route_reexport_feature_present():
     src = pathlib.Path("src/groundtruth/hooks/post_edit.py").read_text(encoding="utf-8")
     assert "_get_route_reexport_flags" in src, "post_edit route/re-export feature was reverted"
     assert src.count("_get_route_reexport_flags") >= 2, "helper defined but never called"
-    assert '"[ROUTE]", "[RE-EXPORT]"' in src, "route/re-export prefixes dropped from G7 keep-list"
+    from groundtruth.hooks.post_edit import g7_filter_isolated
+
+    evidence = ["[ROUTE] framework-dispatched handler", "[RE-EXPORT] exported by barrel"]
+    assert g7_filter_isolated(evidence) == evidence

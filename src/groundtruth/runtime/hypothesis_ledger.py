@@ -47,6 +47,7 @@ to lists at :meth:`Hypothesis.to_dict` and back to tuples at
 :meth:`Hypothesis.from_dict`. ``reset_attempt`` clears the slots (owned by
 EpisodeState); this module never touches the state's reset semantics.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -161,15 +162,58 @@ _ADVISORY_TIERS: frozenset[str] = frozenset({WARNING, INFO})
 # noun-phrase FACT form and never a directive (F3, Fable bounce 2026-07-10).
 _IMPERATIVE_VERBS: frozenset[str] = frozenset(
     {
-        "edit", "run", "change", "add", "fix", "delete", "remove", "replace",
-        "modify", "rewrite", "use", "try", "call", "open", "read", "write",
-        "create", "move", "refactor", "revise", "update", "check", "verify",
-        "inspect", "focus", "start",
+        "edit",
+        "run",
+        "change",
+        "add",
+        "fix",
+        "delete",
+        "remove",
+        "replace",
+        "modify",
+        "rewrite",
+        "use",
+        "try",
+        "call",
+        "open",
+        "read",
+        "write",
+        "create",
+        "move",
+        "refactor",
+        "revise",
+        "update",
+        "check",
+        "verify",
+        "inspect",
+        "focus",
+        "start",
         # F3 misses (bounce): the detector's verb list was too narrow
-        "rerun", "re-run", "retry", "install", "apply", "grep", "ensure",
-        "make", "implement", "execute", "launch", "revert", "restore",
-        "investigate", "debug", "confirm", "avoid", "stop", "consider",
-        "search", "look", "find", "examine", "rebuild", "double-check",
+        "rerun",
+        "re-run",
+        "retry",
+        "install",
+        "apply",
+        "grep",
+        "ensure",
+        "make",
+        "implement",
+        "execute",
+        "launch",
+        "revert",
+        "restore",
+        "investigate",
+        "debug",
+        "confirm",
+        "avoid",
+        "stop",
+        "consider",
+        "search",
+        "look",
+        "find",
+        "examine",
+        "rebuild",
+        "double-check",
     }
 )
 
@@ -180,8 +224,20 @@ _POLITENESS_PREFIXES: frozenset[str] = frozenset(
 
 # modals after a leading "you" that make a second-person directive ("You should edit").
 _MODAL_AFTER_YOU: frozenset[str] = frozenset(
-    {"should", "must", "need", "ought", "shall", "can", "could", "may",
-     "might", "will", "would", "have"}
+    {
+        "should",
+        "must",
+        "need",
+        "ought",
+        "shall",
+        "can",
+        "could",
+        "may",
+        "might",
+        "will",
+        "would",
+        "have",
+    }
 )
 
 
@@ -324,9 +380,7 @@ class Hypothesis:
             id=str(d.get("id", "")),
             claim=str(d.get("claim", "")),
             supporting_fact_ids=tuple(str(x) for x in (d.get("supporting_fact_ids") or ())),
-            contradicting_fact_ids=tuple(
-                str(x) for x in (d.get("contradicting_fact_ids") or ())
-            ),
+            contradicting_fact_ids=tuple(str(x) for x in (d.get("contradicting_fact_ids") or ())),
             predicted_observation=str(d.get("predicted_observation", "")),
             experiment_command=str(d.get("experiment_command", "")),
             result=str(d.get("result", "")),
@@ -552,9 +606,7 @@ def _prior_failure_index(state: EpisodeState, fingerprint: str) -> int:
     (:func:`_edit_between_verdict` returns ``"unknown"`` when edits exist), so
     falsification NEVER fires and the sentinel never reaches a statement."""
     rec = state.last_failure_record or {}
-    rec_fp = str(
-        rec.get("failure_fingerprint") or rec.get("fingerprint") or rec.get("hash") or ""
-    )
+    rec_fp = str(rec.get("failure_fingerprint") or rec.get("fingerprint") or rec.get("hash") or "")
     if rec_fp and rec_fp != fingerprint:
         return -1
     for k in ("action_index", "index", "iter", "iter_observed"):
@@ -668,9 +720,7 @@ def _probe_outcomes_and_indices(entry: Any) -> tuple[list[str], list[Any]] | Non
 # NAMED STATE TRANSITIONS — pure classifiers over (EpisodeState, LedgerEvent).
 # Each returns an Advisory candidate or None (correct-or-quiet).
 # --------------------------------------------------------------------------- #
-def classify_no_discriminating_evidence(
-    state: EpisodeState, event: LedgerEvent
-) -> Advisory | None:
+def classify_no_discriminating_evidence(state: EpisodeState, event: LedgerEvent) -> Advisory | None:
     """Repeated probes of ONE stem that all returned the SAME outcome (all "zero", or all
     "hit") gained no discriminating evidence — the agent is stuck on one surface. Suggests
     an ALTERNATE-SURFACE candidate. Fires only on >=2 probes with a single distinct
@@ -701,9 +751,7 @@ def classify_no_discriminating_evidence(
     )
 
 
-def classify_same_command_new_output(
-    state: EpisodeState, event: LedgerEvent
-) -> Advisory | None:
+def classify_same_command_new_output(state: EpisodeState, event: LedgerEvent) -> Advisory | None:
     """The SAME probe stem produced CHANGING outcomes across its probes (e.g. "zero" then
     "hit") — the same command yielded NEW output. This is progress, EXPLICITLY NOT a loop.
     The novelty signal is the probe-ledger outcome DELTA; without a delta this stays
@@ -733,9 +781,7 @@ def classify_same_command_new_output(
     )
 
 
-def classify_edit_contradicted_contract(
-    state: EpisodeState, event: LedgerEvent
-) -> Advisory | None:
+def classify_edit_contradicted_contract(state: EpisodeState, event: LedgerEvent) -> Advisory | None:
     """A source edit was PROVABLY followed by a REPEAT of a known failure fingerprint —
     the edit did not change the failing result, so the hypothesis the edit embodied is
     FALSIFIED. Fires ONLY on: (a) a repeat fingerprint (already in
@@ -757,7 +803,8 @@ def classify_edit_contradicted_contract(
     # verdict YES guarantees prior_idx >= 0 and a non-empty in-window edit set, so
     # edit_idx is always a REAL index — the -1 sentinel can never reach the statement.
     between = [
-        ei for ei in _edit_indices(state)
+        ei
+        for ei in _edit_indices(state)
         if ei > prior_idx and (event.action_index < 0 or ei < event.action_index)
     ]
     edit_idx = max(between)

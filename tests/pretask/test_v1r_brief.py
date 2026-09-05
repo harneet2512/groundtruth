@@ -177,12 +177,13 @@ def test_caller_old_schema_renders_unverified_not_suppressed(tmp_path: Path) -> 
 # --- TTD: <gt-graph-map> wiring into the live brief (wire.md #1) -------------
 
 
-def test_render_brief_appends_graph_map(tmp_path: Path) -> None:
+def test_render_brief_appends_graph_map(tmp_path: Path, monkeypatch) -> None:
     """render_brief(graph_db=...) appends a <gt-graph-map> sibling block.
 
     RED before wiring (render_brief had no graph_db param -> TypeError);
     GREEN after. The map carries the import-resolved caller as a fact.
     """
+    monkeypatch.setenv("GT_GRAPH_MAP_DEMAND", "1")
     db, _repo = _walk_db(tmp_path, [(3, 1, "import", 1.0, 1)])
     files = [
         FileEntry(
@@ -229,7 +230,7 @@ def test_render_brief_graph_map_quiet_when_no_confident_edge(tmp_path: Path) -> 
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 def test_generate_v1r_brief_carries_graph_map_no_laundering(
-    mock_v74: MagicMock, tmp_path: Path
+    mock_v74: MagicMock, tmp_path: Path, monkeypatch
 ) -> None:
     """Full pipeline E2E: generate_v1r_brief threads graph_db into render_brief,
     so the final brief_text carries <gt-graph-map> built from the SAME db, and a
@@ -239,6 +240,7 @@ def test_generate_v1r_brief_carries_graph_map_no_laundering(
     name_match artifact (find_files -> walk, 0.9). The import caller must surface
     as a fact; find_files() must never appear as a confident caller.
     """
+    monkeypatch.setenv("GT_GRAPH_MAP_DEMAND", "1")
     db, repo = _walk_db(
         tmp_path,
         [(3, 1, "import", 1.0, 1), (2, 1, "name_match", 0.9, 1)],
@@ -397,10 +399,10 @@ def graph_db(tmp_path: Path) -> str:
             (3, 'Function', 'test_login', 'tests/test_auth.py', 1),
             (4, 'Function', 'test_verify', 'tests/test_auth.py', 1),
             (5, 'Function', 'require_auth', 'src/auth/middleware.py', 0);
-        INSERT INTO edges (source_id, target_id, type, confidence) VALUES
-            (3, 1, 'CALLS', 1.0),
-            (4, 2, 'CALLS', 1.0),
-            (5, 2, 'CALLS', 1.0);
+        INSERT INTO edges (source_id, target_id, type, confidence, resolution_method) VALUES
+            (3, 1, 'CALLS', 1.0, 'import'),
+            (4, 2, 'CALLS', 1.0, 'import'),
+            (5, 2, 'CALLS', 1.0, 'import');
     """)
     conn.close()
     return db_path
@@ -549,12 +551,13 @@ def test_generate_v1r_brief_empty_on_no_signal(mock_v74: MagicMock) -> None:
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
 @patch("groundtruth.pretask.v1r_brief._top_functions", return_value=[])
-def test_generate_v1r_brief_emits_low_score_candidates(_mock_funcs, mock_v74: MagicMock) -> None:
+def test_generate_v1r_brief_rejects_unsupported_score_only_candidates(
+    _mock_funcs, mock_v74: MagicMock
+) -> None:
     mock_v74.return_value = MagicMock(ranked_full=[{"path": "a.py", "score": 0.1}])
     result = generate_v1r_brief("fix auth bug", "/repo", "/db.sqlite")
-    assert len(result.files) == 1
-    assert result.files[0].path == "a.py"
-    assert "1. a.py" in result.brief_text
+    assert result.files == []
+    assert "1. a.py" not in result.brief_text
 
 
 @patch("groundtruth.pretask.v1r_brief.run_v74")
@@ -627,9 +630,9 @@ def test_sparse_graph_no_suppression(_mock_funcs, mock_v74, sparse_graph_db: str
     """On sparse graphs, modulus gate must NOT suppress the brief."""
     mock_v74.return_value = MagicMock(
         ranked_full=[
-            {"path": "src/urls.py", "score": 0.8, "components": {"path": 0.0}},
-            {"path": "src/validator.py", "score": 0.7, "components": {"path": 0.0}},
-            {"path": "src/render.py", "score": 0.6, "components": {"path": 0.0}},
+            {"path": "src/urls.py", "score": 0.8, "components": {"lex": 0.4}},
+            {"path": "src/validator.py", "score": 0.7, "components": {"lex": 0.3}},
+            {"path": "src/render.py", "score": 0.6, "components": {"lex": 0.2}},
         ]
     )
     result = generate_v1r_brief("fix url parsing bug", "/repo", sparse_graph_db)

@@ -96,28 +96,32 @@ async def handle_orient(
             exported = [s for s in syms_result.value if s.is_exported]
             layer = _classify_layer(matched)
             layer_tag = f" [{layer}]" if layer else ""
-            findings.append(Finding(
-                kind=FindingKind.FILE_RELEVANCE,
-                severity=Severity.NOTE,
-                confidence=1.0,
-                location=Location(file=matched),
-                message=f"{len(syms_result.value)} symbols ({len(exported)} exported){layer_tag}",
-                agent_action=AgentAction.READ,
-                why_now=WhyNow.ALWAYS,
-            ))
+            findings.append(
+                Finding(
+                    kind=FindingKind.FILE_RELEVANCE,
+                    severity=Severity.NOTE,
+                    confidence=1.0,
+                    location=Location(file=matched),
+                    message=f"{len(syms_result.value)} symbols ({len(exported)} exported){layer_tag}",
+                    agent_action=AgentAction.READ,
+                    why_now=WhyNow.ALWAYS,
+                )
+            )
 
         importers_result = store.get_importers_of_file(matched, min_confidence=MIN_CONFIDENCE)
         if not isinstance(importers_result, Err) and importers_result.value:
             importers = importers_result.value[:5]
-            findings.append(Finding(
-                kind=FindingKind.CALLER_EXPECTATION,
-                severity=Severity.NOTE,
-                confidence=1.0,
-                location=Location(file=matched),
-                message=f"imported by: {', '.join(importers[:3])}{'...' if len(importers) > 3 else ''}",
-                agent_action=AgentAction.READ,
-                why_now=WhyNow.ALWAYS,
-            ))
+            findings.append(
+                Finding(
+                    kind=FindingKind.CALLER_EXPECTATION,
+                    severity=Severity.NOTE,
+                    confidence=1.0,
+                    location=Location(file=matched),
+                    message=f"imported by: {', '.join(importers[:3])}{'...' if len(importers) > 3 else ''}",
+                    agent_action=AgentAction.READ,
+                    why_now=WhyNow.ALWAYS,
+                )
+            )
 
     if task:
         identifiers = _extract_identifiers(task)
@@ -138,44 +142,60 @@ async def handle_orient(
                 # for the localized symbol. Correct-or-quiet: "" when no signal.
                 sym_contract = contract_line_for(store, sym.file_path, sym.name)
                 contract_tag = f" — {sym_contract}" if sym_contract else ""
-                findings.append(Finding(
-                    kind=FindingKind.FILE_RELEVANCE,
-                    severity=Severity.WARNING,
-                    confidence=0.90,
-                    location=Location(file=sym.file_path, line=sym.line_number, symbol=sym.name),
-                    message=f"FIX HERE: {sym.name}(){sym_layer_tag}{contract_tag}",
-                    agent_action=AgentAction.READ,
-                    why_now=WhyNow.ALWAYS,
-                ))
+                findings.append(
+                    Finding(
+                        kind=FindingKind.FILE_RELEVANCE,
+                        severity=Severity.WARNING,
+                        confidence=0.90,
+                        location=Location(
+                            file=sym.file_path, line=sym.line_number, symbol=sym.name
+                        ),
+                        message=f"FIX HERE: {sym.name}(){sym_layer_tag}{contract_tag}",
+                        agent_action=AgentAction.READ,
+                        why_now=WhyNow.ALWAYS,
+                    )
+                )
                 if not isinstance(refs_result, Err):
                     for ref in refs_result.value[:MAX_CALLERS_PER_SYMBOL]:
                         if not ref.referenced_in_file:
                             continue
-                        findings.append(Finding(
-                            kind=FindingKind.CALLER_EXPECTATION,
-                            severity=Severity.WARNING,
-                            confidence=0.75,
-                            location=Location(file=sym.file_path, line=sym.line_number, symbol=sym.name),
-                            message=f"caller at {ref.referenced_in_file}:{ref.referenced_at_line or '?'}",
-                            evidence_locations=[Location(file=ref.referenced_in_file, line=ref.referenced_at_line)],
-                            agent_action=AgentAction.VERIFY,
-                            why_now=WhyNow.ALWAYS,
-                        ))
+                        findings.append(
+                            Finding(
+                                kind=FindingKind.CALLER_EXPECTATION,
+                                severity=Severity.WARNING,
+                                confidence=0.75,
+                                location=Location(
+                                    file=sym.file_path, line=sym.line_number, symbol=sym.name
+                                ),
+                                message=f"caller at {ref.referenced_in_file}:{ref.referenced_at_line or '?'}",
+                                evidence_locations=[
+                                    Location(
+                                        file=ref.referenced_in_file, line=ref.referenced_at_line
+                                    )
+                                ],
+                                agent_action=AgentAction.VERIFY,
+                                why_now=WhyNow.ALWAYS,
+                            )
+                        )
 
         hotspots_result = store.get_hotspots(MAX_HOTSPOTS, min_confidence=MIN_CONFIDENCE)
         if not isinstance(hotspots_result, Err):
             localized_names = {f.location.symbol for f in findings if f.location.symbol}
             for hs in hotspots_result.value:
                 if hs.name in localized_names:
-                    findings.append(Finding(
-                        kind=FindingKind.FILE_RELEVANCE,
-                        severity=Severity.NOTE,
-                        confidence=0.95,
-                        location=Location(file=hs.file_path, line=hs.line_number, symbol=hs.name),
-                        message=f"HOTSPOT: {hs.name} has {hs.usage_count} verified callers",
-                        agent_action=AgentAction.READ,
-                        why_now=WhyNow.ALWAYS,
-                    ))
+                    findings.append(
+                        Finding(
+                            kind=FindingKind.FILE_RELEVANCE,
+                            severity=Severity.NOTE,
+                            confidence=0.95,
+                            location=Location(
+                                file=hs.file_path, line=hs.line_number, symbol=hs.name
+                            ),
+                            message=f"HOTSPOT: {hs.name} has {hs.usage_count} verified callers",
+                            agent_action=AgentAction.READ,
+                            why_now=WhyNow.ALWAYS,
+                        )
+                    )
 
     pruned = prune_findings(novelty.filter(findings), confidence_floor=MIN_CONFIDENCE)
     if not pruned:

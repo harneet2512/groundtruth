@@ -5,6 +5,7 @@ English by query_preprocessor when they match a real file basename or
 symbol name in the indexed graph. Adds matched tokens to file_hints (if
 file-basename match) or function_hints (if symbol match).
 """
+
 from __future__ import annotations
 
 import math
@@ -21,7 +22,9 @@ from groundtruth.pretask.v2_types import HighSignalToken, QueryObject, TokenSour
 
 def _load_graph_views(
     db_path: str,
-) -> tuple[set[str], dict[str, str], set[str], dict[str, str], dict[str, int], dict[str, int]] | None:
+) -> (
+    tuple[set[str], dict[str, str], set[str], dict[str, str], dict[str, int], dict[str, int]] | None
+):
     """Return (file_stems, stem_to_path, symbol_names, name_to_label, stem_df, sym_df) or None.
 
     stem_df: count of distinct file_paths sharing each stem (rarity gate).

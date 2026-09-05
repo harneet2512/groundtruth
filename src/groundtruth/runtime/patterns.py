@@ -12,6 +12,7 @@ Nothing was removed in the consolidation; only unified.
 Research basis for the governor that consumes these: TIDE (arXiv 2602.02196),
 TRAJEVAL (arXiv 2603.24631), "Beyond Resolution Rates" (arXiv 2604.02547).
 """
+
 from __future__ import annotations
 
 import re
@@ -38,7 +39,9 @@ TEST_RUNNER_RE = re.compile(
     r"|bun\s+test\b|deno\s+test\b|node\s+--test\b"  # JS-native test runners
     r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
     r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
-    r")", re.I)
+    r")",
+    re.I,
+)
 
 # ---------------------------------------------------------------------------
 # TEST PASS / FAIL markers — an observed RESULT either way latches
@@ -49,13 +52,15 @@ TEST_PASS_RE = re.compile(
     r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b|BUILD SUCCESS"
     r"|OK \([1-9]\d* tests?\)|Tests:\s+[1-9]\d* passed"
     r"|\b[1-9]\d* passed\b.*\b0 failed\b)",
-    re.M)
+    re.M,
+)
 
 TEST_FAIL_RE = re.compile(
     r"(\bFAILED\b|\bAssertionError\b|\b[1-9]\d* failed\b|\bFAIL: "
     r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
     r"|\b[1-9]\d* failing\b|Tests:\s+[1-9]\d* failed"
-    r"|Failures:\s*[1-9]\d*|Errors:\s*[1-9]\d*)")
+    r"|Failures:\s*[1-9]\d*|Errors:\s*[1-9]\d*)"
+)
 
 # Explicit runner-owned proof that the command executed no tests. This is
 # evaluated after fail but before pass, and only after a test protocol is
@@ -144,6 +149,7 @@ def classify_test_observation(
     """
     return _classify_formal_test(command, output, returncode)
 
+
 # ---------------------------------------------------------------------------
 # ENV FAILURE — environment/tooling failure (NOT a test failure). Used to
 # suppress governor false-positives: an env error is actionable feedback, not a
@@ -161,7 +167,9 @@ ENV_FAIL_RE = re.compile(
     r"|error while loading shared libraries|cannot open shared object"
     r"|ImproperlyConfigured"
     r"|AttributeError: module '[\w.]+' has no attribute"  # py-version shims
-    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)", re.I)
+    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)",
+    re.I,
+)
 
 # ---------------------------------------------------------------------------
 # COMPILE FAILURE — a build/compile error (actionable feedback, not blindness).
@@ -169,7 +177,8 @@ ENV_FAIL_RE = re.compile(
 COMPILE_FAIL_RE = re.compile(
     r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
     r"|cannot find (?:value|function|type|module|symbol)"
-    r"|undefined:\s|\bTS\d{4,}:|compilation error)")
+    r"|undefined:\s|\bTS\d{4,}:|compilation error)"
+)
 
 # ---------------------------------------------------------------------------
 # INFRA / TEARDOWN NOISE (W4 guard 1) — a failure marker that is NOT the agent's
@@ -207,10 +216,11 @@ INFRA_NOISE_RE = re.compile(
 # False and a real regression still steers. The "0 failed" pass line never matches
 # (the count leg requires a [1-9] lead), so a fully green run stays noise.
 _GENUINE_FAILURE_RE = re.compile(
-    r"\b[1-9]\d* (?:failed|error|errors|failing)\b"   # summary count
-    r"|\bFAILED\b"                                     # per-test / short-summary FAILED
-    r"|::\S+\s+ERROR\b",                               # per-test node ERROR (`test::x ERROR`)
-    re.IGNORECASE)
+    r"\b[1-9]\d* (?:failed|error|errors|failing)\b"  # summary count
+    r"|\bFAILED\b"  # per-test / short-summary FAILED
+    r"|::\S+\s+ERROR\b",  # per-test node ERROR (`test::x ERROR`)
+    re.IGNORECASE,
+)
 
 
 def is_infra_noise(text: str) -> bool:
@@ -302,10 +312,20 @@ AD_HOC_REPRO_RE = re.compile(
 )
 
 # Script basenames that are repository machinery, not a reproduction.
-_NON_REPRO_SCRIPTS = frozenset({
-    "manage.py", "setup.py", "conftest.py", "runtests.py", "run_tests.py",
-    "runtest.py", "run_test.py", "setup.js", "gulpfile.js", "webpack.config.js",
-})
+_NON_REPRO_SCRIPTS = frozenset(
+    {
+        "manage.py",
+        "setup.py",
+        "conftest.py",
+        "runtests.py",
+        "run_tests.py",
+        "runtest.py",
+        "run_test.py",
+        "setup.js",
+        "gulpfile.js",
+        "webpack.config.js",
+    }
+)
 
 # STATIC CHECK — type checkers and linters. `ruff format` is excluded (a
 # formatter says nothing about behaviour); `ruff check` / `ruff <path>` is not.
@@ -331,16 +351,12 @@ _FOCUS_FLAG_RE = re.compile(
     r"(?:^|\s)(?:-k|--test-name-pattern|--testNamePattern|--grep|--filter"
     r"|--run|-run|-t)[=\s]+(?P<sel>\S+)"
 )
-_FOCUS_UNITTEST_RE = re.compile(
-    r"-m\s+unittest\b(?:\s+-\S+)*\s+(?P<sel>[\w]+(?:\.[\w]+)+)"
-)
+_FOCUS_UNITTEST_RE = re.compile(r"-m\s+unittest\b(?:\s+-\S+)*\s+(?P<sel>[\w]+(?:\.[\w]+)+)")
 
 # Deepest-frame extraction. `<string>` / `<stdin>` / `<frozen ...>` are the
 # interpreter's own pseudo-files, not repository sources.
 _PY_FRAME_RE = re.compile(r'^\s*File "([^"]+)", line \d+', re.M)
-_JS_FRAME_RE = re.compile(
-    r"\bat\s+(?:[^\s(]+\s+)?\(?([^\s()]+\.(?:js|mjs|cjs|ts)):\d+:\d+"
-)
+_JS_FRAME_RE = re.compile(r"\bat\s+(?:[^\s(]+\s+)?\(?([^\s()]+\.(?:js|mjs|cjs|ts)):\d+:\d+")
 _NON_REPO_FRAME_RE = re.compile(
     r"site-packages|dist-packages|node_modules|/usr/lib/python|\\lib\\python"
     r"|/lib/python3|[/\\]python3\.\d+[/\\](?!site)|[/\\]Lib[/\\]|\.rustup|\.cargo[/\\]registry",
@@ -429,9 +445,7 @@ def _is_repo_frame(path: str, repo_root: str = "") -> bool:
     if repo_root:
         normalized = path.replace("\\", "/")
         root = repo_root.replace("\\", "/").rstrip("/")
-        is_absolute = normalized.startswith("/") or (
-            len(normalized) > 1 and normalized[1] == ":"
-        )
+        is_absolute = normalized.startswith("/") or (len(normalized) > 1 and normalized[1] == ":")
         if is_absolute and not normalized.lower().startswith(root.lower() + "/"):
             return False
     return True
@@ -488,9 +502,7 @@ def _non_test_outcome(
         return "fail"
     if ENV_FAIL_RE.search(out):
         return "env_fail"
-    if TEST_FAIL_RE.search(out) or (
-        _TRACEBACK_RE.search(out) and deepest_repo_frame(out)
-    ):
+    if TEST_FAIL_RE.search(out) or (_TRACEBACK_RE.search(out) and deepest_repo_frame(out)):
         return "fail"
     return ""
 
@@ -522,10 +534,7 @@ def classify_validation_observation(
     if protocol:
         selector = _focus_selector(cmd) if protocol == "command" else ""
         return ValidationObservation(
-            kind=(
-                ValidationKind.FOCUSED_TEST if selector
-                else ValidationKind.FORMAL_TEST
-            ),
+            kind=(ValidationKind.FOCUSED_TEST if selector else ValidationKind.FORMAL_TEST),
             outcome=outcome,
             protocol=protocol,
             selector=selector,

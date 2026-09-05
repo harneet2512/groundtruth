@@ -55,6 +55,7 @@ def _ensure_rust_toolchain_on_path(server_command: list[str] | str) -> None:
             logger.info("rust toolchain located off-PATH; prepended %s for rust-analyzer", d)
             return
 
+
 _TRACE_TRUNCATE_BYTES = 10 * 1024  # 10KB
 _TRACE_MAX_FILES = 3
 
@@ -144,7 +145,9 @@ class LSPClient:
                 if any(n in _cmd0 for n in ("typescript-language-server", "pyright", "node")):
                     _node_opts = _srv_env.get("NODE_OPTIONS", "")
                     if "max-old-space-size" not in _node_opts:
-                        _srv_env["NODE_OPTIONS"] = f"{_node_opts} --max-old-space-size={_cap_mb}".strip()
+                        _srv_env["NODE_OPTIONS"] = (
+                            f"{_node_opts} --max-old-space-size={_cap_mb}".strip()
+                        )
                 elif "gopls" in _cmd0:
                     _srv_env.setdefault("GOMEMLIMIT", f"{_cap_mb}MiB")
             self._process = await asyncio.create_subprocess_exec(
@@ -158,9 +161,7 @@ class LSPClient:
             # the server's die-reason AND can deadlock a chatty server once the OS
             # pipe buffer fills. See _drain_stderr.
             if self._process.stderr is not None:
-                self._stderr_task = asyncio.create_task(
-                    self._drain_stderr(self._process.stderr)
-                )
+                self._stderr_task = asyncio.create_task(self._drain_stderr(self._process.stderr))
             self._started = True
             return Ok(None)
         except (OSError, FileNotFoundError) as exc:

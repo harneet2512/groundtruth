@@ -265,9 +265,7 @@ def extract_contract(
             break
 
     issue_calls = extract_issue_calls(issue_text)
-    contract_lines = _extract_contract_lines(
-        repo_root, selected, max_lines=max_contract_lines
-    )
+    contract_lines = _extract_contract_lines(repo_root, selected, max_lines=max_contract_lines)
     if issue_calls:
         contract_lines = [f"issue calls: {call}" for call in issue_calls[:2]] + contract_lines
         contract_lines = contract_lines[:max_contract_lines]

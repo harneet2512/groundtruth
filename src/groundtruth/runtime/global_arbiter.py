@@ -51,6 +51,7 @@ and the whole v2 branch is a strict no-op when the flag is unset OR when candida
 the inert defaults — so ``arbitrate`` is byte-identical to the pre-SS-1 engine with
 ``GT_SS_ARBITER_V2`` unset.
 """
+
 from __future__ import annotations
 
 import os
@@ -86,26 +87,26 @@ PLANE_LANE_A = "lane_a"
 PLANE_STEER = "steer"
 PLANE_GATEWAY = "gateway"
 
-REASON_DEDUP = "dedup"              # dedup_key already in the delivered chain
+REASON_DEDUP = "dedup"  # dedup_key already in the delivered chain
 REASON_ACQUIRED = "already_acquired"  # the agent already acquired the fact's target
-REASON_OUTRANKED = "outranked"     # a higher-ladder candidate won the single dose
-REASON_INTERNAL = "internal"       # not on the ladder -> never an external dose
+REASON_OUTRANKED = "outranked"  # a higher-ladder candidate won the single dose
+REASON_INTERNAL = "internal"  # not on the ladder -> never an external dose
 # SS-1 (GT_SS_ARBITER_V2) reasons — inert unless the flag is on AND the candidate carries
 # the corresponding non-default signal (rendered_chars==0 / redundant_with_delivered).
 REASON_SS_EMPTY_PAYLOAD = "ss_empty_payload"  # zero rendered bytes -> never a delivered row
-REASON_REDUNDANT = "redundant_delivered"      # localization superseded by a delivered def_partition
+REASON_REDUNDANT = "redundant_delivered"  # localization superseded by a delivered def_partition
 
 # --------------------------------------------------------------------------- #
 # THE LADDER — class -> priority (higher wins the single global dose).
 # --------------------------------------------------------------------------- #
 RANK_LADDER: dict[str, int] = {
-    "executed_world_fact": 70,   # the repo's own covering RED / executed verification
-    "edit_violation": 60,        # a break in the agent's just-written code
+    "executed_world_fact": 70,  # the repo's own covering RED / executed verification
+    "edit_violation": 60,  # a break in the agent's just-written code
     "obligation_violation": 50,  # an edited-but-unexercised requirement
-    "caller_contract": 40,       # a signature change breaking cross-file callers
-    "causal_chain": 30,          # a co-change / companion-registration surface
-    "localization": 20,          # where-is-X orientation
-    "recovery": 10,              # stuck / loop / failure nudges
+    "caller_contract": 40,  # a signature change breaking cross-file callers
+    "causal_chain": 30,  # a co-change / companion-registration surface
+    "localization": 20,  # where-is-X orientation
+    "recovery": 10,  # stuck / loop / failure nudges
 }
 
 # Producer kind / evidence_type -> ladder class. An unmapped kind (and its ``base:suffix``
@@ -208,9 +209,7 @@ def _ss_v2_on() -> bool:
 # set the seam's SM-10 uses (``gt_mini_patch._GA_PREVENTIVE_CLASSES``). Under SS-V2 a
 # preventive fact whose pre-submit-completeness decision point is still LIVE
 # (``obligations_open``) is NOT labeled repair_support — it is exactly its decision point.
-_PREVENTIVE_CLASSES: frozenset[str] = frozenset(
-    {"caller_contract", "causal_chain", "localization"}
-)
+_PREVENTIVE_CLASSES: frozenset[str] = frozenset({"caller_contract", "causal_chain", "localization"})
 
 
 def _is_preventive_class(kind: str) -> bool:
@@ -275,24 +274,30 @@ class Candidate:
     (rendered bytes + seal) out-of-band and invokes it for the winner alone.
     """
 
-    plane: str                        # PLANE_LANE_A / PLANE_STEER / PLANE_GATEWAY
-    kind: str                         # producer kind / evidence_type (projected to a class)
-    dedup_key: str = ""               # the UNIFIED envelope dedup key (one derivation, all planes)
-    symbol: str = ""                  # normalized target (file rel / symbol) for acquired-suppression
-    tier: str = "INFO"                # VERIFIED / WARNING / INFO / HYPOTHESIS
-    confidence: float = 0.0           # [0, 1]
-    boundary_ordinal: int = 0         # the decision-point ordinal this fact belongs to
-    current_ordinal: int = 0          # the firing-event ordinal (for correct-time labeling)
+    plane: str  # PLANE_LANE_A / PLANE_STEER / PLANE_GATEWAY
+    kind: str  # producer kind / evidence_type (projected to a class)
+    dedup_key: str = ""  # the UNIFIED envelope dedup key (one derivation, all planes)
+    symbol: str = ""  # normalized target (file rel / symbol) for acquired-suppression
+    tier: str = "INFO"  # VERIFIED / WARNING / INFO / HYPOTHESIS
+    confidence: float = 0.0  # [0, 1]
+    boundary_ordinal: int = 0  # the decision-point ordinal this fact belongs to
+    current_ordinal: int = 0  # the firing-event ordinal (for correct-time labeling)
     suppressible_if_acquired: bool = False  # localization-class facts only
-    seq: int = 0                      # stable insertion order (deterministic tiebreak)
+    seq: int = 0  # stable insertion order (deterministic tiebreak)
     # SS-1 (GT_SS_ARBITER_V2) signals — ALL inert defaults, so a candidate built without them
     # is byte-identical under the flag (every v2 branch is a no-op on these defaults). The
     # SEAM populates them when it has the signal (rendered bytes / open obligations / a
     # delivered def_ref_partition for this target); the engine only READS the scalars — still
     # no free-text surface, so leak=0 by construction is preserved.
-    rendered_chars: int = -1          # bytes the plane WILL render: 0 => empty (reject); -1 => unknown (skip)
-    obligations_open: bool = False    # a preventive fact whose pre-submit-completeness point is still live
-    redundant_with_delivered: bool = False  # localization superseded by an already-delivered def_ref_partition
+    rendered_chars: int = (
+        -1
+    )  # bytes the plane WILL render: 0 => empty (reject); -1 => unknown (skip)
+    obligations_open: bool = (
+        False  # a preventive fact whose pre-submit-completeness point is still live
+    )
+    redundant_with_delivered: bool = (
+        False  # localization superseded by an already-delivered def_ref_partition
+    )
     # Producer-natural semantic identity. ``symbol`` above is deliberately the
     # acquisition target (normally a repo-relative path); keeping ``fact_id``
     # distinct prevents path-vs-symbol confusion when the seam proves that a
@@ -415,20 +420,20 @@ def arbitrate(
         # below every fresh class so the dose rotates (empty dclasses => r_eff == r => identical).
         # WS-1a: a coalition-exempt kind (def_ref_partition) is NOT sunk with its class — the
         # coalition partner must rise to the next dose after the localization brief delivers.
-        _rotate = (dclasses
-                   and class_of_kind(c.kind) in dclasses
-                   and c.kind not in _COALITION_EXEMPT_KINDS)
-        r_eff = (r - _CLASS_ROTATION_DECAY if _rotate else r)
+        _rotate = (
+            dclasses and class_of_kind(c.kind) in dclasses and c.kind not in _COALITION_EXEMPT_KINDS
+        )
+        r_eff = r - _CLASS_ROTATION_DECAY if _rotate else r
         eligible.append((r_eff, c))
     if not eligible:
         return ArbitrationResult(winner=None, repair_support=False, losers=losers)
     eligible.sort(
         key=lambda rc: (
-            -rc[0],                         # ladder class, desc
-            -rc[1].tier_rank,               # tier, desc
-            -round(rc[1].confidence, 8),    # confidence, desc
-            rc[1].seq,                       # stable insertion order, asc
-            rc[1].dedup_key,                 # total order tiebreak
+            -rc[0],  # ladder class, desc
+            -rc[1].tier_rank,  # tier, desc
+            -round(rc[1].confidence, 8),  # confidence, desc
+            rc[1].seq,  # stable insertion order, asc
+            rc[1].dedup_key,  # total order tiebreak
         )
     )
     winner = eligible[0][1]

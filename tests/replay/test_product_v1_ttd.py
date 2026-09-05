@@ -13,8 +13,6 @@ import os
 import sqlite3
 import textwrap
 
-import pytest
-
 
 # ---------- helpers ----------
 
@@ -652,10 +650,6 @@ class TestBug1_GTStatusPollution:
 class TestBug4_CallerConfidenceAt07:
     """Main caller query must use >= 0.7, not >= 0.5."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Pre-existing test drift (not a final_hardening regression): 0.6 confidence caller not excluded at 0.7 threshold",
-    )
     def test_moderate_confidence_excluded_from_main_query(self, tmp_path):
         """Callers with confidence 0.6 must be excluded from main query."""
         from groundtruth.hooks.post_edit import _get_callers_from_graph

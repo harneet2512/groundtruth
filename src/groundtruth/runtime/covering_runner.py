@@ -211,9 +211,7 @@ def select_covering_tests(
 
     Correct-or-quiet: no db / no schema / no fact edges -> [].
     """
-    identities = {
-        str(symbol) for symbol in (symbol_names or ()) if symbol
-    }
+    identities = {str(symbol) for symbol in (symbol_names or ()) if symbol}
     names = project_bare_symbol_names(identities)
     if not identities or not names or not db_path or not os.path.isfile(db_path):
         return []
@@ -248,18 +246,14 @@ def select_covering_tests(
             normalized_path = _normalized_definition_path(file_path, repo_root)
             if not normalized_path:
                 continue
-            by_name.setdefault(str(name), []).append(
-                (int(node_id), normalized_path)
-            )
+            by_name.setdefault(str(name), []).append((int(node_id), normalized_path))
 
         tids: list[int] = []
         for identity in sorted(identities):
             qualified = split_repository_symbol_identity(identity)
             if qualified is not None:
                 wanted_path, name = qualified
-                wanted_path = _normalized_definition_path(
-                    wanted_path, repo_root
-                )
+                wanted_path = _normalized_definition_path(wanted_path, repo_root)
                 matches = [
                     node_id
                     for node_id, file_path in by_name.get(name, ())
@@ -271,11 +265,7 @@ def select_covering_tests(
                 homes = {file_path for _node_id, file_path in candidates}
                 # Historical bare focus remains compatible only when it is a real identity:
                 # one definition file. Two homes are ambiguous and therefore quiet.
-                matches = (
-                    [node_id for node_id, _file_path in candidates]
-                    if len(homes) == 1
-                    else []
-                )
+                matches = [node_id for node_id, _file_path in candidates] if len(homes) == 1 else []
             for node_id in matches:
                 if node_id not in tids:
                     tids.append(node_id)
@@ -453,8 +443,11 @@ def run_covering_tests(
             )
         else:
             result = _run_via_executor(
-                executor, repo_root, command,
-                timeout=remaining, max_output_chars=max_output_chars,
+                executor,
+                repo_root,
+                command,
+                timeout=remaining,
+                max_output_chars=max_output_chars,
             )
         spent_ms += int(result.get("duration_ms") or 0)
         if result.get("executed"):
@@ -489,7 +482,9 @@ def run_covering_tests(
         {
             "executed": any_executed,
             "verdict": overall,
-            "reason": (deciding or {}).get("reason", base["reason"]) if deciding else base["reason"],
+            "reason": (deciding or {}).get("reason", base["reason"])
+            if deciding
+            else base["reason"],
             "ran": ran,
             "environment_failure_class": env_class,
             "command": (deciding or {}).get("command", []),
@@ -680,16 +675,18 @@ def _make_base_worktree(
     possible on that path (``wt`` is a container path), so success is trusted from
     the git return code (fail-safe: a non-zero ``worktree add`` -> ``None`` -> quiet)."""
     try:
-        if not repo_root or _git(
-            repo_root, ["rev-parse", "--verify", "HEAD"], executor=executor
-        ) is None:
+        if (
+            not repo_root
+            or _git(repo_root, ["rev-parse", "--verify", "HEAD"], executor=executor) is None
+        ):
             return None
         if executor is None:
             parent = tempfile.mkdtemp(prefix="gt_base_")
             # git refuses a non-empty target; hand it a fresh non-existent subpath.
             wt = os.path.join(parent, "base")
-            if (_git(repo_root, ["worktree", "add", "--detach", wt, "HEAD"]) is None
-                    or not os.path.isdir(wt)):
+            if _git(
+                repo_root, ["worktree", "add", "--detach", wt, "HEAD"]
+            ) is None or not os.path.isdir(wt):
                 _cleanup_base_worktree(repo_root, wt, parent)
                 return None
             return wt, parent
@@ -698,9 +695,7 @@ def _make_base_worktree(
         if executor_base is not None and not isinstance(executor_base, str):
             return None
         wt = _container_base_path(repo_root, base_root=executor_base)
-        if _git(
-            repo_root, ["worktree", "add", "--detach", wt, "HEAD"], executor=executor
-        ) is None:
+        if _git(repo_root, ["worktree", "add", "--detach", wt, "HEAD"], executor=executor) is None:
             # An add can fail after creating the checkout or its git metadata.
             # Use the normal ordered cleanup so neither half is left behind.
             _cleanup_base_worktree(repo_root, wt, "", executor=executor)
@@ -899,11 +894,7 @@ def attribute_covering_red(
         norm_root = _norm(repo_root or "").rstrip("/")
         if norm_root and norm_frame.startswith(norm_root + "/"):
             norm_frame = norm_frame[len(norm_root) + 1 :]
-        implicated = tuple(
-            path
-            for path in edited
-            if _norm(path) == norm_frame
-        )
+        implicated = tuple(path for path in edited if _norm(path) == norm_frame)
         return CoveringAttribution(
             # W2-R3 (2026-07-29): is_edit_attributed no longer has a basename
             # fallback — attribution is exact-or-anchored-suffix path match —

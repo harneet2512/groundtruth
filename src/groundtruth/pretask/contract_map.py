@@ -23,6 +23,7 @@ Research: The Distracting Effect (arXiv:2505.06914, 2025) — plausible-but-wron
 context drops accuracy 6-11pp, so never render an unverified callee edge as a fact.
 Lost in the Middle (NeurIPS 2024) — signature first (primacy). LLM-free, $0, pure SQL.
 """
+
 from __future__ import annotations
 
 import re
@@ -37,7 +38,6 @@ from groundtruth.pretask.curation_map import (
     _node_ids,
     _nodes_have_language,
     _open_ro,
-    build_function_map,
     verified_caller_count,
 )
 from groundtruth.runtime.sanitizer import (
@@ -46,6 +46,7 @@ from groundtruth.runtime.sanitizer import (
     valid_guard_clause,
     valid_return_shape,
 )
+
 
 # Per-kind SEMANTIC validators (C1b — B3 semantic-nonsense contract). clip_balanced
 # is STRUCTURAL only: it passes ``raise,exc_info[1].with_traceback`` (brackets
@@ -308,9 +309,27 @@ def _gated_prop_rows(
     e_pid = "COALESCE(" + _col_or("property_id", "''") + ", '')"
     e_srev = "COALESCE(" + _col_or("source_revision", "''") + ", '')"
     sql = (
-        "SELECT kind, value, " + e_line + ", " + e_conf + ", "
-        + e_start + ", " + e_end + ", " + e_tier + ", "
-        + e_extr + ", " + e_evm + ", " + e_vst + ", " + e_pid + ", " + e_srev + " "
+        "SELECT kind, value, "
+        + e_line
+        + ", "
+        + e_conf
+        + ", "
+        + e_start
+        + ", "
+        + e_end
+        + ", "
+        + e_tier
+        + ", "
+        + e_extr
+        + ", "
+        + e_evm
+        + ", "
+        + e_vst
+        + ", "
+        + e_pid
+        + ", "
+        + e_srev
+        + " "
         "FROM properties "
         "WHERE node_id IN (" + placeholders + ") AND kind IN (" + kind_ph + ") "
         "AND " + e_conf + " >= 0.5 ORDER BY line"
@@ -320,8 +339,20 @@ def _gated_prop_rows(
     except sqlite3.Error:
         return []
     out: list[tuple[str, str, int, float, int, int, str, str, str, str, str, str]] = []
-    for (kind, value, line, conf, start_line, end_line, tier, extractor,
-         ev_method, vstatus, prop_id, src_rev) in rows:
+    for (
+        kind,
+        value,
+        line,
+        conf,
+        start_line,
+        end_line,
+        tier,
+        extractor,
+        ev_method,
+        vstatus,
+        prop_id,
+        src_rev,
+    ) in rows:
         if not value:
             continue
         # B-22 trust_tier gate (correct-or-quiet): a non-empty tier outside the FACT
@@ -339,12 +370,22 @@ def _gated_prop_rows(
         _validate = _CONTRACT_VALUE_VALIDATORS.get(kind)
         if _validate is not None and not _validate(v):
             continue
-        out.append((
-            str(kind), v, int(line or 0), float(conf or 0.0),
-            int(start_line or 0), int(end_line or 0), t,
-            str(extractor or ""), str(ev_method or ""), str(vstatus or ""),
-            str(prop_id or ""), str(src_rev or ""),
-        ))
+        out.append(
+            (
+                str(kind),
+                v,
+                int(line or 0),
+                float(conf or 0.0),
+                int(start_line or 0),
+                int(end_line or 0),
+                t,
+                str(extractor or ""),
+                str(ev_method or ""),
+                str(vstatus or ""),
+                str(prop_id or ""),
+                str(src_rev or ""),
+            )
+        )
     return out
 
 
@@ -427,19 +468,42 @@ def read_property_facts(
             ids = _node_ids(conn, file_path, fname)
             if not ids:
                 continue
-            for (kind, value, line, conf, start_line, end_line, tier, extractor,
-                 ev_method, vstatus, prop_id, src_rev) in _gated_prop_rows(conn, ids):
+            for (
+                kind,
+                value,
+                line,
+                conf,
+                start_line,
+                end_line,
+                tier,
+                extractor,
+                ev_method,
+                vstatus,
+                prop_id,
+                src_rev,
+            ) in _gated_prop_rows(conn, ids):
                 key = prop_id or (kind + "\x00" + value)
                 if key in seen:
                     continue
                 seen.add(key)
-                facts.append(PropertyFact(
-                    file=file_path, function=fname, kind=kind, value=value,
-                    line=line, start_line=start_line, end_line=end_line,
-                    confidence=conf, trust_tier=tier, extractor=extractor,
-                    evidence_method=ev_method, verification_status=vstatus,
-                    property_id=prop_id, source_revision=src_rev,
-                ))
+                facts.append(
+                    PropertyFact(
+                        file=file_path,
+                        function=fname,
+                        kind=kind,
+                        value=value,
+                        line=line,
+                        start_line=start_line,
+                        end_line=end_line,
+                        confidence=conf,
+                        trust_tier=tier,
+                        extractor=extractor,
+                        evidence_method=ev_method,
+                        verification_status=vstatus,
+                        property_id=prop_id,
+                        source_revision=src_rev,
+                    )
+                )
         return facts
     finally:
         conn.close()
@@ -656,9 +720,7 @@ def build_contract(
                 )
                 if callee_id is None:
                     continue
-                cev = _evidence_for(
-                    conn, edge.file, edge.name, is_callee=True, ids=[callee_id]
-                )
+                cev = _evidence_for(conn, edge.file, edge.name, is_callee=True, ids=[callee_id])
                 # Worth showing a callee if it raises/guards OR exposes a
                 # signature — the signature is the deciding "call it correctly"
                 # interface fact the agent otherwise greps for (Task #48).
@@ -795,9 +857,7 @@ def _node_language(conn: sqlite3.Connection, node_id: int | None) -> str:
     if node_id is None:
         return ""
     try:
-        row = conn.execute(
-            "SELECT language FROM nodes WHERE id = ?", (node_id,)
-        ).fetchone()
+        row = conn.execute("SELECT language FROM nodes WHERE id = ?", (node_id,)).fetchone()
     except sqlite3.Error:
         return ""
     return str(row[0]) if row and row[0] else ""
@@ -925,9 +985,7 @@ def edit_target_callee_contracts(
                 # families cannot be a real source-level call — never a
                 # callee CONTRACT fact, whatever its deterministic stamp.
                 # Permissive when either language is unknown/legacy.
-                if has_lang and _is_cross_language_pair(
-                    src_lang, _node_language(conn, callee_id)
-                ):
+                if has_lang and _is_cross_language_pair(src_lang, _node_language(conn, callee_id)):
                     continue
                 sig, line = _node_sig_line_by_id(conn, callee_id)
                 if not sig:
@@ -968,7 +1026,7 @@ def _callee_sig_args(signature: str, _callee: str) -> str:
     for prefix in ("async def ", "def "):
         if sig.startswith(prefix):
             is_pydef = True
-            sig = sig[len(prefix):].strip()
+            sig = sig[len(prefix) :].strip()
             break
     if not is_pydef:
         # Stage 5 / LIPI 2026-06-10: a non-Python declaration header carries
@@ -1026,9 +1084,7 @@ class ContractDrift:
     removed: bool = False  # node gone after reindex (renamed/removed)
 
 
-def snapshot_contract(
-    graph_db_path: str, file_path: str, func_names: list[str]
-) -> dict[str, dict]:
+def snapshot_contract(graph_db_path: str, file_path: str, func_names: list[str]) -> dict[str, dict]:
     """Capture the edit-target's OWN contract before an edit, JSON-serializable,
     keyed by function name.
 
@@ -1067,7 +1123,7 @@ def _norm_shape(shape: str) -> str:
     cat, expr = shape.split("|", 1)
 
     def _repl(m: "re.Match[str]") -> str:
-        rest = expr[m.end():].lstrip()
+        rest = expr[m.end() :].lstrip()
         return m.group(0) if rest.startswith("(") else "_"  # keep call/constructor/method heads
 
     return cat + "|" + re.sub(r"[A-Za-z_]\w*", _repl, expr)
@@ -1167,9 +1223,7 @@ def build_drift(
             continue  # no baseline for this name -> nothing to diff
         cur = post.get(name)
         if cur is None:
-            drifts.append(
-                ContractDrift(file_path, name, ("function removed or renamed",), 0, True)
-            )
+            drifts.append(ContractDrift(file_path, name, ("function removed or renamed",), 0, True))
             continue
         changes = _diff_contract(pre, cur)
         if not changes:

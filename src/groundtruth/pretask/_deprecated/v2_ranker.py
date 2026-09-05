@@ -19,6 +19,7 @@ Callee_prop fires on functions reachable from the top-K initial-RRF functions
 via outgoing CALLS edges (confidence ≥ 0.5). This complements the existing
 caller_prox signal — together they form a bidirectional reach prior.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -45,15 +46,27 @@ _MIN_CONFIDENCE = 0.5
 _MAX_FILES = 50
 
 _DEMOTE_DIR_PREFIXES = (
-    "examples/", "example/", "demo/", "demos/", "docs/", "doc/",
-    "samples/", "sample/", "tutorial/", "tutorials/",
-    "benchmarks/", "benchmark/", "fixtures/",
+    "examples/",
+    "example/",
+    "demo/",
+    "demos/",
+    "docs/",
+    "doc/",
+    "samples/",
+    "sample/",
+    "tutorial/",
+    "tutorials/",
+    "benchmarks/",
+    "benchmark/",
+    "fixtures/",
 )
 
 
 def _is_demoted_path(path: str) -> bool:
     p = path.replace("\\", "/").lstrip("./").lstrip("/").lower()
     return any(p.startswith(d) for d in _DEMOTE_DIR_PREFIXES)
+
+
 _TOP_FUNCTIONS = 100
 _BODY_PEEK_LINES = 10
 _BODY_PEEK_CHARS = 200
@@ -69,6 +82,7 @@ _RRF_WEIGHTS: dict[str, float] = {
     "callee_prop": 1.0,
 }
 _CALLEE_PROP_TOP_K = 10
+
 
 # v2.2-6: multi-hop callee BFS depth (default 1 = current behavior, no regression).
 # Setting GT_V22_MULTIHOP=2 or 3 enables multi-hop reach. Confidence-gated at every hop.
@@ -388,8 +402,7 @@ def _score_caller_prox(
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT DISTINCT source_file FROM edges "
-            "WHERE target_id = ? AND confidence >= ?",
+            "SELECT DISTINCT source_file FROM edges WHERE target_id = ? AND confidence >= ?",
             (function_id, _MIN_CONFIDENCE),
         ).fetchall()
     finally:
@@ -580,7 +593,9 @@ def rank_functions(
             bm25_scores: list[float] = [0.0] * len(funcs)
             all_docs_global.extend(docs)
         else:
-            bm25_scores = _bm25_score_per_file(docs, query_terms) if query_terms else [0.0] * len(funcs)
+            bm25_scores = (
+                _bm25_score_per_file(docs, query_terms) if query_terms else [0.0] * len(funcs)
+            )
 
         sem_scores: list[float] = [0.0] * len(funcs)
         if sem_available and model is not None:
@@ -595,7 +610,9 @@ def rank_functions(
                     func_embs.append(cache[emb_key])
                 else:
                     emb = model.encode([first_line or name], normalize_embeddings=False)[0]
-                    cache[emb_key] = list(map(float, emb.tolist())) if hasattr(emb, "tolist") else list(emb)
+                    cache[emb_key] = (
+                        list(map(float, emb.tolist())) if hasattr(emb, "tolist") else list(emb)
+                    )
                     func_embs.append(emb)
                     cache_dirty = True
             if cache_dirty:

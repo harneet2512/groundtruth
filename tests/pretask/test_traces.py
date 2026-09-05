@@ -17,9 +17,12 @@ OSError: [Errno 9] Bad file descriptor
 
 def test_traces_python(tmp_path) -> None:
     """Python traceback frames are extracted with line + func."""
-    repo = tmp_path  # any prefix works since paths are relative
+    repo = tmp_path
+    (repo / "patroni").mkdir()
+    (repo / "patroni/postmaster.py").write_text("pass\n")
+    (repo / "patroni/watchdog.py").write_text("pass\n")
     frames = parse_stack_traces(PYTHON_TRACE, str(repo))
-    # Both frames are in-repo (relative paths, no stdlib markers).
+    # Both frames name existing repository files.
     assert len(frames) == 2
     # Deepest first → activate at line 142 should come first.
     assert frames[0].func == "activate"
@@ -30,6 +33,8 @@ def test_traces_python(tmp_path) -> None:
 
 def test_traces_in_repo_filter(tmp_path) -> None:
     """Frames pointing at site-packages / stdlib are dropped."""
+    (tmp_path / "myrepo").mkdir()
+    (tmp_path / "myrepo/handlers.py").write_text("pass\n")
     text = (
         "Traceback (most recent call last):\n"
         '  File "/usr/lib/python3.11/threading.py", line 980, in run\n'
@@ -45,6 +50,8 @@ def test_traces_in_repo_filter(tmp_path) -> None:
 
 def test_traces_javascript(tmp_path) -> None:
     """V8-style ``at fn (path:line:col)`` frames parse."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/foo.ts").write_text("export {};\n")
     text = (
         "TypeError: Cannot read property 'x' of undefined\n"
         "    at Foo.bar (src/foo.ts:42:15)\n"
@@ -59,6 +66,8 @@ def test_traces_javascript(tmp_path) -> None:
 
 def test_traces_javascript_order_and_vendor_filter(tmp_path) -> None:
     """V8 frames keep deepest-at-top order and drop dependency/runtime paths."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/App.tsx").write_text("export {};\n")
     text = (
         "TypeError: Cannot read property 'x' of undefined\n"
         "    at handleClick (src/App.tsx:42:10)\n"

@@ -139,10 +139,11 @@ def build_syntax_observation(
         else ("syntax_error" if verdict == "syntax_error" else None)
     )
     checker_raw = check_result.get("checker")
-    checker = tuple(
-        item for item in checker_raw
-        if isinstance(item, str) and item
-    ) if isinstance(checker_raw, (list, tuple)) else ()
+    checker = (
+        tuple(item for item in checker_raw if isinstance(item, str) and item)
+        if isinstance(checker_raw, (list, tuple))
+        else ()
+    )
     rendered_bytes = rendered_block.encode("utf-8", "surrogatepass")
     return SyntaxObservation(
         file_path=str(file_path or "").replace("\\", "/"),

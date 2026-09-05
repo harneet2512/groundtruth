@@ -32,9 +32,9 @@ classification patterns; the remaining three live here.
 All functions are correct-or-quiet, order-independent, and free of time/randomness/
 I/O so they are byte-stable across processes and seeds.
 """
+
 from __future__ import annotations
 
-import re
 
 __all__ = [
     # guard 2 — hypothesis contradiction

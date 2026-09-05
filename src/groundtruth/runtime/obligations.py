@@ -1,4 +1,5 @@
 """Product-owned issue obligation lifecycle."""
+
 from __future__ import annotations
 
 import ast
@@ -30,12 +31,44 @@ OBL_UNADDRESSED = "unaddressed"
 # command/result observation available to the live seam and replay child.  Assistant prose is
 # deliberately absent: acknowledgment is a later SS receipt grade, not execution evidence.
 _PROOF_TOKEN_RE = re.compile(r"\b[A-Za-z_]\w*(?:[.:-][A-Za-z0-9_]+)*")
-_PROOF_GENERIC = frozenset({
-    "about", "addressed", "after", "all", "and", "before", "behavior", "edited",
-    "exercise", "expect", "expected", "feature", "for", "given", "handled", "is",
-    "issue", "must", "none", "possible", "requirement", "should", "submit", "support", "tested",
-    "the", "think", "this", "to", "untested", "verify", "when", "with", "would",
-})
+_PROOF_GENERIC = frozenset(
+    {
+        "about",
+        "addressed",
+        "after",
+        "all",
+        "and",
+        "before",
+        "behavior",
+        "edited",
+        "exercise",
+        "expect",
+        "expected",
+        "feature",
+        "for",
+        "given",
+        "handled",
+        "is",
+        "issue",
+        "must",
+        "none",
+        "possible",
+        "requirement",
+        "should",
+        "submit",
+        "support",
+        "tested",
+        "the",
+        "think",
+        "this",
+        "to",
+        "untested",
+        "verify",
+        "when",
+        "with",
+        "would",
+    }
+)
 _STATUS_SUBJECT_RE = re.compile(
     r'\[(?:edited,\s*untested|not\s+addressed(?:\s+[^\]]*)?)\]\s*"([^"]+)"',
     re.IGNORECASE,
@@ -113,9 +146,7 @@ class BehavioralProofState:
 
 def _normalize_subjects(subjects) -> frozenset[str]:
     return frozenset(
-        str(subject).strip().lower()
-        for subject in (subjects or ())
-        if str(subject).strip()
+        str(subject).strip().lower() for subject in (subjects or ()) if str(subject).strip()
     )
 
 
@@ -148,8 +179,7 @@ def _terms_covered(terms: frozenset[str], command: str, output: str) -> bool:
     if not terms:
         return False
     evidence = {
-        token.lower()
-        for token in _PROOF_TOKEN_RE.findall((command or "") + "\n" + (output or ""))
+        token.lower() for token in _PROOF_TOKEN_RE.findall((command or "") + "\n" + (output or ""))
     }
     for term in terms:
         if term in evidence:
@@ -159,8 +189,8 @@ def _terms_covered(terms: frozenset[str], command: str, output: str) -> bool:
         if any(term in re.split(r"[_\d]+", token) for token in evidence if "_" in token):
             continue
         if len(term) >= 5 and any(
-                token in {term + "s", term + "es", term + "ed", term + "ing"}
-                for token in evidence):
+            token in {term + "s", term + "es", term + "ed", term + "ing"} for token in evidence
+        ):
             continue
         return False
     return True
@@ -188,20 +218,22 @@ def _subject_bound_receivers(command: str, subjects: frozenset[str]) -> dict[str
     return bound
 
 
-def _has_direct_checked_calls(command: str, output: str,
-                              subjects: frozenset[str]) -> bool:
+def _has_direct_checked_calls(command: str, output: str, subjects: frozenset[str]) -> bool:
     checked: list[tuple[str, str]] = []
     for line in (command or "").splitlines():
         marker = re.search(r"#\s*(True|False)\b", line)
         if marker:
-            checked.append((line[:marker.start()], marker.group(1)))
+            checked.append((line[: marker.start()], marker.group(1)))
     expected = [value for _expression, value in checked]
     observed = re.findall(r":\s*(True|False)\s*$", output or "", re.MULTILINE)
     direct_calls: list[str] = []
     for expression, _expected in checked:
         fields = re.findall(r"\{([^{}]+)\}", expression)
-        calls = [field for field in fields if re.fullmatch(
-            r"\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^{}]*\)\s*", field)]
+        calls = [
+            field
+            for field in fields
+            if re.fullmatch(r"\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^{}]*\)\s*", field)
+        ]
         if not calls:
             return False
         direct_calls.extend(calls)
@@ -224,11 +256,14 @@ def _has_direct_checked_calls(command: str, output: str,
     )
 
 
-def _has_checked_result_matrix(command: str, output: str,
-                               subjects: frozenset[str]) -> bool:
-    assigned_from_call = set(re.findall(
-        r"^[ \t]+([A-Za-z_]\w*)\s*=\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\([^\n]*\)\s*$",
-        command or "", re.MULTILINE))
+def _has_checked_result_matrix(command: str, output: str, subjects: frozenset[str]) -> bool:
+    assigned_from_call = set(
+        re.findall(
+            r"^[ \t]+([A-Za-z_]\w*)\s*=\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\([^\n]*\)\s*$",
+            command or "",
+            re.MULTILINE,
+        )
+    )
     printed_values: set[str] = set()
     print_lines: list[str] = []
     for line in (command or "").splitlines():
@@ -239,11 +274,15 @@ def _has_checked_result_matrix(command: str, output: str,
     live_matrix_vars: set[str] = set()
     for variable in assigned_from_call & printed_values:
         assignments = re.findall(
-            rf"^\s*{re.escape(variable)}\s*(?:[+\-*/%&|^]?=|:=)",
-            command or "", re.MULTILINE)
-        sole_rhs = any(re.search(
-            rf"->\s*\{{\s*{re.escape(variable)}(?:![rsa])?(?::[^{{}}]+)?\s*\}}\s*['\"]\s*\)",
-            line) for line in print_lines)
+            rf"^\s*{re.escape(variable)}\s*(?:[+\-*/%&|^]?=|:=)", command or "", re.MULTILINE
+        )
+        sole_rhs = any(
+            re.search(
+                rf"->\s*\{{\s*{re.escape(variable)}(?:![rsa])?(?::[^{{}}]+)?\s*\}}\s*['\"]\s*\)",
+                line,
+            )
+            for line in print_lines
+        )
         if len(assignments) == 1 and sole_rhs:
             live_matrix_vars.add(variable)
     return bool(
@@ -261,11 +300,11 @@ _TEST_RUNNER_RE = re.compile(
 )
 _FORMAL_GREEN_RE = re.compile(r"\b\d+\s+passed\b", re.IGNORECASE)
 _FORMAL_RED_RE = re.compile(
-    r"\b(?:\d+\s+failed|\d+\s+errors?|failures?|traceback)\b", re.IGNORECASE)
+    r"\b(?:\d+\s+failed|\d+\s+errors?|failures?|traceback)\b", re.IGNORECASE
+)
 
 
-def _has_subject_bound_test_runner(command: str, output: str,
-                                   subjects: frozenset[str]) -> bool:
+def _has_subject_bound_test_runner(command: str, output: str, subjects: frozenset[str]) -> bool:
     """A clean formal green bound to the rendered requirement, never any-green."""
     if not _TEST_RUNNER_RE.search(command or ""):
         return False
@@ -342,8 +381,7 @@ def _handler_name(handler: ast.ExceptHandler) -> str:
     return ""
 
 
-def _has_expected_exception_control(command: str, output: str,
-                                    subjects: frozenset[str]) -> bool:
+def _has_expected_exception_control(command: str, output: str, subjects: frozenset[str]) -> bool:
     """Recognize an observed expected-exception probe plus same-call success control.
 
     The proof is branch-bound: the expected handler's print must be observed, every
@@ -365,28 +403,27 @@ def _has_expected_exception_control(command: str, output: str,
         calls = _non_print_calls(node.body)
         normal = _print_prefixes(node.body + node.orelse)
         matching_handlers = [
-            handler for handler in node.handlers
-            if _handler_name(handler).lower() in subjects
+            handler for handler in node.handlers if _handler_name(handler).lower() in subjects
         ]
         if not matching_handlers and condition_bound:
             # A requirement may name the failing input/operation rather than the
             # exception class.  Admit only typed exception handlers and only when
             # at least two requirement terms are present in the executed probe.
             matching_handlers = [
-                handler for handler in node.handlers
-                if _EXCEPTION_SUBJECT_RE.fullmatch(
-                    _handler_name(handler).rsplit(".", 1)[-1])
+                handler
+                for handler in node.handlers
+                if _EXCEPTION_SUBJECT_RE.fullmatch(_handler_name(handler).rsplit(".", 1)[-1])
             ]
         handler_prints = {
-            prefix
-            for handler in matching_handlers
-            for prefix in _print_prefixes(handler.body)
+            prefix for handler in matching_handlers for prefix in _print_prefixes(handler.body)
         }
         all_exception_prints = {
             prefix for handler in node.handlers for prefix in _print_prefixes(handler.body)
         }
         if calls and matching_handlers and handler_prints:
-            expected.append((calls, handler_prints, normal | (all_exception_prints - handler_prints)))
+            expected.append(
+                (calls, handler_prints, normal | (all_exception_prints - handler_prints))
+            )
         elif calls and normal:
             controls.append((calls, normal, all_exception_prints))
     for expected_calls, success, failure in expected:
@@ -397,14 +434,16 @@ def _has_expected_exception_control(command: str, output: str,
         for control_calls, control_success, control_failure in controls:
             if not (expected_calls & control_calls):
                 continue
-            if (any(prefix in output for prefix in control_success)
-                    and not any(prefix in output for prefix in control_failure)):
+            if any(prefix in output for prefix in control_success) and not any(
+                prefix in output for prefix in control_failure
+            ):
                 return True
     return False
 
 
-def classify_checked_behavioral_proof(command: str, output: str, returncode,
-                                      subjects, *, turn: int) -> BehavioralProof | None:
+def classify_checked_behavioral_proof(
+    command: str, output: str, returncode, subjects, *, turn: int
+) -> BehavioralProof | None:
     """Return immutable proof only for a checked, related, successful dynamic execution.
 
     ``returncode`` is intentionally exact: bool/string/coercible zero values are not an observed
@@ -426,8 +465,9 @@ def classify_checked_behavioral_proof(command: str, output: str, returncode,
     return None
 
 
-def classify_exercise_evidence(command: str, output: str, returncode,
-                               subjects, *, turn: int) -> ExerciseEvidence | None:
+def classify_exercise_evidence(
+    command: str, output: str, returncode, subjects, *, turn: int
+) -> ExerciseEvidence | None:
     """Return related-execution evidence without making a success claim.
 
     Exact integer process status is retained as observed.  Subject coverage is
@@ -457,8 +497,12 @@ class ObligationRecord:
 
 
 def _is_compound_symbol(part: str) -> bool:
-    return ("_" in part or "." in part or any(c.isdigit() for c in part)
-            or (len(part) > 1 and any(c.isupper() for c in part[1:])))
+    return (
+        "_" in part
+        or "." in part
+        or any(c.isdigit() for c in part)
+        or (len(part) > 1 and any(c.isupper() for c in part[1:]))
+    )
 
 
 def obligation_tested(view, tested_tokens: set[str]) -> bool:
@@ -597,10 +641,14 @@ class ObligationTracker:
         return transitions
 
     def mark_satisfied(self, obligation_id: int, evidence: str, turn: int) -> bool:
-        return self._set_explicit(obligation_id, ObligationLifecycle.SATISFIED.value, evidence, turn)
+        return self._set_explicit(
+            obligation_id, ObligationLifecycle.SATISFIED.value, evidence, turn
+        )
 
     def mark_contradicted(self, obligation_id: int, evidence: str, turn: int) -> bool:
-        return self._set_explicit(obligation_id, ObligationLifecycle.CONTRADICTED.value, evidence, turn)
+        return self._set_explicit(
+            obligation_id, ObligationLifecycle.CONTRADICTED.value, evidence, turn
+        )
 
     def _set_explicit(self, obligation_id: int, status: str, evidence: str, turn: int) -> bool:
         for ob in self.obligations:
@@ -625,7 +673,10 @@ class ObligationTracker:
             touched, conf = overlap(v, edited)
             if ob.status == ObligationLifecycle.CONTRADICTED.value:
                 status = OBL_EDITED_UNTESTED if touched else OBL_UNADDRESSED
-            elif ob.status in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value) or obligation_tested(v, tested):
+            elif ob.status in (
+                ObligationLifecycle.TESTED.value,
+                ObligationLifecycle.SATISFIED.value,
+            ) or obligation_tested(v, tested):
                 status = OBL_TESTED
             elif ob.status == ObligationLifecycle.EDITED.value or touched:
                 status = OBL_EDITED_UNTESTED
@@ -636,15 +687,18 @@ class ObligationTracker:
 
     def unmet(self) -> list[ObligationRecord]:
         return [
-            o for o in self.obligations
-            if o.status not in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value)
+            o
+            for o in self.obligations
+            if o.status
+            not in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value)
         ]
 
     def coverage_ratio(self) -> float:
         if not self.obligations:
             return 1.0
         done = sum(
-            1 for o in self.obligations
+            1
+            for o in self.obligations
             if o.status in (ObligationLifecycle.TESTED.value, ObligationLifecycle.SATISFIED.value)
         )
         return done / len(self.obligations)
@@ -727,13 +781,9 @@ def obligation_truth_statuses(
     """
     edited = set(edited_tokens or ())
     evidence = tuple(
-        item for item in (exercise_evidence or ())
-        if isinstance(item, ExerciseEvidence)
+        item for item in (exercise_evidence or ()) if isinstance(item, ExerciseEvidence)
     )
-    proofs = tuple(
-        item for item in (behavioral_proofs or ())
-        if isinstance(item, BehavioralProof)
-    )
+    proofs = tuple(item for item in (behavioral_proofs or ()) if isinstance(item, BehavioralProof))
     freshness = dict(after_turn_by_id or {})
     rows: list[ObligationTruth] = []
     for view in views or ():
@@ -800,14 +850,16 @@ def obligation_truth_statuses(
 
         proof = next(
             (
-                item for item in reversed(proofs)
+                item
+                for item in reversed(proofs)
                 if proof_covers(item.subjects) and item.turn > after_turn
             ),
             None,
         )
         exercise = next(
             (
-                item for item in reversed(evidence)
+                item
+                for item in reversed(evidence)
                 if covers(item.subjects) and item.turn > after_turn
             ),
             None,
@@ -842,9 +894,7 @@ def obligation_truth_summary(rows) -> dict:
         "n_proven": counts[ObligationTruthState.PROVEN],
         "n_unverifiable": unverifiable,
         "n_verifiable": verifiable,
-        "proof_coverage": (
-            counts[ObligationTruthState.PROVEN] / verifiable if verifiable else 1.0
-        ),
+        "proof_coverage": (counts[ObligationTruthState.PROVEN] / verifiable if verifiable else 1.0),
     }
 
 
@@ -894,11 +944,13 @@ def render_obligation_truth_block(rows, *, max_listed: int = 6, leak_screen=None
         lines.append(f"(+{hidden} more unproven requirement(s))")
     if not lines:
         return ""
-    return "\n".join([
-        "GT: normative requirement truth from observed execution:",
-        *lines,
-        "Exercise each requirement and require successful behavioral proof before submit.",
-    ])
+    return "\n".join(
+        [
+            "GT: normative requirement truth from observed execution:",
+            *lines,
+            "Exercise each requirement and require successful behavioral proof before submit.",
+        ]
+    )
 
 
 def exercise_statuses(views, edited_tokens, tested_tokens):
@@ -929,8 +981,7 @@ def coverage_summary(statuses) -> dict:
     for _v, s in statuses:
         counts[s] = counts.get(s, 0) + 1
     checkable = sum(
-        counts[k]
-        for k in (CLAUSE_EXERCISED, CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED)
+        counts[k] for k in (CLAUSE_EXERCISED, CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED)
     )
     return {
         "coverage_version": 2,
@@ -939,9 +990,7 @@ def coverage_summary(statuses) -> dict:
         "n_edited_unexercised": counts[CLAUSE_EDITED_UNEXERCISED],
         "n_unaddressed": counts[CLAUSE_UNADDRESSED],
         "n_unverifiable": counts[CLAUSE_UNVERIFIABLE],
-        "coverage_exercised": (
-            counts[CLAUSE_EXERCISED] / checkable if checkable else 1.0
-        ),
+        "coverage_exercised": (counts[CLAUSE_EXERCISED] / checkable if checkable else 1.0),
     }
 
 
@@ -958,8 +1007,7 @@ def render_unexercised_block(
     row drops WHOLE (fail closed). All-dropped -> silent.
     """
     violations = [
-        (v, s) for v, s in statuses
-        if s in (CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED)
+        (v, s) for v, s in statuses if s in (CLAUSE_EDITED_UNEXERCISED, CLAUSE_UNADDRESSED)
     ]
     n_unverifiable = sum(1 for _v, s in statuses if s == CLAUSE_UNVERIFIABLE)
     if not violations and not n_unverifiable:
@@ -1020,7 +1068,7 @@ def render_obligation_status_block(statuses, covering=None, max_listed: int | No
     for v, status, _touched, _conf in listed:
         quote = v.verbatim if len(v.verbatim) <= 160 else v.verbatim[:157] + "..."
         mark = "[edited, untested]" if status == OBL_EDITED_UNTESTED else "[not addressed]"
-        line = f"{mark} \"{quote}\""
+        line = f'{mark} "{quote}"'
         if (covering or {}).get(v.idx) and status == OBL_EDITED_UNTESTED:
             line += (
                 "\n    targeted verification: graph-linked covering test "
@@ -1034,6 +1082,6 @@ def render_obligation_status_block(statuses, covering=None, max_listed: int | No
     lines.append(
         "Run targeted verification for each untested requirement before "
         "concluding it is met; an unverified submission cannot be fixed after "
-        "submit.")
+        "submit."
+    )
     return f'\n<gt-nudge reason="test_evidence_gap" h="{h}">\n' + "\n".join(lines) + "\n</gt-nudge>"
-

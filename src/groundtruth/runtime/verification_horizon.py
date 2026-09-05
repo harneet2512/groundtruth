@@ -1,4 +1,5 @@
 """Product-owned verification horizon semantics."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -92,7 +93,8 @@ def render_verify_emission(
     test_info = "a graph-linked covering test" if has_covering else "the relevant tests"
     test_verb = "covers" if has_covering else "cover"
     test_action = (
-        "the narrowest relevant repo test target" if has_covering
+        "the narrowest relevant repo test target"
+        if has_covering
         else "the relevant test suite or narrowest related target"
     )
     if band == "advisory":
@@ -139,4 +141,3 @@ def render_verify_emission(
     if risk_note:
         body = f"{body} Highest-impact unverified change: {risk_note}."
     return f'\n<gt-verify level="{band}">\n{body}\n</gt-verify>'
-

@@ -4,6 +4,7 @@ This module is intentionally separate from the frozen v7.5 scorer.  It consumes
 v7.5-style ranked records plus early agent behavioral evidence and deterministically
 selects a small active working set.
 """
+
 from __future__ import annotations
 
 import re
@@ -89,9 +90,7 @@ DOC_CONFIG_DATA_NAMES = {
     "setup.cfg",
 }
 
-PATH_RE = re.compile(
-    r"(?P<path>(?:[A-Za-z]:)?(?:/?[\w.-]+/)+[\w.@+-]+\.[A-Za-z0-9_+-]+)"
-)
+PATH_RE = re.compile(r"(?P<path>(?:[A-Za-z]:)?(?:/?[\w.-]+/)+[\w.@+-]+\.[A-Za-z0-9_+-]+)")
 
 
 @dataclass(frozen=True)
@@ -348,7 +347,9 @@ def dumb_bounded_union(
         path = normalize_path(str(rec.get("path", "")))
         if path and path not in paths:
             paths.append(path)
-    for path, _score in sorted(_agent_scores(agent_candidates).items(), key=lambda x: x[1], reverse=True):
+    for path, _score in sorted(
+        _agent_scores(agent_candidates).items(), key=lambda x: x[1], reverse=True
+    ):
         if path not in paths:
             paths.append(path)
         if len(paths) >= gt_k + agent_k:
@@ -392,7 +393,9 @@ def govern(
                     agent_score=0.0,
                     source="gt",
                     entered_via=str(rec.get("entered_via") or ""),
-                    min_path_length_from_anchor=int(rec.get("min_path_length_from_anchor", 999) or 999),
+                    min_path_length_from_anchor=int(
+                        rec.get("min_path_length_from_anchor", 999) or 999
+                    ),
                     components=dict(rec.get("components") or {}),
                     expansion_source="unused_gt_structural_rescue",
                 )
@@ -440,7 +443,9 @@ def govern(
 
         if not additions:
             top3 = {c.path for c in initial[:3]}
-            for path in _trace_probe_candidates(early_trace_text, top3, min(2, hard_ceiling - len(initial))):
+            for path in _trace_probe_candidates(
+                early_trace_text, top3, min(2, hard_ceiling - len(initial))
+            ):
                 additions.append(
                     GovernorCandidate(
                         path=path,
@@ -456,7 +461,10 @@ def govern(
         gt_ranked,
         [
             *agent_list,
-            *(AgentCandidate(path=c.path, score=max(c.agent_score, 0.01), evidence="tool_trace") for c in additions),
+            *(
+                AgentCandidate(path=c.path, score=max(c.agent_score, 0.01), evidence="tool_trace")
+                for c in additions
+            ),
         ],
         limit=hard_ceiling,
     )

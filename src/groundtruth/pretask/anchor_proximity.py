@@ -7,6 +7,7 @@ This rewards files where multiple entry points converge — a structural
 signal that the file is load-bearing for the issue, not a coincidental
 graph neighbor.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -65,7 +66,7 @@ def compute_anchor_proximity(
           AND n2.file_path IS NOT NULL
           AND n1.file_path != n2.file_path
           AND COALESCE(e.confidence, 0.5) >= {_NAME_MATCH_FLOOR}
-          AND {_degree_edge_filter('e')}
+          AND {_degree_edge_filter("e")}
         """
     )
     for src, dst in c.fetchall():
@@ -75,7 +76,4 @@ def compute_anchor_proximity(
 
     conn.close()
 
-    return {
-        fp: min(1.0, len(anchors) / 3.0)
-        for fp, anchors in neighbor_count.items()
-    }
+    return {fp: min(1.0, len(anchors) / 3.0) for fp, anchors in neighbor_count.items()}

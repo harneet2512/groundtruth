@@ -196,8 +196,10 @@ def _literal_search(request: ActionRequest, context: DeterministicQueryContext) 
             f"unsupported_argument:{name}" for name in unknown_arguments
         ]
         return _Produced(
-            {"matches": [], "scope": []}, EvidenceSemantics.INCOMPLETE,
-            Coverage.UNKNOWN, omissions=tuple(omissions),
+            {"matches": [], "scope": []},
+            EvidenceSemantics.INCOMPLETE,
+            Coverage.UNKNOWN,
+            omissions=tuple(omissions),
             revision=_producer_revision(request),
         )
     raw_scopes = args.get("paths", ["."])
@@ -286,7 +288,8 @@ def _syntax(request: ActionRequest, context: DeterministicQueryContext) -> _Prod
     if path is None or not path.is_file():
         return _Produced(
             {"verdict": "unavailable", "reason": "invalid_or_missing_path"},
-            EvidenceSemantics.INCOMPLETE, Coverage.UNKNOWN,
+            EvidenceSemantics.INCOMPLETE,
+            Coverage.UNKNOWN,
             omissions=("invalid_or_missing_path",),
             revision=_producer_revision(request),
         )
@@ -296,14 +299,13 @@ def _syntax(request: ActionRequest, context: DeterministicQueryContext) -> _Prod
     except OSError:
         return _Produced(
             {"path": rel, "verdict": "unavailable", "reason": "unreadable"},
-            EvidenceSemantics.INCOMPLETE, Coverage.UNKNOWN,
+            EvidenceSemantics.INCOMPLETE,
+            Coverage.UNKNOWN,
             omissions=(f"unreadable:{rel}",),
             revision=_producer_revision(request),
         )
     result = check_edit_syntax_bytes(rel, source, str(context.repository_root))
-    answer = {
-        "path": rel, "source_sha256": _sha256(source), "source_bytes": len(source), **result
-    }
+    answer = {"path": rel, "source_sha256": _sha256(source), "source_bytes": len(source), **result}
     omissions = _snapshot_authority_omissions(request, context)
     expected_sha256 = dict(context.snapshot_files).get(rel)
     if expected_sha256 != _sha256(source):
@@ -321,7 +323,8 @@ def _syntax(request: ActionRequest, context: DeterministicQueryContext) -> _Prod
         answer,
         EvidenceSemantics.EXACT if available and not omissions else EvidenceSemantics.INCOMPLETE,
         Coverage.COMPLETE if available and not omissions else Coverage.UNKNOWN,
-        anchors=((rel, line),), witnesses=(f"source:{_sha256(source)}",),
+        anchors=((rel, line),),
+        witnesses=(f"source:{_sha256(source)}",),
         omissions=tuple(sorted(set(omissions))),
         raw_fallback=diagnostic.encode("utf-8", "surrogatepass"),
         revision=request.repository_snapshot.revisions.repository_content,
@@ -332,7 +335,9 @@ def _patch_impact(request: ActionRequest, context: DeterministicQueryContext) ->
     raw = request.arguments.get("edited_files")
     if not isinstance(raw, Mapping) or not raw:
         return _Produced(
-            {"files": [], "analysis": {}}, EvidenceSemantics.INCOMPLETE, Coverage.UNKNOWN,
+            {"files": [], "analysis": {}},
+            EvidenceSemantics.INCOMPLETE,
+            Coverage.UNKNOWN,
             omissions=("invalid_edited_files",),
             revision=_producer_revision(request),
         )
@@ -362,15 +367,20 @@ def _patch_impact(request: ActionRequest, context: DeterministicQueryContext) ->
     if result.reason:
         omissions.append(f"patch_analyzer:{result.reason}")
     if result.is_empty and os.environ.get("GT_PATCH_DELTA", "").strip().lower() not in {
-        "1", "true", "yes", "on"
+        "1",
+        "true",
+        "yes",
+        "on",
     }:
         omissions.append("patch_analyzer_disabled")
     # Exact patch identities are retained, but the semantic impact analyzer is
     # deliberately conservative and therefore cannot certify complete impact.
     omissions.append("semantic_impact_not_complete")
     return _Produced(
-        {"files": exact_files, "analysis": analysis}, EvidenceSemantics.INCOMPLETE,
-        Coverage.PARTIAL, witnesses=tuple(f"patch:{row['path']}:{row['after_sha256']}" for row in exact_files),
+        {"files": exact_files, "analysis": analysis},
+        EvidenceSemantics.INCOMPLETE,
+        Coverage.PARTIAL,
+        witnesses=tuple(f"patch:{row['path']}:{row['after_sha256']}" for row in exact_files),
         omissions=tuple(sorted(set(omissions))),
         revision=request.repository_snapshot.revisions.repository_content,
     )
@@ -386,7 +396,8 @@ def _check_from_dict(data: Mapping[str, Any]) -> Check:
         expected_cost=str(data.get("expected_cost") or "unknown"),
         confidence=str(data.get("confidence") or "unknown"),
         attribution_requirement=str(data.get("attribution_requirement") or "none"),
-        targets=tuple(data.get("targets") or ()), reason=str(data.get("reason") or ""),
+        targets=tuple(data.get("targets") or ()),
+        reason=str(data.get("reason") or ""),
     )
 
 
@@ -396,8 +407,10 @@ def _verification(request: ActionRequest, context: DeterministicQueryContext) ->
     result_data = request.arguments.get("result")
     if not isinstance(plan_data, Mapping) or not isinstance(result_data, Mapping):
         return _Produced(
-            {"green": False, "status": "unavailable"}, EvidenceSemantics.INCOMPLETE,
-            Coverage.UNKNOWN, omissions=("invalid_verification_input",),
+            {"green": False, "status": "unavailable"},
+            EvidenceSemantics.INCOMPLETE,
+            Coverage.UNKNOWN,
+            omissions=("invalid_verification_input",),
             revision=request.repository_snapshot.revisions.runtime_evidence,
         )
     try:
@@ -412,7 +425,8 @@ def _verification(request: ActionRequest, context: DeterministicQueryContext) ->
         result = CheckResult(
             kind=str(result_data.get("kind") or ""),
             selection_basis=str(result_data.get("selection_basis") or ""),
-            executed=bool(result_data.get("executed")), verdict=str(result_data.get("verdict") or ""),
+            executed=bool(result_data.get("executed")),
+            verdict=str(result_data.get("verdict") or ""),
             graph_revision=str(result_data.get("graph_revision") or ""),
             patch_revision=str(result_data.get("patch_revision") or ""),
             covered_entities=tuple(result_data.get("covered_entities") or ()),
@@ -424,8 +438,10 @@ def _verification(request: ActionRequest, context: DeterministicQueryContext) ->
         verdict = green(result, plan)
     except (TypeError, ValueError, KeyError) as exc:
         return _Produced(
-            {"green": False, "status": "unavailable"}, EvidenceSemantics.INCOMPLETE,
-            Coverage.UNKNOWN, omissions=(f"invalid_verification_input:{type(exc).__name__}",),
+            {"green": False, "status": "unavailable"},
+            EvidenceSemantics.INCOMPLETE,
+            Coverage.UNKNOWN,
+            omissions=(f"invalid_verification_input:{type(exc).__name__}",),
             revision=request.repository_snapshot.revisions.runtime_evidence,
         )
     live = request.repository_snapshot.revisions
@@ -442,7 +458,8 @@ def _verification(request: ActionRequest, context: DeterministicQueryContext) ->
         answer,
         EvidenceSemantics.EXECUTION_SPECIFIC if not omissions else EvidenceSemantics.INCOMPLETE,
         Coverage.COMPLETE if not omissions else Coverage.PARTIAL,
-        witnesses=(f"verification:{canonical_sha256(answer)}",), omissions=tuple(omissions),
+        witnesses=(f"verification:{canonical_sha256(answer)}",),
+        omissions=tuple(omissions),
         raw_fallback=canonical_bytes(result.detail),
         revision=live.runtime_evidence,
     )
@@ -456,9 +473,7 @@ _PRODUCERS: Mapping[ActionKind, Callable[[ActionRequest, DeterministicQueryConte
 }
 
 
-def execute_query(
-    request: ActionRequest, context: DeterministicQueryContext
-) -> EvidenceArtifact:
+def execute_query(request: ActionRequest, context: DeterministicQueryContext) -> EvidenceArtifact:
     """Execute one supported typed request and return a canonical artifact.
 
     Unsupported kinds are rejected rather than reinterpreted.  Producer failures
@@ -474,7 +489,8 @@ def execute_query(
     if unknown:
         produced = _Produced(
             {"error": "unsupported_arguments", "kind": request.kind.value},
-            EvidenceSemantics.INCOMPLETE, Coverage.UNKNOWN,
+            EvidenceSemantics.INCOMPLETE,
+            Coverage.UNKNOWN,
             omissions=tuple(f"unsupported_argument:{name}" for name in unknown),
             revision=_producer_revision(request),
         )
@@ -484,7 +500,8 @@ def execute_query(
         except Exception as exc:  # noqa: BLE001 - producer boundary fails honest
             produced = _Produced(
                 {"error": "producer_failed", "kind": request.kind.value},
-                EvidenceSemantics.INCOMPLETE, Coverage.UNKNOWN,
+                EvidenceSemantics.INCOMPLETE,
+                Coverage.UNKNOWN,
                 omissions=(f"producer_failed:{type(exc).__name__}",),
                 revision=_producer_revision(request),
             )
@@ -492,17 +509,27 @@ def execute_query(
     envelope = EvidenceEnvelope.build(
         producer=f"deterministic_query.{request.kind.value}",
         fact_id=request.action_id,
-        target=str(request.arguments.get("symbol") or request.arguments.get("path") or request.kind.value),
+        target=str(
+            request.arguments.get("symbol") or request.arguments.get("path") or request.kind.value
+        ),
         evidence_type=request.kind.value,
-        payload=(payload,), provenance=produced.anchors,
+        payload=(payload,),
+        provenance=produced.anchors,
         confidence=1.0 if produced.semantics is EvidenceSemantics.EXACT else 0.8,
-        tier=INFO, graph_revision=produced.revision, valid_until=produced.revision,
+        tier=INFO,
+        graph_revision=produced.revision,
+        valid_until=produced.revision,
     )
     return artifact_from_envelope(
-        request=request, envelope=envelope, producer_version=PRODUCER_VERSION,
-        semantics=produced.semantics, direct_answer=produced.answer,
-        coverage=produced.coverage, witnesses=produced.witnesses,
-        ambiguity=produced.ambiguity, omissions=produced.omissions,
+        request=request,
+        envelope=envelope,
+        producer_version=PRODUCER_VERSION,
+        semantics=produced.semantics,
+        direct_answer=produced.answer,
+        coverage=produced.coverage,
+        witnesses=produced.witnesses,
+        ambiguity=produced.ambiguity,
+        omissions=produced.omissions,
         raw_fallback=produced.raw_fallback,
     )
 

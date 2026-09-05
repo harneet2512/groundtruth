@@ -160,6 +160,7 @@ class GTLayerEvent:
 
     def __post_init__(self) -> None:
         from .constants import SCHEMA_VERSION, VALID_LAYERS
+
         if not self.schema_version:
             self.schema_version = SCHEMA_VERSION
         if not self.event_id:
@@ -253,6 +254,7 @@ class GTAgentReactionEvent:
 
     def __post_init__(self) -> None:
         from .constants import SCHEMA_VERSION, VALID_FOLLOW_TYPES
+
         if not self.schema_version:
             self.schema_version = SCHEMA_VERSION
         if not self.timestamp_ms:
@@ -297,6 +299,7 @@ class GTBeliefEvent:
 
     def __post_init__(self) -> None:
         from .constants import SCHEMA_VERSION, VALID_BELIEF_STATUSES
+
         if not self.schema_version:
             self.schema_version = SCHEMA_VERSION
         if not self.event_id:
@@ -354,9 +357,13 @@ class GTAgentEvent:
 
     def __post_init__(self) -> None:
         from .constants import (
-            SCHEMA_VERSION, VALID_EVENT_BUCKETS, VALID_FILE_KINDS,
-            VALID_CHECK_KINDS, VALID_VERIFICATION_STRENGTHS,
+            SCHEMA_VERSION,
+            VALID_EVENT_BUCKETS,
+            VALID_FILE_KINDS,
+            VALID_CHECK_KINDS,
+            VALID_VERIFICATION_STRENGTHS,
         )
+
         if not self.schema_version:
             self.schema_version = SCHEMA_VERSION
         if not self.timestamp_ms:
@@ -369,7 +376,10 @@ class GTAgentEvent:
             raise ValueError(f"Invalid file_kind: {self.file_kind!r}")
         if self.check_kind and self.check_kind not in VALID_CHECK_KINDS:
             raise ValueError(f"Invalid check_kind: {self.check_kind!r}")
-        if self.verification_strength and self.verification_strength not in VALID_VERIFICATION_STRENGTHS:
+        if (
+            self.verification_strength
+            and self.verification_strength not in VALID_VERIFICATION_STRENGTHS
+        ):
             raise ValueError(f"Invalid verification_strength: {self.verification_strength!r}")
 
     def to_dict(self) -> dict[str, Any]:

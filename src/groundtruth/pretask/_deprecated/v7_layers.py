@@ -206,9 +206,7 @@ def _truncate(value: str, limit: int = 100) -> str:
     return value[: limit - 3] + "..."
 
 
-def _fetch_property_for_node(
-    conn: sqlite3.Connection, node_id: int, kind: str
-) -> str:
+def _fetch_property_for_node(conn: sqlite3.Connection, node_id: int, kind: str) -> str:
     try:
         row = conn.execute(
             "SELECT value FROM properties WHERE node_id = ? AND kind = ? "
@@ -344,9 +342,7 @@ def extract_recent_edits(
     return out
 
 
-def _git_recent_edit(
-    repo_root: str, fn: FocusFunction, *, timeout_sec: int
-) -> RecentEdit | None:
+def _git_recent_edit(repo_root: str, fn: FocusFunction, *, timeout_sec: int) -> RecentEdit | None:
     if not fn.file_path:
         return None
     try:

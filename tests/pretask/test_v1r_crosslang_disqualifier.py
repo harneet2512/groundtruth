@@ -428,9 +428,8 @@ def test_static_callees_legacy_schema_permissive(tmp_path):
     db = tmp_path / "graph.db"
     _create_graph_db(db, _PY_NODES, _PY_EDGES, with_language=False)
     out = _static_callees(str(db), _PY_MAIN, limit=3)
-    assert _JS_TAILWIND in out, "legacy schema (no nodes.language) must stay permissive: " + repr(
-        out
-    )
+    assert _PY_UTIL in out, "legitimate source callees must survive"
+    assert _JS_TAILWIND not in out, "vendored paths remain excluded without language metadata"
 
 
 def test_curation_map_neighbors_drop_cross_language(py_xlang_repo):

@@ -94,12 +94,12 @@ def canonical_repo_path(path: str, repo_root: str | None = None) -> str:
     if repo_root:
         rr = repo_root.replace("\\", "/").rstrip("/")
         if rr and p.startswith(rr + "/"):
-            p = p[len(rr) + 1:]
+            p = p[len(rr) + 1 :]
         elif rr and p == rr:
             return ""
     # Strip /workspace/<repo>/ container prefix.
     if p.startswith("/workspace/"):
-        rest = p[len("/workspace/"):]
+        rest = p[len("/workspace/") :]
         # Drop the next path segment which is the repo root inside the container.
         if "/" in rest:
             p = rest.split("/", 1)[1]
@@ -319,11 +319,13 @@ class L5TrajectoryState:
         self.last_verification_iter = self.current_iter
         self.phase = AgentPhase.VALIDATING
 
-        self.verification_targeting_history.append({
-            "iter": self.current_iter,
-            "target_level": target_level,
-            "passed": passed,
-        })
+        self.verification_targeting_history.append(
+            {
+                "iter": self.current_iter,
+                "target_level": target_level,
+                "passed": passed,
+            }
+        )
         if len(self.verification_targeting_history) > 50:
             self.verification_targeting_history = self.verification_targeting_history[-50:]
 
@@ -342,7 +344,10 @@ class L5TrajectoryState:
                 self.broad_pass_after_edit_count = 0
             else:
                 self.last_passing_broad_iter = self.current_iter
-                if self.edited_source_files and self.last_edit_iter >= self.last_passing_targeted_iter:
+                if (
+                    self.edited_source_files
+                    and self.last_edit_iter >= self.last_passing_targeted_iter
+                ):
                     self.broad_pass_after_edit_count += 1
         else:
             self.last_failing_verification_iter = self.current_iter
@@ -375,7 +380,10 @@ class L5TrajectoryState:
     def has_unverified_patch(self) -> bool:
         if not self.edited_source_files:
             return False
-        if self.last_passing_targeted_iter > 0 and self.last_passing_targeted_iter >= self.last_edit_iter:
+        if (
+            self.last_passing_targeted_iter > 0
+            and self.last_passing_targeted_iter >= self.last_edit_iter
+        ):
             return False
         if self.broad_pass_after_edit_count > 0:
             return True
@@ -399,7 +407,10 @@ class L5TrajectoryState:
             self.durable_edit_lost = True
 
     def record_gt_next_action(
-        self, next_action_type: str, next_action_file: str | None, iter_num: int,
+        self,
+        next_action_type: str,
+        next_action_file: str | None,
+        iter_num: int,
     ) -> None:
         self.latest_gt_next_action_type = next_action_type
         self.latest_gt_next_action_file = next_action_file
@@ -427,7 +438,11 @@ class L5TrajectoryState:
             self.repeated_action_count = 0
 
     def can_emit_l5(self, event_type: str) -> tuple[bool, str]:
-        from groundtruth.telemetry.constants import L5_MAX_INJECTIONS_PER_TASK, L5_DEBOUNCE_ITERATIONS
+        from groundtruth.telemetry.constants import (
+            L5_MAX_INJECTIONS_PER_TASK,
+            L5_DEBOUNCE_ITERATIONS,
+        )
+
         total = sum(self.l5_emissions_by_type.values())
         if total >= L5_MAX_INJECTIONS_PER_TASK:
             return False, f"max_emissions_reached:{total}>={L5_MAX_INJECTIONS_PER_TASK}"
@@ -435,7 +450,10 @@ class L5TrajectoryState:
             self.l5_last_emission_type == event_type
             and (self.current_iter - self.l5_last_emission_iter) < L5_DEBOUNCE_ITERATIONS
         ):
-            return False, f"debounce:{event_type}:gap={self.current_iter - self.l5_last_emission_iter}<{L5_DEBOUNCE_ITERATIONS}"
+            return (
+                False,
+                f"debounce:{event_type}:gap={self.current_iter - self.l5_last_emission_iter}<{L5_DEBOUNCE_ITERATIONS}",
+            )
         return True, ""
 
     def record_l5_goku_emission(self, event_type: str) -> None:
@@ -510,9 +528,15 @@ class L5TrajectoryState:
                     state.last_edit_iter = data.get("last_edit_iter", 0)
                     state.verification_commands_run = data.get("verification_commands_run", 0)
                     state.last_verification_iter = data.get("last_verification_iter", 0)
-                    state.last_passing_verification_iter = data.get("last_passing_verification_iter", 0)
-                    state.last_failing_verification_iter = data.get("last_failing_verification_iter", 0)
-                    state.has_source_edit_before_last_failure = data.get("has_source_edit_before_last_failure", False)
+                    state.last_passing_verification_iter = data.get(
+                        "last_passing_verification_iter", 0
+                    )
+                    state.last_failing_verification_iter = data.get(
+                        "last_failing_verification_iter", 0
+                    )
+                    state.has_source_edit_before_last_failure = data.get(
+                        "has_source_edit_before_last_failure", False
+                    )
                     state.failure_records = data.get("failure_records", [])
                     state.unresolved_failure_hashes = data.get("unresolved_failure_hashes", [])
                     state.repeated_failure_count = data.get("repeated_failure_count", 0)
@@ -522,7 +546,9 @@ class L5TrajectoryState:
                     state.last_passing_broad_iter = data.get("last_passing_broad_iter", 0)
                     state.last_passing_targeted_iter = data.get("last_passing_targeted_iter", 0)
                     state.broad_pass_after_edit_count = data.get("broad_pass_after_edit_count", 0)
-                    state.verification_targeting_history = data.get("verification_targeting_history", [])
+                    state.verification_targeting_history = data.get(
+                        "verification_targeting_history", []
+                    )
                     state._injection_disabled = data.get("injection_disabled", False)
                     state._disable_reason = data.get("disable_reason", "")
                     state.patch_nonzero_seen = data.get("patch_nonzero_seen", False)
@@ -534,7 +560,9 @@ class L5TrajectoryState:
                     state.latest_gt_next_action_file = data.get("latest_gt_next_action_file")
                     state.latest_gt_next_action_iter = data.get("latest_gt_next_action_iter", 0)
                     state.actions_since_gt_next_action = data.get("actions_since_gt_next_action", 0)
-                    state.structural_witness_followed = data.get("structural_witness_followed", False)
+                    state.structural_witness_followed = data.get(
+                        "structural_witness_followed", False
+                    )
                     state.l5_emissions_by_type = data.get("l5_emissions_by_type", {})
                     state.l5_last_emission_type = data.get("l5_last_emission_type", "")
                     state.l5_last_emission_iter = data.get("l5_last_emission_iter", 0)
@@ -599,11 +627,13 @@ class AgentState:
     suggested_edges: list[dict[str, Any]] = field(default_factory=list)
     ignored_suggestions: list[PendingSuggestion] = field(default_factory=list)
 
-    drift_flags: dict[str, Any] = field(default_factory=lambda: {
-        "repeat_loop": False,
-        "scope_unrelated_to_edits": False,
-        "stale_evidence_count": 0,
-    })
+    drift_flags: dict[str, Any] = field(
+        default_factory=lambda: {
+            "repeat_loop": False,
+            "scope_unrelated_to_edits": False,
+            "stale_evidence_count": 0,
+        }
+    )
 
     # Embedded legacy state so existing L5 governor code can keep operating on
     # the same task. New code should prefer the AgentState fields above.
@@ -773,7 +803,9 @@ class AgentState:
         sug = PendingSuggestion(
             event_id=event_id or "",
             next_action_type=next_action_type,
-            next_action_file=canonical_repo_path(next_action_file, self.repo_root) if next_action_file else "",
+            next_action_file=canonical_repo_path(next_action_file, self.repo_root)
+            if next_action_file
+            else "",
             iter_emitted=self.iteration,
             ttl_actions=ttl_actions,
         )
@@ -853,9 +885,13 @@ class AgentState:
                 "searches": [s.__dict__ for s in self.searches],
                 "current_file": self.current_file,
                 "current_focus": self.current_focus,
-                "pending_suggestions": [p.__dict__ | {"status": p.status.value} for p in self.pending_suggestions],
+                "pending_suggestions": [
+                    p.__dict__ | {"status": p.status.value} for p in self.pending_suggestions
+                ],
                 "suggested_edges": list(self.suggested_edges),
-                "ignored_suggestions": [p.__dict__ | {"status": p.status.value} for p in self.ignored_suggestions],
+                "ignored_suggestions": [
+                    p.__dict__ | {"status": p.status.value} for p in self.ignored_suggestions
+                ],
                 "drift_flags": dict(self.drift_flags),
                 "timestamp": time.time(),
             }

@@ -19,15 +19,14 @@ The extractor is deterministic and language-agnostic: it keys on requirement
 GRAMMAR (modals, quoted spans, fenced code, numbered steps), which is invariant
 across English issue bodies for any repo/language.
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
 
 # ----------------------------------------------------------------- regex set
-_IDENT_RE = re.compile(
-    r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b"
-)
+_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,}(?:\.[A-Za-z_][A-Za-z0-9_]+)*)\b")
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 _FENCE_RE = re.compile(r"```[\w-]*\n(.*?)```", re.S)
 # Double-quoted or single-quoted short literals the reporter calls out verbatim.
@@ -50,16 +49,39 @@ _BEHAVIOR_VERB_RE = re.compile(
 )
 # API-shape qualifiers in a parenthesized fragment attached to a symbol:
 #   capture_snapshot (async, optional name, returns ID)
-_API_QUALIFIER_RE = re.compile(
-    r"([A-Za-z_][A-Za-z0-9_]*)\s*\(([^()\n]{0,120})\)"
-)
+_API_QUALIFIER_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(([^()\n]{0,120})\)")
 # Qualifier keywords WORTH keeping (the requirement words anchors.py drops):
 _QUALIFIER_KEYWORDS = (
-    "async", "await", "sync", "synchronous", "asynchronous", "optional",
-    "required", "nullable", "immutable", "mutable", "readonly", "read-only",
-    "deprecated", "lazy", "eager", "abstract", "static", "const", "final",
-    "thread-safe", "idempotent", "recursive", "ordered", "sorted", "unique",
-    "returns", "raises", "throws", "default", "defaults",
+    "async",
+    "await",
+    "sync",
+    "synchronous",
+    "asynchronous",
+    "optional",
+    "required",
+    "nullable",
+    "immutable",
+    "mutable",
+    "readonly",
+    "read-only",
+    "deprecated",
+    "lazy",
+    "eager",
+    "abstract",
+    "static",
+    "const",
+    "final",
+    "thread-safe",
+    "idempotent",
+    "recursive",
+    "ordered",
+    "sorted",
+    "unique",
+    "returns",
+    "raises",
+    "throws",
+    "default",
+    "defaults",
 )
 # Expected-vs-actual / repro markers.
 _EXPECTED_RE = re.compile(
@@ -104,6 +126,7 @@ class Obligation:
                      being wrong about the surface (§5.2 SAFE set): e.g.
                      {"async"} or {"impl Trait for Type"}.  Empty = not checkable.
     """
+
     verbatim_text: str
     kind: str
     symbols: frozenset[str] = frozenset()
@@ -111,13 +134,13 @@ class Obligation:
     checkable_forms: frozenset[str] = frozenset()
     # ── v2 fields (GT_OBLIGATIONS_V2) — all defaulted so every v1 constructor and
     # consumer keeps working byte-identically. See GT_OBLIGATIONS_V2 plan §1.
-    clause_id: str = ""            # sha256(normalized verbatim + part_index)[:8]
-    modality: str = ""             # mandatory | expected | declarative | descriptive
-    modality_strength: int = 0     # 3 / 2 / 1 / 0 (RFC-2119 tiers; ordering + T3)
+    clause_id: str = ""  # sha256(normalized verbatim + part_index)[:8]
+    modality: str = ""  # mandatory | expected | declarative | descriptive
+    modality_strength: int = 0  # 3 / 2 / 1 / 0 (RFC-2119 tiers; ordering + T3)
     subject_symbols: frozenset[str] = frozenset()  # high-specificity exercise keys
-    parent_id: str = ""            # clause_id of enclosing compound (provenance)
-    part_index: int = 0            # position within the parent compound
-    region: str = "normative"      # normative | process | evidence (v2 only)
+    parent_id: str = ""  # clause_id of enclosing compound (provenance)
+    part_index: int = 0  # position within the parent compound
+    region: str = "normative"  # normative | process | evidence (v2 only)
     source_variants: tuple[str, ...] = ()
     verification_cases: tuple[VerificationCase, ...] = ()
 
@@ -125,6 +148,7 @@ class Obligation:
 @dataclass
 class IssueSpec:
     """The decomposed issue: an ordered list of obligations + their union views."""
+
     obligations: list[Obligation] = field(default_factory=list)
     # union convenience views (telemetry / oracle relevance keys)
     all_symbols: set[str] = field(default_factory=set)
@@ -266,8 +290,7 @@ def extract_spec(issue_text: str, max_obligations: int = 40) -> IssueSpec:
             elif any(c.isupper() for c in s[1:]):
                 kept_syms.add(s)  # internal capital — CamelCase / acronym
             elif s[:1].isupper() and any(
-                m.start() > 0
-                for m in re.finditer(rf"\b{re.escape(s)}\b", lead)
+                m.start() > 0 for m in re.finditer(rf"\b{re.escape(s)}\b", lead)
             ):
                 kept_syms.add(s)  # capitalized, seen mid-fragment
         kws = _qualifier_keywords(v)
@@ -330,9 +353,7 @@ _V2_LABEL_LINE_RE = re.compile(r"^([A-Z][A-Za-z /`_-]{1,40}):\s*$")
 _V2_LABEL_REST_RE = re.compile(r"^([A-Za-z][^:\n]{0,60}):\s+(.+)$")
 _V2_ATX_HEADING_RE = re.compile(r"^\s*#{1,6}\s+(.+?)\s*#*\s*$")
 _V2_BOLD_HEADING_RE = re.compile(r"^\s*\*\*([^*\n]{1,80})\*\*:?\s*$")
-_V2_COMMENT_HEADING_RE = re.compile(
-    r"^\s*([A-Za-z][^:\n]{0,60}):\s*<!--.*-->\s*$"
-)
+_V2_COMMENT_HEADING_RE = re.compile(r"^\s*([A-Za-z][^:\n]{0,60}):\s*<!--.*-->\s*$")
 _V2_STANDALONE_MEDIA_RE = re.compile(
     r"^\s*(?:"
     r"!\[[^\]\n]*\]\([^\n]*\)"
@@ -366,9 +387,7 @@ _V2_EXPECTED_SECTION_RE = re.compile(
 # Mapping arrows: '->' / '→' ONLY (never '=>', which is lambda syntax and lives
 # inside code spans — treating it as a mapping would shred `(items) => result`).
 _V2_ARROW_SPLIT_RE = re.compile(r"\s*(?:->|→)\s*")
-_V2_COND_RE = re.compile(
-    r"^(?:if|when|while|unless|once|after|before|whenever)\b", re.I
-)
+_V2_COND_RE = re.compile(r"^(?:if|when|while|unless|once|after|before|whenever)\b", re.I)
 _V2_IMPERATIVE_RE = re.compile(
     r"^(?:(?:correctly|properly|safely|consistently|gracefully|fully)\s+)?"
     r"(?:add|implement|make|support|provide|introduce|expose|allow|ensure|"
@@ -397,12 +416,11 @@ _V2_BEHAVIOR_RE = re.compile(
 _V2_ERROR_TOKEN_RE = re.compile(
     r"\b[A-Z]\w*(?:Error|Exception|Warning)\b|\braises?\b|\bsignals\.\w+"
 )
-_V2_MANDATORY_RE = re.compile(
-    r"\b(?:must|shall|never|always|cannot|can't|will not|won't)\b", re.I
-)
+_V2_MANDATORY_RE = re.compile(r"\b(?:must|shall|never|always|cannot|can't|will not|won't)\b", re.I)
 _V2_EXPECTED_MODAL_RE = re.compile(
     r"\b(?:should|expected to|needs? to(?=\s+(?:be\b|[A-Za-z_]))|has to|have to|"
-    r"(?:is|are)\s+required|required\s+to)\b", re.I
+    r"(?:is|are)\s+required|required\s+to)\b",
+    re.I,
 )
 _V2_SUGGESTION_RE = re.compile(
     r"\b(?:i\s+(?:think|suggest|propose|would\s+like|prefer)|"
@@ -527,7 +545,7 @@ def _v2_strip_html_comments(text: str) -> str:
         if end < 0:
             out.append(" " + "\n" * text[start:].count("\n"))
             break
-        comment = text[start:end + 3]
+        comment = text[start : end + 3]
         out.append(" " + "\n" * comment.count("\n"))
         cursor = end + 3
     return "".join(out)
@@ -561,7 +579,7 @@ def _v2_split_semicolons(s: str) -> list[str]:
     for i, ch in enumerate(s):
         if ch != ";" or not _v2_outside_spans(s, i, spans):
             continue
-        left, right = s[start:i].strip(), s[i + 1:].strip()
+        left, right = s[start:i].strip(), s[i + 1 :].strip()
         alt = re.match(r"^(?:otherwise|then|else)\b", right, re.I)
         if alt or (len(left) >= 12 and len(right) >= 12):
             if left:
@@ -578,7 +596,7 @@ def _v2_is_arrow_mapping(piece: str) -> tuple[str, str] | None:
     spans = _v2_span_ranges(piece)
     m = re.search(r"->|→", piece)
     while m and not _v2_outside_spans(piece, m.start(), spans):
-        m = re.search(r"->|→", piece[m.end():])
+        m = re.search(r"->|→", piece[m.end() :])
     if not m:
         return None
     parts = _V2_ARROW_SPLIT_RE.split(piece, maxsplit=1)
@@ -801,7 +819,7 @@ def _v2_predicate_identity(
         match = pattern.search(normalized)
         if match is None:
             continue
-        tail = normalized[match.end():]
+        tail = normalized[match.end() :]
         tokens = tuple(re.findall(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*", tail))
         return lemma, tokens
     return None
@@ -847,16 +865,12 @@ def _v2_canonicalize_obligations(
             continue
         prior = canonical[prior_index]
         combined_variants = prior.source_variants + tuple(
-            variant for variant in current.source_variants
-            if variant not in prior.source_variants
+            variant for variant in current.source_variants if variant not in prior.source_variants
         )
         combined_cases = prior.verification_cases + tuple(
-            case for case in current.verification_cases
-            if case not in prior.verification_cases
+            case for case in current.verification_cases if case not in prior.verification_cases
         )
-        winner = (
-            current if current.modality_strength > prior.modality_strength else prior
-        )
+        winner = current if current.modality_strength > prior.modality_strength else prior
         canonical[prior_index] = replace(
             winner,
             source_variants=combined_variants,
@@ -879,10 +893,16 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
     last_emitted_source = ""
     last_emitted_region = ""
 
-    def _emit(verbatim: str, kind: str, modality: str, strength: int,
-              parent_id: str, part_index: int,
-              context_symbols: set[str] | None = None,
-              region: str = "normative") -> None:
+    def _emit(
+        verbatim: str,
+        kind: str,
+        modality: str,
+        strength: int,
+        parent_id: str,
+        part_index: int,
+        context_symbols: set[str] | None = None,
+        region: str = "normative",
+    ) -> None:
         nonlocal last_emitted_source, last_emitted_region
         v = verbatim.strip().rstrip(".")
         if not v or len(v) < 8:
@@ -896,29 +916,34 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         kws = _qualifier_keywords(v)
         for mm in _MODAL_RE.finditer(v):
             kws.add(mm.group(1).lower())
-        spec.obligations.append(Obligation(
-            verbatim_text=v,
-            kind=kind,
-            symbols=frozenset(broad),
-            keywords=frozenset(kws),
-            checkable_forms=frozenset(_checkable(kws, v)),
-            clause_id=_v2_clause_id(v, part_index),
-            modality=modality,
-            modality_strength=strength,
-            subject_symbols=frozenset(subj),
-            parent_id=parent_id,
-            part_index=part_index,
-            region=region,
-            source_variants=(v,),
-        ))
+        spec.obligations.append(
+            Obligation(
+                verbatim_text=v,
+                kind=kind,
+                symbols=frozenset(broad),
+                keywords=frozenset(kws),
+                checkable_forms=frozenset(_checkable(kws, v)),
+                clause_id=_v2_clause_id(v, part_index),
+                modality=modality,
+                modality_strength=strength,
+                subject_symbols=frozenset(subj),
+                parent_id=parent_id,
+                part_index=part_index,
+                region=region,
+                source_variants=(v,),
+            )
+        )
         spec.all_symbols |= set(subj) | broad
         spec.all_keywords |= kws
         last_emitted_source = v
         last_emitted_region = region
 
-    def _process_candidate(text: str, bullet_label_syms: set[str],
-                           bullet_fallback: tuple[str, str, int] | None,
-                           section_role: str = "neutral") -> None:
+    def _process_candidate(
+        text: str,
+        bullet_label_syms: set[str],
+        bullet_fallback: tuple[str, str, int] | None,
+        section_role: str = "neutral",
+    ) -> None:
         parent = _v2_clause_id(text, 0)
         for idx, piece in enumerate(_v2_split_semicolons(text)):
             mapping = _v2_is_arrow_mapping(piece)
@@ -926,7 +951,11 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 _emit(
                     piece,
                     "error" if _V2_ERROR_TOKEN_RE.search(mapping[1]) else "behavior",
-                    "mandatory", 3, parent, idx, bullet_label_syms,
+                    "mandatory",
+                    3,
+                    parent,
+                    idx,
+                    bullet_label_syms,
                     _v2_region_for_role(section_role),
                 )
                 continue
@@ -935,9 +964,12 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             # label-strip GUARD: an imperative/conditional head is the clause
             # itself, never a label ("use hyper directly: works, but…" — the
             # gate caught the stripper eating the imperative head).
-            if (lm and len(lm.group(1).split()) <= 6
-                    and not _V2_IMPERATIVE_RE.match(lm.group(1))
-                    and not _V2_COND_RE.match(lm.group(1))):
+            if (
+                lm
+                and len(lm.group(1).split()) <= 6
+                and not _V2_IMPERATIVE_RE.match(lm.group(1))
+                and not _V2_COND_RE.match(lm.group(1))
+            ):
                 decision = lm.group(2)
             decision = re.sub(r"^(?:otherwise|then|else)[\s,]+", "", decision, flags=re.I)
             request_question = _V2_REQUEST_QUESTION_RE.match(decision)
@@ -955,8 +987,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             # grammar or an imperative head — those are real requirements that
             # merely mention options, and dropping them would regress recall.
             if _V2_OPTION_SPACE_INTRO_RE.search(decision) and not (
-                _V2_REQUEST_MODAL_RE.search(decision)
-                or _V2_IMPERATIVE_RE.match(decision)
+                _V2_REQUEST_MODAL_RE.search(decision) or _V2_IMPERATIVE_RE.match(decision)
             ):
                 continue
             cls = _v2_classify(decision)
@@ -977,24 +1008,15 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 or _V2_IMPERATIVE_RE.match(decision)
             ):
                 continue
-            if (
-                section_role == "descriptive"
-                and _V2_CURRENT_WORKAROUND_RE.search(decision)
-            ):
+            if section_role == "descriptive" and _V2_CURRENT_WORKAROUND_RE.search(decision):
                 continue
             if (
-                (
-                    _V2_COMMON_PRACTICE_RE.search(decision)
-                    or (
-                        section_role != "expected"
-                        and _V2_CONTEXT_EXAMPLE_RE.search(decision)
-                    )
-                )
-                and not (
-                    _V2_REQUEST_MODAL_RE.search(decision)
-                    or _V2_SUGGESTION_RE.search(decision)
-                    or _V2_IMPERATIVE_RE.match(decision)
-                )
+                _V2_COMMON_PRACTICE_RE.search(decision)
+                or (section_role != "expected" and _V2_CONTEXT_EXAMPLE_RE.search(decision))
+            ) and not (
+                _V2_REQUEST_MODAL_RE.search(decision)
+                or _V2_SUGGESTION_RE.search(decision)
+                or _V2_IMPERATIVE_RE.match(decision)
             ):
                 continue
             if _V2_OBSERVED_STATE_RE.search(decision) and not (
@@ -1007,8 +1029,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             # not a completion requirement.  Retain only explicit requirement
             # grammar there; an imperative repro step ("Run ...") is not one.
             if section_role == "descriptive" and not (
-                _V2_REQUEST_MODAL_RE.search(decision)
-                or _V2_SUGGESTION_RE.search(decision)
+                _V2_REQUEST_MODAL_RE.search(decision) or _V2_SUGGESTION_RE.search(decision)
             ):
                 continue
             # The first unheaded paragraph is normally a GitHub title/current-
@@ -1020,16 +1041,21 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 section_role == "title"
                 and _V2_NEGATIVE_OBSERVED_TITLE_RE.match(decision)
                 and not (
-                    _V2_REQUEST_MODAL_RE.search(decision)
-                    or _V2_SUGGESTION_RE.search(decision)
+                    _V2_REQUEST_MODAL_RE.search(decision) or _V2_SUGGESTION_RE.search(decision)
                 )
             ):
                 continue
             if section_role == "expected" and strength < 2:
                 modality, strength = "expected", 2
             _emit(
-                piece, kind, modality, strength, parent, idx,
-                bullet_label_syms, _v2_region_for_role(section_role),
+                piece,
+                kind,
+                modality,
+                strength,
+                parent,
+                idx,
+                bullet_label_syms,
+                _v2_region_for_role(section_role),
             )
 
     # ── Stage A: block segmentation ──────────────────────────────────────────
@@ -1208,10 +1234,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
             ):
                 fallback = ("behavior", "expected", 2)
             candidate_role = section_role
-            if (
-                checkbox is not None
-                and section_role not in {"descriptive", "process"}
-            ):
+            if checkbox is not None and section_role not in {"descriptive", "process"}:
                 candidate_role = "expected"
             parity_candidates.append((content, candidate_role))
             _process_candidate(content, set(label_syms), fallback, candidate_role)
@@ -1230,9 +1253,15 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
                 # Numbered items in a requirement section can be useful
                 # checklist rows; numbered repro steps are observations only.
                 if section_role not in {"descriptive", "process"}:
-                    _emit(line.strip(), "repro", "descriptive", 0,
-                          _v2_clause_id(line.strip(), 0), 0,
-                          region=_v2_region_for_role(section_role))
+                    _emit(
+                        line.strip(),
+                        "repro",
+                        "descriptive",
+                        0,
+                        _v2_clause_id(line.strip(), 0),
+                        0,
+                        region=_v2_region_for_role(section_role),
+                    )
             continue
         prose.append(line.strip())
     _flush_prose()
@@ -1263,8 +1292,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         if _V2_ALTERNATIVE_LABEL_RE.match(sent.strip()):
             continue
         if _V2_OPTION_SPACE_INTRO_RE.search(decision) and not (
-            _V2_REQUEST_MODAL_RE.search(decision)
-            or _V2_IMPERATIVE_RE.match(decision)
+            _V2_REQUEST_MODAL_RE.search(decision) or _V2_IMPERATIVE_RE.match(decision)
         ):
             continue
         if _V2_ATTESTATION_RE.match(decision) and not (
@@ -1276,18 +1304,12 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         if role == "descriptive" and _V2_CURRENT_WORKAROUND_RE.search(decision):
             continue
         if (
-            (
-                _V2_COMMON_PRACTICE_RE.search(decision)
-                or (
-                    role != "expected"
-                    and _V2_CONTEXT_EXAMPLE_RE.search(decision)
-                )
-            )
-            and not (
-                _V2_REQUEST_MODAL_RE.search(decision)
-                or _V2_SUGGESTION_RE.search(decision)
-                or _V2_IMPERATIVE_RE.match(decision)
-            )
+            _V2_COMMON_PRACTICE_RE.search(decision)
+            or (role != "expected" and _V2_CONTEXT_EXAMPLE_RE.search(decision))
+        ) and not (
+            _V2_REQUEST_MODAL_RE.search(decision)
+            or _V2_SUGGESTION_RE.search(decision)
+            or _V2_IMPERATIVE_RE.match(decision)
         ):
             continue
         if _V2_OBSERVED_STATE_RE.search(decision) and not (
@@ -1297,8 +1319,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         ):
             continue
         if role == "descriptive" and not (
-            _V2_REQUEST_MODAL_RE.search(decision)
-            or _V2_SUGGESTION_RE.search(decision)
+            _V2_REQUEST_MODAL_RE.search(decision) or _V2_SUGGESTION_RE.search(decision)
         ):
             continue
         if role == "title" and not (
@@ -1311,10 +1332,7 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         if (
             role == "title"
             and _V2_NEGATIVE_OBSERVED_TITLE_RE.match(decision)
-            and not (
-                _V2_REQUEST_MODAL_RE.search(decision)
-                or _V2_SUGGESTION_RE.search(decision)
-            )
+            and not (_V2_REQUEST_MODAL_RE.search(decision) or _V2_SUGGESTION_RE.search(decision))
         ):
             continue
         key = " ".join(sent.rstrip(".").split()).lower()
@@ -1326,24 +1344,37 @@ def extract_spec_v2(issue_text: str, max_obligations: int = 64) -> IssueSpec:
         elif _V2_EXPECTED_MODAL_RE.search(decision) or _V2_SUGGESTION_RE.search(decision):
             modality, strength = "expected", 2
         _emit(
-            sent, kind, modality, strength, _v2_clause_id(sent, 0), 0,
+            sent,
+            kind,
+            modality,
+            strength,
+            _v2_clause_id(sent, 0),
+            0,
             region=_v2_region_for_role(role),
         )
         covered.append(key)
 
-    spec.obligations = _v2_canonicalize_obligations(
-        spec.obligations, cases_by_source
-    )[:max(0, max_obligations)]
+    spec.obligations = _v2_canonicalize_obligations(spec.obligations, cases_by_source)[
+        : max(0, max_obligations)
+    ]
     # Union views are projections of the final canonical denominator, not the
     # pre-merge collector.  Rebuild after both merge and limit so telemetry and
     # relevance cannot retain a discarded variant or truncated obligation.
-    spec.all_symbols = set().union(*(
-        set(obligation.symbols) | set(obligation.subject_symbols)
-        for obligation in spec.obligations
-    )) if spec.obligations else set()
-    spec.all_keywords = set().union(*(
-        set(obligation.keywords) for obligation in spec.obligations
-    )) if spec.obligations else set()
+    spec.all_symbols = (
+        set().union(
+            *(
+                set(obligation.symbols) | set(obligation.subject_symbols)
+                for obligation in spec.obligations
+            )
+        )
+        if spec.obligations
+        else set()
+    )
+    spec.all_keywords = (
+        set().union(*(set(obligation.keywords) for obligation in spec.obligations))
+        if spec.obligations
+        else set()
+    )
     return spec
 
 

@@ -221,7 +221,7 @@ def _map_schema_db(tmp_path: Path) -> str:
     return db
 
 
-def test_top_file_keeps_graph_map_lead_via_fallback_focus(tmp_path: Path) -> None:
+def test_top_file_keeps_graph_map_lead_via_fallback_focus(tmp_path: Path, monkeypatch) -> None:
     """The #1 localizer file's lead is SOVEREIGN: when its rank-0 focus abstains
     (empty fact-map), the lead must NOT cede to a lower-ranked file — the #1 file
     keeps it via its NEXT structurally-central function.
@@ -229,6 +229,7 @@ def test_top_file_keeps_graph_map_lead_via_fallback_focus(tmp_path: Path) -> Non
     RED before the fix (render_map skipped a.py's empty `quiet` map and led with
     b.py); GREEN after the per-file fallback-focus chain picks a.py::central.
     """
+    monkeypatch.setenv("GT_GRAPH_MAP_DEMAND", "1")
     db = _map_schema_db(tmp_path)
     files = [
         FileEntry(path="a.py", score=0.99, function_names=["quiet", "central"]),
@@ -249,9 +250,10 @@ def test_top_file_keeps_graph_map_lead_via_fallback_focus(tmp_path: Path) -> Non
     assert "a.py :: central" in block, f"fallback focus not used: {block!r}"
 
 
-def test_good_case_top_file_first_function_still_leads(tmp_path: Path) -> None:
+def test_good_case_top_file_first_function_still_leads(tmp_path: Path, monkeypatch) -> None:
     """Regression guard: when the #1 file's rank-0 focus IS visible, it still leads
     with that function — the fallback must not perturb the good case."""
+    monkeypatch.setenv("GT_GRAPH_MAP_DEMAND", "1")
     db = str(tmp_path / "good.db")
     conn = sqlite3.connect(db)
     conn.executescript(_BLEND_SCHEMA)

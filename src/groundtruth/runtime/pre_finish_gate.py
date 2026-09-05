@@ -24,6 +24,7 @@ Files read:
 Files written:
   /tmp/gt_finish_attempts_<id>.json
 """
+
 from __future__ import annotations
 
 import json
@@ -157,8 +158,15 @@ def main() -> int:
         # Nothing edited — finish is fine. Reset attempts so a future task
         # starts clean.
         _save_attempts(0)
-        _log_gate(iid, edited=[], checked=[], uncovered=[], attempt=0,
-                  decision="allow_no_edits", intervention="")
+        _log_gate(
+            iid,
+            edited=[],
+            checked=[],
+            uncovered=[],
+            attempt=0,
+            decision="allow_no_edits",
+            intervention="",
+        )
         return 0
 
     checked = {_normalize(f) for f in _checked_files(iid)}
@@ -166,8 +174,15 @@ def main() -> int:
 
     if not uncovered:
         _save_attempts(0)
-        _log_gate(iid, edited=edited, checked=sorted(checked), uncovered=[],
-                  attempt=0, decision="allow_full_coverage", intervention="")
+        _log_gate(
+            iid,
+            edited=edited,
+            checked=sorted(checked),
+            uncovered=[],
+            attempt=0,
+            decision="allow_full_coverage",
+            intervention="",
+        )
         return 0
 
     attempts = _load_attempts() + 1
@@ -176,24 +191,31 @@ def main() -> int:
     if attempts > _MAX_ATTEMPTS:
         # Soft-escape: allow finish, log bypass.
         intervention = (
-            f"<gt-intervention id=\"finish-gate-bypass\" "
-            f"attempts=\"{attempts}\" outcome=\"soft-escape\">\n"
+            f'<gt-intervention id="finish-gate-bypass" '
+            f'attempts="{attempts}" outcome="soft-escape">\n'
             f"Pre-submit gate: {len(uncovered)} edited file(s) without "
             f"gt_check coverage. Soft-escape after {_MAX_ATTEMPTS} attempts; "
             f"finish allowed through but logged as gate bypass."
             f"\n</gt-intervention>"
         )
         print(intervention, flush=True)
-        _log_gate(iid, edited=edited, checked=sorted(checked), uncovered=uncovered,
-                  attempt=attempts, decision="soft_escape", intervention=intervention)
+        _log_gate(
+            iid,
+            edited=edited,
+            checked=sorted(checked),
+            uncovered=uncovered,
+            attempt=attempts,
+            decision="soft_escape",
+            intervention=intervention,
+        )
         return 0
 
     # Build intervention text — point to the FIRST uncovered file (one focal
     # action per turn keeps the agent on rails).
     target = uncovered[0]
     intervention = (
-        f"<gt-intervention id=\"finish-gate-{iid}-{attempts}\" "
-        f"expected=\"gt_check {target}\" expires=\"+2\">\n"
+        f'<gt-intervention id="finish-gate-{iid}-{attempts}" '
+        f'expected="gt_check {target}" expires="+2">\n'
         f"Finish blocked (attempt {attempts}/{_MAX_ATTEMPTS}): "
         f"material edit at {target} was not verified. "
         f"Run gt_check {target} before retrying finish. "
@@ -201,8 +223,15 @@ def main() -> int:
         f"\n</gt-intervention>"
     )
     print(intervention, flush=True)
-    _log_gate(iid, edited=edited, checked=sorted(checked), uncovered=uncovered,
-              attempt=attempts, decision="block", intervention=intervention)
+    _log_gate(
+        iid,
+        edited=edited,
+        checked=sorted(checked),
+        uncovered=uncovered,
+        attempt=attempts,
+        decision="block",
+        intervention=intervention,
+    )
     return 0
 
 

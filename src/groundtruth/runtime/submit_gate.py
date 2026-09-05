@@ -96,7 +96,11 @@ def gate_verdict(
         return GateVerdict(
             allow=False,
             reason="hygiene",
-            detail=str((hygiene or {}).get("detail") or (hygiene or {}).get("reason") or "hygiene check failed"),
+            detail=str(
+                (hygiene or {}).get("detail")
+                or (hygiene or {}).get("reason")
+                or "hygiene check failed"
+            ),
             record=record,
         )
 
@@ -173,14 +177,32 @@ _REVISION_KEYS = ("patch_revision", "graph_revision", "revision", "graph_rev", "
 _COVERING_MAP = {"pass": PASS, "fail": FAIL, "unavailable": UNKNOWN}
 _SYNTAX_MAP = {"ok": PASS, "syntax_error": FAIL, "unavailable": UNKNOWN}
 _PLAN_MAP = {
-    "pass": PASS, "passed": PASS, "ok": PASS, "success": PASS, "green": PASS,
-    "fail": FAIL, "failed": FAIL, "error": FAIL, "red": FAIL,
-    "unavailable": UNKNOWN, "unknown": UNKNOWN, "skipped": UNKNOWN, "": UNKNOWN,
+    "pass": PASS,
+    "passed": PASS,
+    "ok": PASS,
+    "success": PASS,
+    "green": PASS,
+    "fail": FAIL,
+    "failed": FAIL,
+    "error": FAIL,
+    "red": FAIL,
+    "unavailable": UNKNOWN,
+    "unknown": UNKNOWN,
+    "skipped": UNKNOWN,
+    "": UNKNOWN,
 }
 _SCOPE_MAP = {
-    "pass": PASS, "compliant": PASS, "ok": PASS, "in_scope": PASS,
-    "fail": FAIL, "violation": FAIL, "out_of_scope": FAIL, "noncompliant": FAIL,
-    "unknown": UNKNOWN, "unavailable": UNKNOWN, "": UNKNOWN,
+    "pass": PASS,
+    "compliant": PASS,
+    "ok": PASS,
+    "in_scope": PASS,
+    "fail": FAIL,
+    "violation": FAIL,
+    "out_of_scope": FAIL,
+    "noncompliant": FAIL,
+    "unknown": UNKNOWN,
+    "unavailable": UNKNOWN,
+    "": UNKNOWN,
 }
 
 
@@ -310,7 +332,9 @@ def _scope_field(value: Any, submit_revision: str | None) -> tuple[FieldCert, bo
             status = UNKNOWN
         return FieldCert(status, prov, rev, fresh, str(value.get("reason") or "")), stale
     if isinstance(value, str):
-        return FieldCert(_SCOPE_MAP.get(value.strip().lower(), UNKNOWN), prov, None, True, ""), False
+        return FieldCert(
+            _SCOPE_MAP.get(value.strip().lower(), UNKNOWN), prov, None, True, ""
+        ), False
     return FieldCert(UNKNOWN, prov, None, True, "malformed_value"), False
 
 
@@ -334,16 +358,21 @@ def _obligation_field(obligations: Any) -> FieldCert:
             if isinstance(unmet, (list, tuple, set)):
                 total = obligations.get("total")
                 return FieldCert(
-                    PASS if not unmet else FAIL, prov, None, True,
-                    f"{len(unmet)} unmet" + (f"/{total}" if total is not None else ""))
+                    PASS if not unmet else FAIL,
+                    prov,
+                    None,
+                    True,
+                    f"{len(unmet)} unmet" + (f"/{total}" if total is not None else ""),
+                )
             total = obligations.get("total")
             met = obligations.get("met", obligations.get("covered"))
             if total is not None and met is not None:
                 total_i, met_i = int(total), int(met)
                 if total_i <= 0:
                     return FieldCert(UNKNOWN, prov, None, True, "no_obligations")
-                return FieldCert(PASS if met_i >= total_i else FAIL, prov, None, True,
-                                 f"{met_i}/{total_i} met")
+                return FieldCert(
+                    PASS if met_i >= total_i else FAIL, prov, None, True, f"{met_i}/{total_i} met"
+                )
             return FieldCert(UNKNOWN, prov, None, True, "unparsed_obligations")
         if isinstance(obligations, (list, tuple, set)):
             items = list(obligations)
@@ -356,8 +385,9 @@ def _obligation_field(obligations: Any) -> FieldCert:
                 return bool(x)
 
             unmet_n = sum(0 if _met(x) else 1 for x in items)
-            return FieldCert(PASS if unmet_n == 0 else FAIL, prov, None, True,
-                             f"{unmet_n} unmet/{len(items)}")
+            return FieldCert(
+                PASS if unmet_n == 0 else FAIL, prov, None, True, f"{unmet_n} unmet/{len(items)}"
+            )
     except Exception:  # noqa: BLE001 — ADVISORY field: ANY malformed/poisoned
         # obligations value (incl. a raising __bool__, F3) degrades to UNKNOWN;
         # it must never crash the certificate (and could never gate anyway — T2 law).
@@ -406,8 +436,10 @@ def _allow_encouragement(
         return ""
     if t <= 0 or n < t:
         return ""
-    return (f"{n} consecutive actions produced no new verification information; "
-            "all gating checks are satisfied or unavailable.")
+    return (
+        f"{n} consecutive actions produced no new verification information; "
+        "all gating checks are satisfied or unavailable."
+    )
 
 
 @dataclass(frozen=True)
@@ -507,14 +539,19 @@ def build_certificate(
     if head is None:
         cov_for_head = covering if _is_fresh(covering, submit_revision) else None
         head = safe_gate_verdict(
-            covering=cov_for_head, hygiene=hygiene, submit_block=submit_block,
-            bounce_count=bounce_count, max_bounces=max_bounces,
+            covering=cov_for_head,
+            hygiene=hygiene,
+            submit_block=submit_block,
+            bounce_count=bounce_count,
+            max_bounces=max_bounces,
         )
 
     stale_list: list[dict[str, Any]] = []
     env_list: list[dict[str, Any]] = []
 
-    def _rf(name: str, result: Any, vmap: dict[str, str], provenance: str, absent: str) -> FieldCert:
+    def _rf(
+        name: str, result: Any, vmap: dict[str, str], provenance: str, absent: str
+    ) -> FieldCert:
         fc, stale, env = _result_field(result, vmap, provenance, absent, submit_revision)
         if stale:
             stale_list.append({"field": name, "revision": fc.revision})
@@ -524,13 +561,23 @@ def build_certificate(
 
     # --- fields (descriptive; never re-decide) -----------------------------
     syntax_f = _rf("syntax_status", syntax, _SYNTAX_MAP, "edit_check.check_edit_syntax", UNKNOWN)
-    seltest_f = _rf("selected_test_status", covering, _COVERING_MAP,
-                    "covering_runner.run_covering_tests", UNKNOWN)
-    repro_f = _rf("reproduction_status", reproduction, _COVERING_MAP,
-                  "reproduction_runner", NOT_APPLICABLE)
+    seltest_f = _rf(
+        "selected_test_status",
+        covering,
+        _COVERING_MAP,
+        "covering_runner.run_covering_tests",
+        UNKNOWN,
+    )
+    repro_f = _rf(
+        "reproduction_status", reproduction, _COVERING_MAP, "reproduction_runner", NOT_APPLICABLE
+    )
     _plan = plan_results if isinstance(plan_results, dict) else {}
-    build_f = _rf("build_status", _plan.get("build"), _PLAN_MAP, "verification_plan.build", NOT_APPLICABLE)
-    type_f = _rf("type_status", _plan.get("type"), _PLAN_MAP, "verification_plan.type", NOT_APPLICABLE)
+    build_f = _rf(
+        "build_status", _plan.get("build"), _PLAN_MAP, "verification_plan.build", NOT_APPLICABLE
+    )
+    type_f = _rf(
+        "type_status", _plan.get("type"), _PLAN_MAP, "verification_plan.type", NOT_APPLICABLE
+    )
 
     scope_f, scope_stale = _scope_field(scope_compliance, submit_revision)
     if scope_stale:
@@ -559,7 +606,8 @@ def build_certificate(
     # --- decision (head only) + advisory encouragement ---------------------
     decision = _derive_decision(head, obligation_f, unknowns)
     encouragement = _allow_encouragement(
-        decision, head.reason, no_new_info_events, no_new_info_threshold)
+        decision, head.reason, no_new_info_events, no_new_info_threshold
+    )
 
     # F3: a non-str numstat is unusable evidence, not a crash (correct-or-quiet).
     if diff_present is None and isinstance(numstat, str):
@@ -618,7 +666,8 @@ def safe_build_certificate(**kwargs: Any) -> CompletionCertificate:
             "scope_compliance": FieldCert(UNKNOWN, "governor.scope_compliance", None, True, crash),
             "syntax_status": FieldCert(UNKNOWN, "edit_check.check_edit_syntax", None, True, crash),
             "selected_test_status": FieldCert(
-                UNKNOWN, "covering_runner.run_covering_tests", None, True, crash),
+                UNKNOWN, "covering_runner.run_covering_tests", None, True, crash
+            ),
         }
         return CompletionCertificate(
             decision=_derive_decision(head, FieldCert(NOT_APPLICABLE, "obligations"), ()),
@@ -635,7 +684,7 @@ def safe_build_certificate(**kwargs: Any) -> CompletionCertificate:
             unresolved_failures=(),
             environment_failures=(),
             stale_evidence=(),
-            unknowns=tuple(sorted(unknown_fields)),   # UNKNOWN stays VISIBLE in the wreck
-            allow_encouragement="",                   # never a claim from a crashed build
+            unknowns=tuple(sorted(unknown_fields)),  # UNKNOWN stays VISIBLE in the wreck
+            allow_encouragement="",  # never a claim from a crashed build
             head_record=rec,
         )

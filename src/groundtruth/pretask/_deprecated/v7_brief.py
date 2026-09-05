@@ -43,7 +43,6 @@ from groundtruth.pretask.telemetry import TelemetryRecord, utc_timestamp, write_
 from groundtruth.pretask._deprecated.v7_layers import (
     CallerEvidenceEntry,
     ContractFingerprint,
-    FocusFunction,
     RecentEdit,
     collect_v7_layers,
 )
@@ -224,7 +223,9 @@ def _expected_side_files(contract: ContractResult, repo_root: str) -> list[dict[
 
 def _implementation_pattern(cluster: CochangeResult, base_files: list[str]) -> list[str]:
     lines: list[str] = []
-    sibling_dirs = sorted({_norm(Path(path).parent.as_posix()) for path in base_files if "/" in _norm(path)})
+    sibling_dirs = sorted(
+        {_norm(Path(path).parent.as_posix()) for path in base_files if "/" in _norm(path)}
+    )
     if sibling_dirs:
         lines.append(f"Follow sibling implementations under {', '.join(sibling_dirs[:3])}.")
     cochanged = [hit for hit in cluster.hits if hit.file not in base_files]
@@ -319,7 +320,9 @@ def _confidence(
     test_term = 0.10 if contract.selected_test_files else 0.0
     base_term = 0.05 if base_files else 0.0
     score_term = max(0.0, min(top1_score, 1.0)) * 0.15
-    return round(min(focus_term + contract_term + cluster_term + test_term + base_term + score_term, 1.0), 2)
+    return round(
+        min(focus_term + contract_term + cluster_term + test_term + base_term + score_term, 1.0), 2
+    )
 
 
 def _cluster_files(cluster: CochangeResult, base_files: list[str]) -> list[str]:
@@ -442,18 +445,23 @@ def _render_v7(
         lines.append(f"  - {hidden_count} more candidates in telemetry")
 
     if contract.contract_lines or contract.selected_test_files:
-        visible_tests = [_norm(path) for path in contract.selected_test_files if _norm(path) in allowed_paths]
+        visible_tests = [
+            _norm(path) for path in contract.selected_test_files if _norm(path) in allowed_paths
+        ]
         for test_file in visible_tests[:1]:
             lines.append(f"  - Test target: {test_file}")
         for contract_line in contract.contract_lines[:2]:
             lines.append(f"  - {_sanitize_brief_line(contract_line, allowed_paths)}")
 
     # Add other signals without headers if they exist
-    for blk in (_render_contract_block(contract_fingerprints or []),
-                _render_caller_block(caller_evidence or []),
-                _render_recent_edits_block(recent_edits or [])):
+    for blk in (
+        _render_contract_block(contract_fingerprints or []),
+        _render_caller_block(caller_evidence or []),
+        _render_recent_edits_block(recent_edits or []),
+    ):
         for ln in blk:
-            if ln.strip(): lines.append(ln)
+            if ln.strip():
+                lines.append(ln)
 
     if implementation_pattern:
         lines.append("  - Pattern: Mirror nearest style around ranked targets.")
@@ -466,7 +474,9 @@ def _render_v7(
     if visible_side_files:
         for item in visible_side_files[:1]:
             required = "required" if item.get("required") else "if affected"
-            lines.append(f"  - Side file: {item.get('path')} [{item.get('kind', 'side_file')}, {required}]")
+            lines.append(
+                f"  - Side file: {item.get('path')} [{item.get('kind', 'side_file')}, {required}]"
+            )
 
     for line in constraints[:2]:
         lines.append(f"  - Constraint: {_sanitize_brief_line(line, allowed_paths)}")
@@ -483,7 +493,10 @@ def _render_v7(
     compact = [
         header,
         *[f"  {item['rank']}. {item['file']} [{item['reason']}]" for item in visible_focus],
-        *[f"  - {_sanitize_brief_line(line, allowed_paths)}" for line in contract.contract_lines[:2]],
+        *[
+            f"  - {_sanitize_brief_line(line, allowed_paths)}"
+            for line in contract.contract_lines[:2]
+        ],
         "  - Constraint: Edit existing ranked files first; do not create root-level repro/scaffold files.",
     ]
     return "\n".join(ln for ln in compact if ln.strip())
@@ -630,8 +643,11 @@ def generate_brief(
         "implementation_pattern": implementation_pattern,
         "expected_side_files": expected_side_files,
         "confidence": _confidence(
-            cluster, contract, candidate_files,
-            focus_files=focus_files, top1_score=top1_score,
+            cluster,
+            contract,
+            candidate_files,
+            focus_files=focus_files,
+            top1_score=top1_score,
         ),
         "abstain_reason": "" if cluster_files else "no_candidate_cluster",
     }
@@ -649,9 +665,7 @@ def generate_brief(
         recent_edits=recent_edits,
     )
     record = _copy_base_record(base, task_id)
-    record.module_7_cochange = cochange_telemetry(
-        cluster, candidate_files, cochange_ms
-    )
+    record.module_7_cochange = cochange_telemetry(cluster, candidate_files, cochange_ms)
     record.module_7_contract = contract_telemetry(contract, contract_ms)
     record.module_7_constraints = _constraints_telemetry(
         test_layout, constraints_ms, project_instructions

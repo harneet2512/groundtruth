@@ -125,21 +125,21 @@ from groundtruth.runtime.patch_delta import PatchDeltaResult, analyze_patch_delt
 Executor = Callable[[list[str], str, int], "tuple[int | None, str, str]"]
 
 # --- reindex capability states (honest, never a guess) ---------------------
-REINDEX_INCREMENTAL = "incremental"   # gt-index -file succeeded for every changed file
-REINDEX_FULL = "full"                 # a full gt-index -root reindex succeeded
-REINDEX_UNAVAILABLE = "unavailable"   # no binary / all reindex attempts failed
+REINDEX_INCREMENTAL = "incremental"  # gt-index -file succeeded for every changed file
+REINDEX_FULL = "full"  # a full gt-index -root reindex succeeded
+REINDEX_UNAVAILABLE = "unavailable"  # no binary / all reindex attempts failed
 
 # --- graph freshness states ------------------------------------------------
-GRAPH_FRESH = "fresh"                 # graph.db reflects the applied edit
-GRAPH_STALE = "stale"                 # reindex could not refresh the graph (FLAGGED)
+GRAPH_FRESH = "fresh"  # graph.db reflects the applied edit
+GRAPH_STALE = "stale"  # reindex could not refresh the graph (FLAGGED)
 
 # --- per-extension syntax capability ---------------------------------------
-SYNTAX_AVAILABLE = "available"        # a real ok/syntax_error verdict was obtained
+SYNTAX_AVAILABLE = "available"  # a real ok/syntax_error verdict was obtained
 SYNTAX_TOOLCHAIN_MISSING = "toolchain_missing"  # SUPPORTED lang, tool absent (honest)
-SYNTAX_UNSUPPORTED = "unsupported"    # a language edit_check cannot soundly check
+SYNTAX_UNSUPPORTED = "unsupported"  # a language edit_check cannot soundly check
 
 # --- contract-delta capability ---------------------------------------------
-CONTRACT_OK = "ok"                    # ran against a FRESH graph
+CONTRACT_OK = "ok"  # ran against a FRESH graph
 CONTRACT_STALE_GRAPH = "stale_graph"  # ran against a graph the edit did not refresh
 CONTRACT_UNAVAILABLE = "unavailable"  # no graph.db to analyze
 
@@ -247,8 +247,17 @@ def capability_matrix() -> dict[str, str]:
     ``"unsupported"`` for whether ``edit_check`` can soundly syntax-check it, decoupled
     from whether the toolchain happens to be installed. Sorted for determinism."""
     exts = (
-        ".py", ".go", ".js", ".mjs", ".cjs", ".rb",
-        ".ts", ".tsx", ".jsx", ".rs", ".java",
+        ".py",
+        ".go",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".rb",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".rs",
+        ".java",
     )
     return {e: ("supported" if _lang_supported(e) else "unsupported") for e in sorted(exts)}
 
@@ -293,7 +302,14 @@ def mark_stale_envelopes(
 # The graph node labels that carry a definition SIGNATURE (mirror of
 # ``gateway._DEF_LABELS`` — the classes whose recorded shape a fact can be ABOUT).
 _OVERLAY_DEF_LABELS = (
-    "Function", "Method", "Class", "Interface", "Struct", "Enum", "Trait", "Constructor",
+    "Function",
+    "Method",
+    "Class",
+    "Interface",
+    "Struct",
+    "Enum",
+    "Trait",
+    "Constructor",
 )
 
 
@@ -367,7 +383,9 @@ def _graph_def_signatures(graph_db: str, rel_file: str) -> tuple[str, ...]:
 
 
 def build_episode_overlay_entry(
-    graph_db: str, rel_file: str, current_content: str,
+    graph_db: str,
+    rel_file: str,
+    current_content: str,
 ) -> dict[str, Any]:
     """SM-4 deliverable 1 — the per-file episode overlay entry for ONE edited file.
 
@@ -395,8 +413,13 @@ def build_episode_overlay_entry(
         graph_defs = ()
     if not graph_defs:
         return {
-            "file": file_key, "state": "unknown", "graph_sig": "", "current_sig": "",
-            "changed": False, "overlay_rev": overlay_rev, "n_defs": 0,
+            "file": file_key,
+            "state": "unknown",
+            "graph_sig": "",
+            "current_sig": "",
+            "changed": False,
+            "overlay_rev": overlay_rev,
+            "n_defs": 0,
         }
     norm_content = _collapse_ws(content)
     present = tuple(sorted(g for g in graph_defs if g and g in norm_content))
@@ -407,14 +430,19 @@ def build_episode_overlay_entry(
     verdict = mark_stale_envelopes([{"valid_until": graph_sig}], current_sig)
     changed = bool(verdict and verdict[0].get("stale"))
     return {
-        "file": file_key, "state": "available", "graph_sig": graph_sig,
-        "current_sig": current_sig, "changed": changed, "overlay_rev": overlay_rev,
+        "file": file_key,
+        "state": "available",
+        "graph_sig": graph_sig,
+        "current_sig": current_sig,
+        "changed": changed,
+        "overlay_rev": overlay_rev,
         "n_defs": len(graph_defs),
     }
 
 
 def compose_episode_revision(
-    base_revision: str, overlay: "Mapping[str, Any] | None",
+    base_revision: str,
+    overlay: "Mapping[str, Any] | None",
 ) -> str:
     """SM-4 deliverable 1 — ONE current episode revision = the certified base composite
     revision folded with each overlaid file's per-file revision (``overlay_rev``), in
@@ -436,7 +464,8 @@ def compose_episode_revision(
 
 
 def overlay_target_stale(
-    overlay: "Mapping[str, Any] | None", target_file: str,
+    overlay: "Mapping[str, Any] | None",
+    target_file: str,
 ) -> bool:
     """True iff a fact whose target is ``target_file`` is STALE against the episode overlay
     — the file was edited this episode AND its recorded structure changed (``entry['changed']``,
@@ -463,7 +492,7 @@ class DiagnosticDelta:
 
     file: str
     language: str
-    verdict: str            # always "syntax_error" (NEW-error entries only)
+    verdict: str  # always "syntax_error" (NEW-error entries only)
     diagnostic: str
     blocking_eligible: bool = True
     measured: bool = False
@@ -565,7 +594,7 @@ class EditOverlay:
         # empty) on rollback so no namespace-package residue survives (F2).
         self._created_dirs: list[str] = []
         # Rollback attestation (F1): VERIFIED after the restore pass, never assumed.
-        self._rollback_state = "not_attempted"   # not_attempted | complete | incomplete
+        self._rollback_state = "not_attempted"  # not_attempted | complete | incomplete
         self._rollback_failed: tuple[str, ...] = ()
 
         self._db_existed = False
@@ -588,6 +617,7 @@ class EditOverlay:
         raises — a transaction must never die on a spawn error."""
         if self._executor is None:
             from groundtruth.runtime.test_runner import _run_subprocess
+
             try:
                 rc, out, err = _run_subprocess(cmd, cwd, timeout)
             except Exception:  # noqa: BLE001 -- timeout / OSError / spawn failure
@@ -634,12 +664,14 @@ class EditOverlay:
             if os.path.isfile(abs_p):
                 self._orig[path] = _read_bytes(abs_p)
                 res = check_edit_syntax(
-                    path, self._repo_root, executor=self._executor,
+                    path,
+                    self._repo_root,
+                    executor=self._executor,
                     timeout=self._diag_timeout,
                 )
                 self._before_verdicts[path] = str(res.get("verdict") or "unavailable")
             else:
-                self._orig[path] = None                 # new file: no prior content
+                self._orig[path] = None  # new file: no prior content
                 self._before_verdicts[path] = "absent"  # a new file has no baseline error
 
         self._db_existed = os.path.isfile(self._graph_db)
@@ -762,18 +794,23 @@ class EditOverlay:
                 self._after_verdicts[path] = "absent"
                 continue
             res = check_edit_syntax(
-                path, self._repo_root, executor=self._executor, timeout=self._diag_timeout,
+                path,
+                self._repo_root,
+                executor=self._executor,
+                timeout=self._diag_timeout,
             )
             verdict = str(res.get("verdict") or "unavailable")
             self._after_verdicts[path] = verdict
             before = self._before_verdicts.get(path, "absent")
             if verdict == "syntax_error" and before in _CLEAN_BASELINE_VERDICTS:
-                out.append(DiagnosticDelta(
-                    file=path,
-                    language=str(res.get("language") or ""),
-                    verdict="syntax_error",
-                    diagnostic=str(res.get("diagnostic") or ""),
-                ))
+                out.append(
+                    DiagnosticDelta(
+                        file=path,
+                        language=str(res.get("language") or ""),
+                        verdict="syntax_error",
+                        diagnostic=str(res.get("diagnostic") or ""),
+                    )
+                )
         out.sort(key=lambda d: (d.file, d.language))
         return out
 
@@ -937,9 +974,7 @@ class EditOverlay:
         if self._graph_state == GRAPH_FRESH:
             return db_hash
         edit_sig = _edit_signature(self._applied)
-        return hashlib.sha256(
-            (db_hash + "\x00stale\x00" + edit_sig).encode("utf-8")
-        ).hexdigest()
+        return hashlib.sha256((db_hash + "\x00stale\x00" + edit_sig).encode("utf-8")).hexdigest()
 
     def result(
         self,
@@ -1019,8 +1054,12 @@ def apply_edit_transaction(
             disabled=True,
         )
     overlay = EditOverlay(
-        repo_root, graph_db, executor=executor, gt_index_bin=gt_index_bin,
-        reindex_timeout=reindex_timeout, diag_timeout=diag_timeout,
+        repo_root,
+        graph_db,
+        executor=executor,
+        gt_index_bin=gt_index_bin,
+        reindex_timeout=reindex_timeout,
+        diag_timeout=diag_timeout,
     )
     overlay.snapshot(candidate)
     overlay.apply()

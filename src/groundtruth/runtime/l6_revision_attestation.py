@@ -177,8 +177,7 @@ def validate(attestation: object) -> tuple[str, ...]:
             errors.append("subprocess:argv:edited_path_unbound")
         if (
             isinstance(attestation.selected_db_before, DbIdentity)
-            and f"-output={attestation.selected_db_before.path}"
-            not in attestation.subprocess.argv
+            and f"-output={attestation.selected_db_before.path}" not in attestation.subprocess.argv
         ):
             errors.append("subprocess:argv:selected_db_unbound")
     return tuple(errors)
@@ -314,9 +313,7 @@ def from_dict(value: object) -> L6RevisionAttestation:
         edited_path=raw["edited_path"],
         edited_source_sha256=raw["edited_source_sha256"],
         source_db=_db_from_dict(raw["source_db"], "source_db"),
-        selected_db_before=_db_from_dict(
-            raw["selected_db_before"], "selected_db_before"
-        ),
+        selected_db_before=_db_from_dict(raw["selected_db_before"], "selected_db_before"),
         selected_db_after=_db_from_dict(raw["selected_db_after"], "selected_db_after"),
         subprocess=_subprocess_from_dict(raw["subprocess"]),
     )

@@ -1,4 +1,5 @@
 """Sealed old/new localization comparison and recall-first winner gate."""
+
 from __future__ import annotations
 
 import hashlib
@@ -115,11 +116,7 @@ def _mean_bool(rows: Sequence[Mapping[str, Any]], side: str, key: str) -> float:
 
 
 def _mean_numeric(rows: Sequence[Mapping[str, Any]], side: str, key: str) -> float:
-    values = [
-        float(row[side][key])
-        for row in rows
-        if row[side].get(key) is not None
-    ]
+    values = [float(row[side][key]) for row in rows if row[side].get(key) is not None]
     return statistics.fmean(values) if values else 0.0
 
 
@@ -142,9 +139,7 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     scorable = [row for row in rows if bool(row.get("scorable"))]
     region_scorable = [row for row in scorable if bool(row.get("region_scorable"))]
     random_scorable = [
-        row
-        for row in scorable
-        if str(row.get("split") or "random").lower() == "random"
+        row for row in scorable if str(row.get("split") or "random").lower() == "random"
     ]
     if not random_scorable:
         return {
@@ -187,25 +182,13 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     new_precision = _mean_numeric(scorable, "new", "file_precision")
     old_symbol_precision = _mean_numeric(scorable, "old", "symbol_precision")
     new_symbol_precision = _mean_numeric(scorable, "new", "symbol_precision")
-    old_region_precision = _mean_numeric(
-        region_scorable, "old", "region_precision"
-    )
-    new_region_precision = _mean_numeric(
-        region_scorable, "new", "region_precision"
-    )
+    old_region_precision = _mean_numeric(region_scorable, "old", "region_precision")
+    new_region_precision = _mean_numeric(region_scorable, "new", "region_precision")
 
-    old_latency = _percentile(
-        [float(row["old"]["latency_ms"]) for row in scorable], 0.95
-    )
-    new_latency = _percentile(
-        [float(row["new"]["latency_ms"]) for row in scorable], 0.95
-    )
-    old_memory = _percentile(
-        [float(row["old"]["peak_memory_bytes"]) for row in scorable], 0.95
-    )
-    new_memory = _percentile(
-        [float(row["new"]["peak_memory_bytes"]) for row in scorable], 0.95
-    )
+    old_latency = _percentile([float(row["old"]["latency_ms"]) for row in scorable], 0.95)
+    new_latency = _percentile([float(row["new"]["latency_ms"]) for row in scorable], 0.95)
+    old_memory = _percentile([float(row["old"]["peak_memory_bytes"]) for row in scorable], 0.95)
+    new_memory = _percentile([float(row["new"]["peak_memory_bytes"]) for row in scorable], 0.95)
     latency_ratio = new_latency / old_latency if old_latency > 0 else float("inf")
     memory_ratio = new_memory / old_memory if old_memory > 0 else float("inf")
 
@@ -227,11 +210,7 @@ def evaluate_winner(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     new_token_median = statistics.median(
         float(row["new"]["implied_inspection_tokens"]) for row in scorable
     )
-    context_reduction = (
-        1.0 - (new_token_median / old_token_median)
-        if old_token_median > 0
-        else 0.0
-    )
+    context_reduction = 1.0 - (new_token_median / old_token_median) if old_token_median > 0 else 0.0
     metrics = {
         "overall_hit_at_1": {"old": old_h1, "new": new_h1},
         "overall_hit_at_8": {"old": old_h8, "new": new_h8},
@@ -337,16 +316,10 @@ def _reactive_projection(result: Any) -> dict[str, Any]:
     candidates = list(getattr(result, "candidates", ()) or ())
     return {
         "candidate_order": [
-            _norm(str(getattr(candidate, "file_path", "")))
-            for candidate in candidates
+            _norm(str(getattr(candidate, "file_path", ""))) for candidate in candidates
         ],
-        "scores": [
-            float(getattr(candidate, "score", 0.0) or 0.0)
-            for candidate in candidates
-        ],
-        "witnesses": [
-            str(candidate.render_witness()) for candidate in candidates
-        ],
+        "scores": [float(getattr(candidate, "score", 0.0) or 0.0) for candidate in candidates],
+        "witnesses": [str(candidate.render_witness()) for candidate in candidates],
         "confidence": float(getattr(result, "confidence", 0.0) or 0.0),
         "confident": bool(getattr(result, "confident", False)),
         "localization_proof": str(getattr(result, "gate_reason", "")),
@@ -357,16 +330,10 @@ def _brief_projection(result: Any) -> dict[str, Any]:
     files = list(getattr(result, "files", ()) or ())
     text = str(getattr(result, "brief_text", "") or "")
     proof = _primitive(getattr(result, "localization_proof", ()) or ())
-    acquisition_proof = _primitive(
-        getattr(result, "acquisition_proof", ()) or ()
-    )
+    acquisition_proof = _primitive(getattr(result, "acquisition_proof", ()) or ())
     return {
-        "candidate_order": [
-            _norm(str(getattr(entry, "path", ""))) for entry in files
-        ],
-        "scores": [
-            float(getattr(entry, "score", 0.0) or 0.0) for entry in files
-        ],
+        "candidate_order": [_norm(str(getattr(entry, "path", ""))) for entry in files],
+        "scores": [float(getattr(entry, "score", 0.0) or 0.0) for entry in files],
         "localization_proof": proof,
         "acquisition_proof": acquisition_proof,
         "brief_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -460,12 +427,9 @@ def _legacy_measure(
                 _primitive(getattr(legacy_brief, "acquisition_proof", ()) or ())
                 == _primitive(getattr(shadow_brief, "acquisition_proof", ()) or ())
             ),
-            "run_v74": (
-                _v74_projection(legacy_v74) == _v74_projection(shadow_v74)
-            ),
+            "run_v74": (_v74_projection(legacy_v74) == _v74_projection(shadow_v74)),
             "reactive_top_five": (
-                _reactive_projection(legacy_localizer)
-                == _reactive_projection(shadow_localizer)
+                _reactive_projection(legacy_localizer) == _reactive_projection(shadow_localizer)
             ),
         }
         return LegacyMeasurement(
@@ -477,9 +441,7 @@ def _legacy_measure(
             shadow_verification_latency_ms=shadow_elapsed,
             identity=identity,
             memory_measurement_method=(
-                rss_sampler.method
-                if rss_sampler.peak_bytes
-                else "tracemalloc_python_allocations"
+                rss_sampler.method if rss_sampler.peak_bytes else "tracemalloc_python_allocations"
             ),
         )
     finally:
@@ -517,11 +479,7 @@ def _legacy_inspection_files(
         v74_projection.get("focus_set") or (),
         reactive_projection.get("candidate_order") or (),
     ):
-        normalized = [
-            _norm(str(path))
-            for path in candidates
-            if _norm(str(path))
-        ]
+        normalized = [_norm(str(path)) for path in candidates if _norm(str(path))]
         if normalized:
             return list(dict.fromkeys(normalized))
     return []
@@ -559,9 +517,7 @@ def run_sealed_case(
             "localize",
         )
     )
-    v74_candidates = list(
-        getattr(legacy_measurement.v74, "ranked_full", ()) or ()
-    )
+    v74_candidates = list(getattr(legacy_measurement.v74, "ranked_full", ()) or ())
     legacy_candidates = [*v74_candidates, *reactive_candidates]
     reactive_projection = _reactive_projection(legacy_measurement.localizer)
     v74_projection = _v74_projection(legacy_measurement.v74)
@@ -608,13 +564,10 @@ def run_sealed_case(
             )
         results.append(repeated)
         new_peaks.append(
-            rss_sampler.peak_bytes
-            or int(repeated.metrics.get("peak_memory_bytes") or 0)
+            rss_sampler.peak_bytes or int(repeated.metrics.get("peak_memory_bytes") or 0)
         )
         new_memory_methods.append(
-            rss_sampler.method
-            if rss_sampler.peak_bytes
-            else "tracemalloc_python_allocations"
+            rss_sampler.method if rss_sampler.peak_bytes else "tracemalloc_python_allocations"
         )
     new_result = results[0]
     language = _normalize_language(str(case_input.get("language") or "unknown"))
@@ -625,15 +578,11 @@ def run_sealed_case(
     hashes = [result.deterministic_hash for result in results]
     ranked_discovery_files = list(
         dict.fromkeys(
-            discovery.file_path
-            for discovery in new_result.discoveries
-            if discovery.file_path
+            discovery.file_path for discovery in new_result.discoveries if discovery.file_path
         )
     )
     new_files = list(dict.fromkeys(region.file_path for region in new_result.admitted_regions))
-    discovery_by_id = {
-        discovery.evidence_id: discovery for discovery in new_result.discoveries
-    }
+    discovery_by_id = {discovery.evidence_id: discovery for discovery in new_result.discoveries}
     admitted_decision_trace = [
         {
             "evidence_id": decision.evidence_id,
@@ -647,8 +596,7 @@ def run_sealed_case(
             "reason_codes": [reason.value for reason in decision.reason_codes],
         }
         for decision in new_result.decisions
-        if decision.action is CandidateAction.ADMIT
-        and decision.evidence_id in discovery_by_id
+        if decision.action is CandidateAction.ADMIT and decision.evidence_id in discovery_by_id
     ]
     contribution = [
         {
@@ -660,9 +608,7 @@ def run_sealed_case(
         }
         for region in new_result.admitted_regions
     ]
-    new_latencies = [
-        float(result.metrics.get("latency_ms") or 0.0) for result in results
-    ]
+    new_latencies = [float(result.metrics.get("latency_ms") or 0.0) for result in results]
     ablations = {}
     for component in (
         "behavioral_facets",
@@ -688,14 +634,9 @@ def run_sealed_case(
             "admitted_files": list(
                 dict.fromkeys(region.file_path for region in ablated.admitted_regions)
             ),
-            "admitted_source_tokens": int(
-                ablated.metrics.get("admitted_source_tokens") or 0
-            ),
-            "changed_output": ablated.deterministic_hash
-            != new_result.deterministic_hash,
-            "source_token_delta_from_full": int(
-                ablated.metrics.get("admitted_source_tokens") or 0
-            )
+            "admitted_source_tokens": int(ablated.metrics.get("admitted_source_tokens") or 0),
+            "changed_output": ablated.deterministic_hash != new_result.deterministic_hash,
+            "source_token_delta_from_full": int(ablated.metrics.get("admitted_source_tokens") or 0)
             - int(new_result.metrics.get("admitted_source_tokens") or 0),
         }
 
@@ -712,12 +653,8 @@ def run_sealed_case(
             **legacy_projection,
             "latency_ms": legacy_measurement.latency_ms,
             "peak_memory_bytes": legacy_measurement.peak_memory_bytes,
-            "memory_measurement_method": (
-                legacy_measurement.memory_measurement_method
-            ),
-            "shadow_verification_latency_ms": (
-                legacy_measurement.shadow_verification_latency_ms
-            ),
+            "memory_measurement_method": (legacy_measurement.memory_measurement_method),
+            "shadow_verification_latency_ms": (legacy_measurement.shadow_verification_latency_ms),
             "implied_inspection_tokens": _file_tokens(repo, old_files),
         },
         "vnext": new_result.to_dict(),
@@ -741,9 +678,7 @@ def run_sealed_case(
             "memory_measurement_methods": new_memory_methods,
             "ablations": ablations,
             "algorithmic_contribution_evidence": [
-                component
-                for component, outcome in ablations.items()
-                if outcome["changed_output"]
+                component for component, outcome in ablations.items() if outcome["changed_output"]
             ],
         },
     }
@@ -764,9 +699,7 @@ def _rank(files: Sequence[str], gold: set[str]) -> int | None:
     return None
 
 
-def score_sealed_case(
-    sealed: Mapping[str, Any], gold: Mapping[str, Any]
-) -> dict[str, Any]:
+def score_sealed_case(sealed: Mapping[str, Any], gold: Mapping[str, Any]) -> dict[str, Any]:
     """Load gold only after a sealed result exists and score paired outputs."""
     gold_files = {_norm(path) for path in gold.get("gold_files", ())}
     old_files = list(sealed["legacy"]["candidate_order"])
@@ -777,9 +710,7 @@ def score_sealed_case(
     old_hits = {path for path in old_files if _matches(path, gold_files)}
     new_hits = {path for path in new_files if _matches(path, gold_files)}
 
-    gold_symbols = {
-        str(symbol) for symbol in gold.get("gold_symbols", ()) if str(symbol)
-    }
+    gold_symbols = {str(symbol) for symbol in gold.get("gold_symbols", ()) if str(symbol)}
     new_symbols = {
         str(discovery.get("symbol") or "")
         for discovery in sealed["vnext"].get("discoveries", ())
@@ -797,14 +728,10 @@ def score_sealed_case(
         len(new_symbols & gold_symbols) / len(gold_symbols) if gold_symbols else None
     )
     old_symbol_precision = (
-        len(old_symbols & gold_symbols) / len(old_symbols)
-        if gold_symbols and old_symbols
-        else None
+        len(old_symbols & gold_symbols) / len(old_symbols) if gold_symbols and old_symbols else None
     )
     new_symbol_precision = (
-        len(new_symbols & gold_symbols) / len(new_symbols)
-        if gold_symbols and new_symbols
-        else None
+        len(new_symbols & gold_symbols) / len(new_symbols) if gold_symbols and new_symbols else None
     )
 
     line_ranges = list(gold.get("gold_line_ranges", ()) or ())
@@ -823,9 +750,7 @@ def score_sealed_case(
         for region in new_regions
         for line in range(int(region["start_line"]), int(region["end_line"]) + 1)
     }
-    new_line_recall = (
-        len(new_lines & gold_lines) / len(gold_lines) if gold_lines else None
-    )
+    new_line_recall = len(new_lines & gold_lines) / len(gold_lines) if gold_lines else None
     # Legacy full-file inspection necessarily covers every gold line in any
     # admitted gold file, but not lines in a missed file.
     old_line_recall = (
@@ -855,9 +780,7 @@ def score_sealed_case(
         else None
     )
     old_region_precision = (
-        len(old_hits) / len(old_files)
-        if normalized_ranges and old_files
-        else None
+        len(old_hits) / len(old_files) if normalized_ranges and old_files else None
     )
     new_region_precision = (
         sum(
@@ -875,9 +798,7 @@ def score_sealed_case(
         else None
     )
     new_line_precision = (
-        len(new_lines & gold_lines) / len(new_lines)
-        if gold_lines and new_lines
-        else None
+        len(new_lines & gold_lines) / len(new_lines) if gold_lines and new_lines else None
     )
     return {
         "schema": "gt.localization.vnext.comparison.scored.v1",
@@ -889,9 +810,7 @@ def score_sealed_case(
         "safety": {
             "deterministic": bool(sealed["comparison"]["deterministic"]),
             "leakage_count": int(sealed["vnext"]["metrics"].get("leakage_count", 0)),
-            "legacy_byte_identity": bool(
-                sealed["legacy"].get("byte_identity", False)
-            ),
+            "legacy_byte_identity": bool(sealed["legacy"].get("byte_identity", False)),
         },
         "old": {
             "first_gold_rank": old_rank,
@@ -902,8 +821,7 @@ def score_sealed_case(
             if gold_files
             else None,
             "file_precision": (
-                sum(1 for path in old_files[:8] if _matches(path, gold_files))
-                / len(old_files[:8])
+                sum(1 for path in old_files[:8] if _matches(path, gold_files)) / len(old_files[:8])
                 if old_files[:8]
                 else 0.0
             ),
@@ -913,9 +831,7 @@ def score_sealed_case(
             "region_precision": old_region_precision,
             "line_recall": old_line_recall,
             "line_precision": None,
-            "implied_inspection_tokens": int(
-                sealed["legacy"]["implied_inspection_tokens"]
-            ),
+            "implied_inspection_tokens": int(sealed["legacy"]["implied_inspection_tokens"]),
             "latency_ms": float(sealed["legacy"]["latency_ms"]),
             "peak_memory_bytes": int(sealed["legacy"]["peak_memory_bytes"]),
         },
@@ -940,9 +856,7 @@ def score_sealed_case(
             "region_precision": new_region_precision,
             "line_recall": new_line_recall,
             "line_precision": new_line_precision,
-            "implied_inspection_tokens": int(
-                sealed["comparison"]["implied_inspection_tokens"]
-            ),
+            "implied_inspection_tokens": int(sealed["comparison"]["implied_inspection_tokens"]),
             "latency_ms": float(sealed["comparison"]["p95_latency_ms"]),
             "peak_memory_bytes": int(sealed["comparison"]["peak_memory_bytes"]),
         },

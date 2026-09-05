@@ -231,10 +231,7 @@ def finalize_localization_attestation(
     witness_str = str(witness or "")
     rank_ok = isinstance(rank, int) and not isinstance(rank, bool) and rank > 0
     truth_complete = bool(
-        witness_verified is True
-        and path_str.strip()
-        and witness_str.strip()
-        and rank_ok
+        witness_verified is True and path_str.strip() and witness_str.strip() and rank_ok
     )
 
     # The producer's own build-time verification record — a SMALL canonical artifact
@@ -255,11 +252,15 @@ def finalize_localization_attestation(
         sha256=_sha(witness_bytes),
         revision=f"graph:{graph_revision or 'unversioned'}",
     )
-    truth_proofs = tuple(sorted((
-        ProofRef("producer_graph_verification", ref, "$.witness_verified"),
-        ProofRef("candidate_path", ref, "$.path"),
-        ProofRef("rank_derivation", ref, "$.rank"),
-    )))
+    truth_proofs = tuple(
+        sorted(
+            (
+                ProofRef("producer_graph_verification", ref, "$.witness_verified"),
+                ProofRef("candidate_path", ref, "$.path"),
+                ProofRef("rank_derivation", ref, "$.rank"),
+            )
+        )
+    )
 
     attestation = ProducerAttestation(
         schema=ATTESTATION_SCHEMA,
@@ -278,9 +279,7 @@ def finalize_localization_attestation(
                 "graph-verified candidate joins the delivered block seal",
             ),
         ),
-        freshness_predicates=(
-            _predicate(FRESHNESS, "localization:freshness", False, (), ""),
-        ),
+        freshness_predicates=(_predicate(FRESHNESS, "localization:freshness", False, (), ""),),
         decision=DecisionBinding(
             decision_key=registration.target_decision,
             open_event=_OPEN_EVENT,
@@ -389,15 +388,23 @@ def finalize_obligations_attestation(
         sha256=_sha(record_bytes),
         revision=issue_rev or f"issue:{issue_sha or 'unversioned'}",
     )
-    truth_proofs = tuple(sorted((
-        ProofRef("issue_source_identity", ref, "$.issue_sha256"),
-        ProofRef("obligations_digest", ref, "$.obligations_digest"),
-        ProofRef("obligation_count", ref, "$.obligation_count"),
-    )))
-    freshness_proofs = tuple(sorted((
-        ProofRef("issue_source_identity", ref, "$.issue_sha256"),
-        ProofRef("issue_revision", ref, "$.issue_revision"),
-    )))
+    truth_proofs = tuple(
+        sorted(
+            (
+                ProofRef("issue_source_identity", ref, "$.issue_sha256"),
+                ProofRef("obligations_digest", ref, "$.obligations_digest"),
+                ProofRef("obligation_count", ref, "$.obligation_count"),
+            )
+        )
+    )
+    freshness_proofs = tuple(
+        sorted(
+            (
+                ProofRef("issue_source_identity", ref, "$.issue_sha256"),
+                ProofRef("issue_revision", ref, "$.issue_revision"),
+            )
+        )
+    )
 
     attestation = ProducerAttestation(
         schema=ATTESTATION_SCHEMA,
@@ -429,9 +436,7 @@ def finalize_obligations_attestation(
                 freshness_proofs,
                 "obligations bound to the exact issue source revision",
                 subject="step-0 brief obligations block",
-                expectation=(
-                    "the delivered obligations bind the exact issue source revision"
-                ),
+                expectation=("the delivered obligations bind the exact issue source revision"),
             ),
         ),
         decision=DecisionBinding(

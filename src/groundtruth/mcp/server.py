@@ -107,13 +107,7 @@ def _resolve_contract_focus(store: Any, file_or_symbol: str) -> list[tuple[str, 
         head, tail = head.strip(), tail.strip()
         # head must be a path that is not a lone drive letter (e.g. "C"), and
         # tail must be a valid identifier (not a line number).
-        if (
-            head
-            and tail
-            and len(head) > 1
-            and _looks_pathy(head)
-            and _is_identifier(tail)
-        ):
+        if head and tail and len(head) > 1 and _looks_pathy(head) and _is_identifier(tail):
             return [(head, tail)]
 
     # Bare symbol → resolve through the store.
@@ -548,10 +542,13 @@ def create_server(
         )
         text = "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-        log.info("tool_call", tool="gt_plan",
-                 params={"plan_path": plan_path, "full": full},
-                 result_len=len(text),
-                 latency_ms=_tool_elapsed)
+        log.info(
+            "tool_call",
+            tool="gt_plan",
+            params={"plan_path": plan_path, "full": full},
+            result_len=len(text),
+            latency_ms=_tool_elapsed,
+        )
         return _append_metadata(text, _mcp_metadata())
 
     # @app.tool()  # Deprecated: use groundtruth_check_v2 instead
@@ -593,10 +590,13 @@ def create_server(
             )
         text = "<gt-evidence>\n" + json.dumps(result, sort_keys=True) + "\n</gt-evidence>"
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-        log.info("tool_call", tool="gt_run_tests",
-                 params={"mode": mode, "execute": execute, "timeout": timeout},
-                 result_len=len(text),
-                 latency_ms=_tool_elapsed)
+        log.info(
+            "tool_call",
+            tool="gt_run_tests",
+            params={"mode": mode, "execute": execute, "timeout": timeout},
+            result_len=len(text),
+            latency_ms=_tool_elapsed,
+        )
         return text
 
     # @app.tool()  # Deprecated: use groundtruth_investigate instead
@@ -625,7 +625,9 @@ def create_server(
         # pillar). Correct-or-quiet: fall back to the plan's static
         # contract_lines only when there is no symbol or no graph.db.
         db_path = _db_path(store)
-        focus = _resolve_contract_focus(store, file_or_symbol) if (file_or_symbol and db_path) else []
+        focus = (
+            _resolve_contract_focus(store, file_or_symbol) if (file_or_symbol and db_path) else []
+        )
         if focus and db_path:
             from groundtruth.pretask.contract_map import build_contract, render_contract
 
@@ -633,11 +635,17 @@ def create_server(
             if block:
                 block = enforce_budget(block, TOKEN_BUDGET)
                 _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-                log.info("tool_call", tool="gt_contract",
-                         params={"file_or_symbol": file_or_symbol, "plan_path": plan_path,
-                                 "focus": len(focus)},
-                         result_len=len(block),
-                         latency_ms=_tool_elapsed)
+                log.info(
+                    "tool_call",
+                    tool="gt_contract",
+                    params={
+                        "file_or_symbol": file_or_symbol,
+                        "plan_path": plan_path,
+                        "focus": len(focus),
+                    },
+                    result_len=len(block),
+                    latency_ms=_tool_elapsed,
+                )
                 return _append_metadata(block, _mcp_metadata())
 
         from groundtruth.cli.commands import _load_plan_json
@@ -647,10 +655,13 @@ def create_server(
         text = "\n".join(f"- {line}" for line in lines) if lines else "No contract lines in plan."
         result_text = enforce_budget(f"<gt-evidence>\n{text}\n</gt-evidence>", TOKEN_BUDGET)
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-        log.info("tool_call", tool="gt_contract",
-                 params={"file_or_symbol": file_or_symbol, "plan_path": plan_path},
-                 result_len=len(result_text),
-                 latency_ms=_tool_elapsed)
+        log.info(
+            "tool_call",
+            tool="gt_contract",
+            params={"file_or_symbol": file_or_symbol, "plan_path": plan_path},
+            result_len=len(result_text),
+            latency_ms=_tool_elapsed,
+        )
         return _append_metadata(result_text, _mcp_metadata())
 
     # @app.tool()  # Deprecated: use gt_plan instead
@@ -662,9 +673,11 @@ def create_server(
 
         plan = _load_plan_json(plan_path)
         patch = audit_patch(root_path, plan=plan)
-        edited = patch["source_files_touched"] + patch["test_files_touched"] + patch[
-            "outside_cluster_files"
-        ]
+        edited = (
+            patch["source_files_touched"]
+            + patch["test_files_touched"]
+            + patch["outside_cluster_files"]
+        )
         result = evaluate_replan_triggers(
             edited_files=edited,
             plan=plan,
@@ -791,10 +804,13 @@ def create_server(
         if text:
             _session_findings += max(0, text.count("\n") - 2)
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-        log.info("tool_call", tool="groundtruth_investigate",
-                 params={"symbol": symbol, "file_path": file_path},
-                 result_len=len(text) if text else 0,
-                 latency_ms=_tool_elapsed)
+        log.info(
+            "tool_call",
+            tool="groundtruth_investigate",
+            params={"symbol": symbol, "file_path": file_path},
+            result_len=len(text) if text else 0,
+            latency_ms=_tool_elapsed,
+        )
         return _append_metadata(text, _mcp_metadata())
 
     @app.tool()
@@ -821,10 +837,13 @@ def create_server(
         if text:
             _session_findings += max(0, text.count("\n") - 2)
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-        log.info("tool_call", tool="groundtruth_orient_v2",
-                 params={"task": task, "file_path": file_path},
-                 result_len=len(text) if text else 0,
-                 latency_ms=_tool_elapsed)
+        log.info(
+            "tool_call",
+            tool="groundtruth_orient_v2",
+            params={"task": task, "file_path": file_path},
+            result_len=len(text) if text else 0,
+            latency_ms=_tool_elapsed,
+        )
         return _append_metadata(text, _mcp_metadata())
 
     @app.tool()
@@ -852,10 +871,16 @@ def create_server(
             if "FIX REQUIRED" in text:
                 _session_fix_required += text.count("FIX REQUIRED")
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-        log.info("tool_call", tool="groundtruth_check_v2",
-                 params={"file_path": file_path, "proposed_code_len": len(proposed_code) if proposed_code else 0},
-                 result_len=len(text) if text else 0,
-                 latency_ms=_tool_elapsed)
+        log.info(
+            "tool_call",
+            tool="groundtruth_check_v2",
+            params={
+                "file_path": file_path,
+                "proposed_code_len": len(proposed_code) if proposed_code else 0,
+            },
+            result_len=len(text) if text else 0,
+            latency_ms=_tool_elapsed,
+        )
         return _append_metadata(text, _mcp_metadata())
 
     @app.tool()
@@ -874,10 +899,13 @@ def create_server(
             log.error("tool_error", tool="groundtruth_status_v2", exc_info=True)
             return "[GT] Internal error in groundtruth_status_v2"
         _tool_elapsed = int((_time.monotonic() - _tool_start) * 1000)
-        log.info("tool_call", tool="groundtruth_status_v2",
-                 params={},
-                 result_len=len(text) if text else 0,
-                 latency_ms=_tool_elapsed)
+        log.info(
+            "tool_call",
+            tool="groundtruth_status_v2",
+            params={},
+            result_len=len(text) if text else 0,
+            latency_ms=_tool_elapsed,
+        )
         return _append_metadata(text, _mcp_metadata())
 
     # Background LSP promotion — starts on first tool call.
@@ -891,6 +919,7 @@ def create_server(
             return
         try:
             from groundtruth.lsp.background_promotion import start_background_promotion
+
             start_background_promotion(resolved_db, root_path)
         except Exception:
             pass

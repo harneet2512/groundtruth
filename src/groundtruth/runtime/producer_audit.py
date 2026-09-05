@@ -67,9 +67,7 @@ class ProducerAudit:
         self.evidence_types = tuple(
             dict.fromkeys(str(item) for item in self.evidence_types if str(item))
         )
-        observation_id = str(
-            _context_value(self.context, "observation_id", "") or ""
-        )
+        observation_id = str(_context_value(self.context, "observation_id", "") or "")
         identity = {
             "schema": PRODUCER_AUDIT_SCHEMA,
             "observation_id": observation_id,
@@ -97,9 +95,7 @@ class ProducerAudit:
             checks.append(
                 {
                     "evidence_type": evidence_type,
-                    "producer_allowed": producer_matches(
-                        evidence_type, self.producer
-                    ),
+                    "producer_allowed": producer_matches(evidence_type, self.producer),
                     "required_event": wanted or "",
                     "event_allowed": bool(wanted and wanted == self.event_type),
                 }
@@ -107,12 +103,8 @@ class ProducerAudit:
         return checks
 
     def _base_row(self, outcome: str) -> dict[str, Any]:
-        required_roles = _string_tuple(
-            _context_value(self.context, "required_roles", ())
-        )
-        present_roles = _string_tuple(
-            _context_value(self.context, "roles_present_before", ())
-        )
+        required_roles = _string_tuple(_context_value(self.context, "required_roles", ()))
+        present_roles = _string_tuple(_context_value(self.context, "roles_present_before", ()))
         checks = self._registry_checks()
         return {
             "schema": PRODUCER_AUDIT_SCHEMA,
@@ -125,34 +117,22 @@ class ProducerAudit:
             "event_type": self.event_type,
             "subject": self.subject,
             "action_index": int(self.action_index),
-            "observation_id": str(
-                _context_value(self.context, "observation_id", "") or ""
-            ),
-            "decision_id": str(
-                _context_value(self.context, "decision_id", "") or ""
-            ),
-            "decision_context": str(
-                _context_value(self.context, "decision_context", "") or ""
-            ),
-            "decision_open": bool(
-                _context_value(self.context, "decision_open", False)
-            ),
+            "observation_id": str(_context_value(self.context, "observation_id", "") or ""),
+            "decision_id": str(_context_value(self.context, "decision_id", "") or ""),
+            "decision_context": str(_context_value(self.context, "decision_context", "") or ""),
+            "decision_open": bool(_context_value(self.context, "decision_open", False)),
             "required_roles": list(required_roles),
             "roles_present_before": list(present_roles),
             "required_roles_satisfied_before": bool(
                 _context_value(
                     self.context,
                     "required_roles_satisfied_before",
-                    bool(required_roles)
-                    and set(required_roles).issubset(present_roles),
+                    bool(required_roles) and set(required_roles).issubset(present_roles),
                 )
             ),
             "registry_checks": checks,
             "registry_allowed": bool(checks)
-            and any(
-                item["producer_allowed"] and item["event_allowed"]
-                for item in checks
-            ),
+            and any(item["producer_allowed"] and item["event_allowed"] for item in checks),
             "returned_fact": False,
             "returned_nothing": False,
             "confidence": [],
@@ -186,11 +166,7 @@ class ProducerAudit:
         if value is None:
             return []
         if isinstance(value, (tuple, list)):
-            return [
-                item
-                for item in value
-                if getattr(item, "evidence_type", None)
-            ]
+            return [item for item in value if getattr(item, "evidence_type", None)]
         return [value] if getattr(value, "evidence_type", None) else []
 
     def finish(self, value: Any) -> Any:
@@ -211,9 +187,7 @@ class ProducerAudit:
         row["returned_nothing"] = not facts
         row["abstention_reasons"] = list(self._reasons)
         row["dependency_failure"] = [
-            item
-            for item in self._reasons
-            if item["category"] == "dependency_failure"
+            item for item in self._reasons if item["category"] == "dependency_failure"
         ]
         row["suppression_reason"] = [
             item
@@ -233,9 +207,7 @@ class ProducerAudit:
             if isinstance(getattr(item, "confidence", None), (int, float))
         ]
         delivered = set(self.delivered_keys or ())
-        candidate_ids = [
-            str(getattr(item, "dedup_key", "") or "") for item in facts
-        ]
+        candidate_ids = [str(getattr(item, "dedup_key", "") or "") for item in facts]
         spent = [candidate_id in delivered for candidate_id in candidate_ids]
         if not facts:
             row["dedup_result"] = "not_evaluated"
@@ -264,9 +236,7 @@ class ProducerAudit:
         row["facts"] = [
             {
                 "candidate_id": candidate_id,
-                "evidence_type": str(
-                    getattr(item, "evidence_type", "") or ""
-                ),
+                "evidence_type": str(getattr(item, "evidence_type", "") or ""),
                 "producer": str(getattr(item, "producer", "") or ""),
                 "confidence": getattr(item, "confidence", None),
                 "tier": str(getattr(item, "tier", "") or ""),
@@ -289,4 +259,3 @@ class ProducerAudit:
 
 
 __all__ = ["PRODUCER_AUDIT_SCHEMA", "ProducerAudit"]
-

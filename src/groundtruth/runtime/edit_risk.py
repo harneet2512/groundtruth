@@ -28,6 +28,7 @@ Properties (CLAUDE.md pillars):
     has VERIFIED dependents. A name_match (guessed) caller is NEVER blast radius.
   - LLM-free, deterministic, $0.
 """
+
 from __future__ import annotations
 
 import os
@@ -46,8 +47,15 @@ try:  # pragma: no cover - import shape varies by harness
 except Exception:  # pragma: no cover
     _DETERMINISTIC_METHODS = frozenset(
         {
-            "same_file", "import", "import_type", "type_flow", "verified_unique",
-            "inherited", "return_type", "lsp", "lsp_verified",
+            "same_file",
+            "import",
+            "import_type",
+            "type_flow",
+            "verified_unique",
+            "inherited",
+            "return_type",
+            "lsp",
+            "lsp_verified",
         }
     )
 
@@ -77,14 +85,14 @@ _REF_CACHE: dict = {}
 @dataclass(frozen=True)
 class SymbolRisk:
     name: str
-    dependents: int   # DISTINCT verified incoming-dependency edges (the blast radius)
-    risk: float       # 0..1, saturating, relative to the repo fan-in reference
+    dependents: int  # DISTINCT verified incoming-dependency edges (the blast radius)
+    risk: float  # 0..1, saturating, relative to the repo fan-in reference
 
 
 @dataclass(frozen=True)
 class EditRisk:
-    score: float          # 0..1 — the MAX symbol risk (the riskiest edited symbol)
-    reasons: tuple        # tuple[SymbolRisk, ...] high -> low
+    score: float  # 0..1 — the MAX symbol risk (the riskiest edited symbol)
+    reasons: tuple  # tuple[SymbolRisk, ...] high -> low
     reference_fanin: float  # the repo fan-in reference used (telemetry)
 
     def is_quiet(self) -> bool:
@@ -107,7 +115,7 @@ def _normalize_path(f) -> str:
     s = str(f).strip().replace("\\", "/")
     for pre in ("a/", "b/", "./"):
         if s.startswith(pre):
-            s = s[len(pre):]
+            s = s[len(pre) :]
     return s.lstrip("/")
 
 
@@ -117,7 +125,7 @@ def _normalize_edited_files(edited_files) -> list[str]:
     a file it edited — a same-named symbol defined in an UN-edited file (e.g. a callee
     hub like ``List.push``) is not the agent's change and must not be flagged."""
     out: list[str] = []
-    for f in (edited_files or []):
+    for f in edited_files or []:
         s = _normalize_path(f)
         if s:
             out.append(s)
@@ -135,7 +143,7 @@ def _normalize_edited_ranges(edited_ranges) -> dict[str, list[tuple[int, int]]]:
         if not key:
             continue
         clean: list[tuple[int, int]] = []
-        for r in (ranges or []):
+        for r in ranges or []:
             try:
                 a, b = int(r[0]), int(r[1])
             except (TypeError, ValueError, IndexError):
@@ -148,8 +156,7 @@ def _normalize_edited_ranges(edited_ranges) -> dict[str, list[tuple[int, int]]]:
     return out
 
 
-def _line_in_edited_ranges(file_path: str, start_line, ranges_by_file: dict,
-                           end_line=None) -> bool:
+def _line_in_edited_ranges(file_path: str, start_line, ranges_by_file: dict, end_line=None) -> bool:
     """True iff the node's DEFINITION SPAN ``[start_line, end_line]`` INTERSECTS an
     edited hunk of the file ``file_path``. The node's ``file_path`` is matched against
     the edited-file keys SUFFIX-tolerantly (repo-root vs git a//b/ prefixes), mirroring
@@ -203,8 +210,9 @@ def _percentile(sorted_vals: list, q: float) -> float:
     return float(sorted_vals[min(k, len(sorted_vals)) - 1])
 
 
-def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_params,
-                          method_params=()) -> float:
+def _repo_fanin_reference(
+    conn, conf_clause: str, method_clause: str, conf_params, method_params=()
+) -> float:
     """75th-percentile of NON-ZERO verified dependency fan-in across the repo — the
     'notable dependents' baseline that defines the risky tail (dynamic, per-repo)."""
     types_in = ",".join("?" for _ in _DEPENDENCY_EDGE_TYPES)
@@ -224,8 +232,17 @@ def _repo_fanin_reference(conn, conf_clause: str, method_clause: str, conf_param
 
 
 def _ranged_dependents(
-    conn, nm, types_in, conf_clause, method_clause, file_clause,
-    conf_params, file_params, ranges_by_file, has_end_line=False, method_params=(),
+    conn,
+    nm,
+    types_in,
+    conf_clause,
+    method_clause,
+    file_clause,
+    conf_params,
+    file_params,
+    ranges_by_file,
+    has_end_line=False,
+    method_params=(),
 ) -> int:
     """Distinct verified incoming-dependency sources of the nodes named ``nm`` whose
     DEFINITION SPAN intersects an edited hunk (E-1/R3). Two passes: (1) the candidate
@@ -244,9 +261,12 @@ def _ranged_dependents(
     except sqlite3.Error:
         return 0
     target_ids = [
-        int(r[0]) for r in cand
-        if r and _line_in_edited_ranges(
-            r[1], r[2], ranges_by_file, end_line=(r[3] if len(r) > 3 else None))
+        int(r[0])
+        for r in cand
+        if r
+        and _line_in_edited_ranges(
+            r[1], r[2], ranges_by_file, end_line=(r[3] if len(r) > 3 else None)
+        )
     ]
     if not target_ids:
         return 0
@@ -370,14 +390,23 @@ def structural_edit_risk(
         cache_key = (str(graph_db), float(min_confidence), _mtime)
         ref = _REF_CACHE.get(cache_key)
         if ref is None:
-            ref = _repo_fanin_reference(conn, conf_clause, method_clause, conf_params,
-                                        method_params)
+            ref = _repo_fanin_reference(
+                conn, conf_clause, method_clause, conf_params, method_params
+            )
             _REF_CACHE[cache_key] = ref
         for nm in names:
             if enforce_ranges:
                 dependents = _ranged_dependents(
-                    conn, nm, types_in, conf_clause, method_clause, file_clause,
-                    conf_params, file_params, ranges_by_file, has_end_line,
+                    conn,
+                    nm,
+                    types_in,
+                    conf_clause,
+                    method_clause,
+                    file_clause,
+                    conf_params,
+                    file_params,
+                    ranges_by_file,
+                    has_end_line,
                     method_params,
                 )
             else:
@@ -389,8 +418,7 @@ def structural_edit_risk(
                              WHERE e.type IN ({types_in})
                                AND LOWER(nt.name) = LOWER(?)
                                {conf_clause} {method_clause} {file_clause}""",
-                        (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params, *method_params,
-                         *file_params),
+                        (*_DEPENDENCY_EDGE_TYPES, nm, *conf_params, *method_params, *file_params),
                     ).fetchone()
                 except sqlite3.Error:
                     continue

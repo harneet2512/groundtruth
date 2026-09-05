@@ -103,6 +103,12 @@ packages = ["src/groundtruth"]
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint]
+# Preserve the producer branch's pre-integration policy (REV-280).
+# Packaging metadata must not implicitly replace repository tooling policy.
+select = ["E", "F", "W"]
+ignore = ["E501", "E402", "E701", "E702", "E731", "E741", "E742", "F841"]
+
 [tool.mypy]
 strict = true
 python_version = "3.11"

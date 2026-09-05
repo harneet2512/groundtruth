@@ -33,9 +33,7 @@ class TerminalAckIdentity:
 
     @property
     def candidate_sha256_16(self) -> str:
-        return hashlib.sha256(
-            self.candidate_text.encode("utf-8", "surrogatepass")
-        ).hexdigest()[:16]
+        return hashlib.sha256(self.candidate_text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
 def _validate_identity(identity: object) -> TerminalAckIdentity:
@@ -65,9 +63,7 @@ def build_ack_participation(
         not _nonnegative_int(acknowledgment_iteration)
         or acknowledgment_iteration <= exact.delivered_iteration
     ):
-        raise ValueError(
-            "acknowledgment_iteration must be strictly later than delivered_iteration"
-        )
+        raise ValueError("acknowledgment_iteration must be strictly later than delivered_iteration")
     if not isinstance(acknowledged, bool):
         raise TypeError("acknowledged must be a bool")
     return build_control_participation(

@@ -76,10 +76,10 @@ class DefinitionRow:
     hit or an exact def-node lookup leaves them ``None`` rather than inferring a value.
     """
 
-    identity: str            # the matched node name (the searched symbol / fold variant)
+    identity: str  # the matched node name (the searched symbol / fold variant)
     file: str
     line: int
-    kind: str                # the graph node label (Function / Method / Class / ...)
+    kind: str  # the graph node label (Function / Method / Class / ...)
     definition_id: int
     confidence: float | None = None
     resolution_method: str | None = None

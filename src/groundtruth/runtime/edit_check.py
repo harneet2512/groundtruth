@@ -147,8 +147,11 @@ def check_edit_syntax(
     rel_name = norm
     if os.path.isabs(file_path):
         try:
-            rel_name = os.path.relpath(abs_path, repo_root or ".").replace("\\", "/") \
-                if repo_root else os.path.basename(norm)
+            rel_name = (
+                os.path.relpath(abs_path, repo_root or ".").replace("\\", "/")
+                if repo_root
+                else os.path.basename(norm)
+            )
         except ValueError:  # e.g. different Windows drive -> no relative path exists
             rel_name = os.path.basename(norm)
 
@@ -176,8 +179,10 @@ def check_edit_syntax(
         and _ss_edit_diag_enabled()
     ):
         normalized = _normalize_python_syntax_diagnostic(
-            str(result.get("diagnostic") or ""), rel_name,
-            abs_path=abs_path, repo_root=repo_root,
+            str(result.get("diagnostic") or ""),
+            rel_name,
+            abs_path=abs_path,
+            repo_root=repo_root,
         )
         if normalized:
             result["diagnostic"] = normalized
@@ -189,8 +194,7 @@ def check_edit_syntax(
     # rewritten, so no other content can be altered; on the Python path the normalizer already
     # produced ``rel_name`` and this is a byte no-op.
     if result.get("diagnostic"):
-        result["diagnostic"] = _relativize_diagnostic(
-            str(result["diagnostic"]), abs_path, rel_name)
+        result["diagnostic"] = _relativize_diagnostic(str(result["diagnostic"]), abs_path, rel_name)
     result = _apply_name_check(result, ext, abs_path, rel_name, executor)
     return result
 
@@ -243,9 +247,7 @@ def check_edit_syntax_bytes(
         }
         if repo_root:
             try:
-                aliases.add(
-                    os.path.relpath(captured_path, repo_root).replace("\\", "/")
-                )
+                aliases.add(os.path.relpath(captured_path, repo_root).replace("\\", "/"))
             except ValueError:
                 pass
         sanitized = dict(result)
@@ -256,8 +258,7 @@ def check_edit_syntax_bytes(
         checker = sanitized.get("checker")
         if isinstance(checker, list):
             sanitized["checker"] = [
-                normalized if str(item) in aliases else str(item)
-                for item in checker
+                normalized if str(item) in aliases else str(item) for item in checker
             ]
         return sanitized
 
@@ -320,6 +321,7 @@ def _check_py_undefined_names(src: bytes, rel_name: str) -> str:
         try:
             import glob as _glob
             import sys as _sys
+
             _added = False
             for _sp in _glob.glob("/opt/gt/python/lib/python3*/site-packages"):
                 if _sp not in _sys.path:
@@ -336,11 +338,15 @@ def _check_py_undefined_names(src: bytes, rel_name: str) -> str:
         w = _pf_checker.Checker(tree, filename=rel_name)
     except Exception:  # noqa: BLE001 -- a parse fault is the caller's syntax path, not ours
         return ""
-    _defs = tuple(c for c in (
-        getattr(_pf_messages, "UndefinedName", None),
-        getattr(_pf_messages, "UndefinedLocal", None),
-        getattr(_pf_messages, "UndefinedExport", None),
-    ) if isinstance(c, type))
+    _defs = tuple(
+        c
+        for c in (
+            getattr(_pf_messages, "UndefinedName", None),
+            getattr(_pf_messages, "UndefinedLocal", None),
+            getattr(_pf_messages, "UndefinedExport", None),
+        )
+        if isinstance(c, type)
+    )
     if not _defs:
         return ""
     for m in sorted(getattr(w, "messages", []), key=lambda x: getattr(x, "lineno", 0)):
@@ -350,8 +356,13 @@ def _check_py_undefined_names(src: bytes, rel_name: str) -> str:
             except Exception:  # noqa: BLE001
                 msg = "undefined name"
             return _python_diagnostic(
-                rel_name=rel_name, line=int(getattr(m, "lineno", 1) or 1),
-                source="", offset=None, error_type="NameError", message=str(msg))
+                rel_name=rel_name,
+                line=int(getattr(m, "lineno", 1) or 1),
+                source="",
+                offset=None,
+                error_type="NameError",
+                message=str(msg),
+            )
     return ""
 
 
@@ -396,8 +407,9 @@ def _build_name_check_command(ext: str, path: str) -> "list[str] | None":
     return [_name_check_interpreter(), "-I", "-c", script, path]
 
 
-def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
-                      executor: "Executor | None") -> dict:
+def _apply_name_check(
+    result: dict, ext: str, abs_path: str, rel_name: str, executor: "Executor | None"
+) -> dict:
     """Post-syntax undefined-name refinement (flag-gated). Only upgrades a clean ``ok`` to
     ``name_error`` on a DEFINITE undefined name. Correct-or-quiet: any fault leaves ``result``."""
     if not _edit_check_names_on() or result.get("verdict") != "ok" or ext != ".py":
@@ -414,7 +426,8 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
             cmd = _build_name_check_command(ext, abs_path)
             if cmd is not None:
                 _rc, out, _err, status = _execute(
-                    cmd, os.path.dirname(abs_path) or ".", 10, executor)
+                    cmd, os.path.dirname(abs_path) or ".", 10, executor
+                )
                 out = (out or "").strip()
                 # `_execute` returns status "ran" | "timeout" | "spawn_error" (see its docstring) —
                 # NEVER "ok". The first cut compared against "ok", so this branch could not execute
@@ -430,17 +443,21 @@ def _apply_name_check(result: dict, ext: str, abs_path: str, rel_name: str,
                     # (`/testbed/pkg/x.py:2: NameError: ...`) — inconsistent with the in-process leg
                     # and with every other diagnostic GT emits. Rewrite the prefix only.
                     if diag.startswith(abs_path):
-                        diag = rel_name + diag[len(abs_path):]
+                        diag = rel_name + diag[len(abs_path) :]
                     else:
                         alt = abs_path.replace("\\", "/")
                         if diag.startswith(alt):
-                            diag = rel_name + diag[len(alt):]
+                            diag = rel_name + diag[len(alt) :]
     except Exception:  # noqa: BLE001
         return result
     if diag:
-        return _verdict("name_error", reason="undefined_name", ext=ext,
-                        checker=list(result.get("checker") or []) + ["pyflakes"],
-                        diagnostic=_bound_text(diag))
+        return _verdict(
+            "name_error",
+            reason="undefined_name",
+            ext=ext,
+            checker=list(result.get("checker") or []) + ["pyflakes"],
+            diagnostic=_bound_text(diag),
+        )
     # AUDIT 2026-07-24 — OBSERVABILITY: record that the name leg RAN even when it found nothing.
     # Previously `pyflakes` entered ``checker`` only on an upgrade, so a clean file was
     # indistinguishable from "the name check never executed" (e.g. the module was missing). That
@@ -500,7 +517,9 @@ def _build_check_command(ext: str, path: str) -> list[str] | None:
     if ext in (".py", ".pyi"):
         # ast.parse only — no bytecode cache written (unlike py_compile). Encoding-safe.
         return [
-            "python", "-I", "-c",
+            "python",
+            "-I",
+            "-c",
             "import ast,sys; ast.parse(open(sys.argv[1],'rb').read(), sys.argv[1])",
             path,
         ]
@@ -554,19 +573,33 @@ def _check_py_in_process(abs_path: str, ext: str, rel_name: str | None = None) -
             diag = _format_python_syntax_error(exc, rel_name or os.path.basename(abs_path))
         else:
             diag = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-        return _verdict("syntax_error", reason="parse_error", ext=ext,
-                        checker=["ast.parse"], diagnostic=_bound_text(diag))
+        return _verdict(
+            "syntax_error",
+            reason="parse_error",
+            ext=ext,
+            checker=["ast.parse"],
+            diagnostic=_bound_text(diag),
+        )
     except (ValueError, RecursionError, MemoryError):
         # Not a grammar syntax error (e.g. null bytes) -> do not overclaim.
         return _verdict("unavailable", reason="parse_ambiguous", ext=ext, checker=["ast.parse"])
     return _apply_name_check(
         _verdict("ok", reason="parsed", ext=ext, checker=["ast.parse"]),
-        ext, abs_path, rel_name or os.path.basename(abs_path), None)
+        ext,
+        abs_path,
+        rel_name or os.path.basename(abs_path),
+        None,
+    )
 
 
 def _python_diagnostic(
-    *, rel_name: str, line: int, source: str, offset: int | None,
-    error_type: str, message: str,
+    *,
+    rel_name: str,
+    line: int,
+    source: str,
+    offset: int | None,
+    error_type: str,
+    message: str,
 ) -> str:
     """Render the stable, native Python syntax-error subset used across runtimes."""
     parts = [f'File "{rel_name}", line {max(1, int(line or 1))}']
@@ -574,7 +607,7 @@ def _python_diagnostic(
     if source:
         parts.append("    " + source)
         if isinstance(offset, int) and offset > 0:
-            prefix = "".join("\t" if char == "\t" else " " for char in source[:offset - 1])
+            prefix = "".join("\t" if char == "\t" else " " for char in source[: offset - 1])
             parts.append("    " + prefix + "^")
     parts.append(f"{error_type}: {message}".rstrip())
     return "\n".join(parts)
@@ -606,8 +639,11 @@ def _normalize_python_syntax_diagnostic(
     """
     lines = (text or "").splitlines()
     error_index = next(
-        (index for index in range(len(lines) - 1, -1, -1)
-         if _PY_ERROR_RE.match(lines[index].strip())),
+        (
+            index
+            for index in range(len(lines) - 1, -1, -1)
+            if _PY_ERROR_RE.match(lines[index].strip())
+        ),
         None,
     )
     if error_index is None:
@@ -662,6 +698,7 @@ def _python_frame_matches(
     same identity under a known task-container mount. Arbitrary suffix matches
     are forbidden because another checkout can contain the same relative path.
     """
+
     def _norm(path: str) -> str:
         value = (path or "").replace("\\", "/")
         if not value:
@@ -742,8 +779,7 @@ def _classify(
     #     (2026-07-29 tier-honesty fix: the probe used to exit 0 silently, and
     #     rc == 0 -> "ok" fed the completion cert's syntax head as a real PASS.)
     if _CHECKER_UNAVAILABLE_SENTINEL in combined:
-        return _verdict("unavailable", reason="checker_module_unavailable",
-                        ext=ext, checker=cmd)
+        return _verdict("unavailable", reason="checker_module_unavailable", ext=ext, checker=cmd)
     if rc == 0:
         return _verdict("ok", reason="clean_exit", ext=ext, checker=cmd)
     # (1) Environment failure (tool missing / offline / manifest) is NEVER a syntax
@@ -752,8 +788,13 @@ def _classify(
         return _verdict("unavailable", reason="environment_failure", ext=ext, checker=cmd)
     # (2) POSITIVE parse evidence + a real non-zero exit -> syntax_error.
     if _looks_like_syntax_error(combined):
-        return _verdict("syntax_error", reason="parse_error", ext=ext,
-                        checker=cmd, diagnostic=_bound_diagnostic(err, out))
+        return _verdict(
+            "syntax_error",
+            reason="parse_error",
+            ext=ext,
+            checker=cmd,
+            diagnostic=_bound_diagnostic(err, out),
+        )
     # (3) Non-zero exit with no positive evidence -> ambiguous -> quiet.
     return _verdict("unavailable", reason="nonzero_no_evidence", ext=ext, checker=cmd)
 
@@ -847,11 +888,11 @@ def caller_diff_advisory(
         rows = con.execute(
             f"SELECT nt.name, ns.name, ns.file_path, {line_sel}, {conf_expr} "
             "FROM edges e "
-            "JOIN nodes ns ON ns.id = e.source_id "   # the caller
-            "JOIN nodes nt ON nt.id = e.target_id "   # the edited symbol
+            "JOIN nodes ns ON ns.id = e.source_id "  # the caller
+            "JOIN nodes nt ON nt.id = e.target_id "  # the edited symbol
             f"WHERE nt.name IN ({sph}) AND e.type = 'CALLS' "
-            "AND COALESCE(nt.is_test, 0) = 0 "        # edit subject is source code
-            "AND COALESCE(ns.is_test, 0) = 0 "        # LEAK-LAW: no test callers
+            "AND COALESCE(nt.is_test, 0) = 0 "  # edit subject is source code
+            "AND COALESCE(ns.is_test, 0) = 0 "  # LEAK-LAW: no test callers
             f"AND LOWER(TRIM(e.resolution_method)) IN ('{det}') {conf_gate}",
             list(syms),
         ).fetchall()

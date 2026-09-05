@@ -35,6 +35,7 @@ trajectory reproduces the exact appended bytes (law 5/6). The chain is PER-EPISO
 a fresh attempt starts at genesis and re-sees facts (ABI dedup keys are
 episode-invariant by design; the chain head is not).
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -45,12 +46,9 @@ from collections.abc import Callable, Mapping
 from groundtruth.runtime.evidence_envelope import (
     ObservationBinding,
     RECEIPT_ACTED,
-    RECEIPT_CAUSAL,
     RECEIPT_DELIVERED,
-    RECEIPT_NONE,
     RECEIPT_RANK,
     RECEIPT_REFERENCED,
-    RECEIPT_RESOLVED_STATE,
     EvidenceEnvelope,
     chain_hash,
 )
@@ -61,8 +59,15 @@ from groundtruth.runtime.evidence_envelope import (
     WARNING,
 )
 from groundtruth.runtime.gateway import (
-    KIND_EDIT, KIND_SEARCH, KIND_SUBMIT, KIND_TEST, KIND_VIEW,
-    CoveringResult, ToolEvent, classify_command)
+    KIND_EDIT,
+    KIND_SEARCH,
+    KIND_SUBMIT,
+    KIND_TEST,
+    KIND_VIEW,
+    CoveringResult,
+    ToolEvent,
+    classify_command,
+)
 from groundtruth.runtime.native_render import (
     render_body_concept_native,
     render_caller_contract_native,
@@ -235,10 +240,8 @@ def canonicalize_tool_result(
             kind = SemanticKind.SEARCH_RESULT
         metadata = (
             ("query", action.query),
-            *((("hit_count", str(result.hit_count)),)
-              if result.hit_count is not None else ()),
-            *((("files_hit", "|".join(result.files_hit)),)
-              if result.files_hit else ()),
+            *((("hit_count", str(result.hit_count)),) if result.hit_count is not None else ()),
+            *((("files_hit", "|".join(result.files_hit)),) if result.files_hit else ()),
             # The graph-validated operand symbol. Deliberately metadata on SEARCH_RESULT and
             # NOT a SYMBOL_VIEWED outcome: that kind's reducer branch sets
             # phase = UNDERSTANDING, and a search must not advance the trajectory out of
@@ -248,9 +251,11 @@ def canonicalize_tool_result(
             # so its operand is not evidence of what the agent is working on. SEARCH_EMPTY
             # IS kept -- a search that ran and found nothing is real interest, and those
             # are precisely the searches GT has most to add to.
-            *((("resolved_symbols", "|".join(result.resolved_symbols)),)
-              if result.resolved_symbols
-              and kind is not SemanticKind.SEARCH_FAILED else ()),
+            *(
+                (("resolved_symbols", "|".join(result.resolved_symbols)),)
+                if result.resolved_symbols and kind is not SemanticKind.SEARCH_FAILED
+                else ()
+            ),
         )
         outcomes = (outcome(kind, metadata=metadata),)
     elif action.operation is ActionOperation.VIEW_SOURCE:
@@ -393,10 +398,7 @@ def canonicalize_tool_event(
 
     outcomes: list[SemanticOutcome] = []
     semantic_events = tuple(event.semantic_events or ())
-    repository_changed = (
-        revision_before.repository_content
-        != revision_after.repository_content
-    )
+    repository_changed = revision_before.repository_content != revision_after.repository_content
     failure_fingerprint = canonical_test_failure_fingerprint(event)
     for semantic_event in semantic_events:
         if semantic_event == "edit_result":
@@ -509,10 +511,7 @@ def canonicalize_tool_event(
                 )
             )
 
-    parents = tuple(
-        CausalRef(CausalRefKind.EVENT, parent_id)
-        for parent_id in parent_event_ids
-    ) + (
+    parents = tuple(CausalRef(CausalRefKind.EVENT, parent_id) for parent_id in parent_event_ids) + (
         CausalRef(CausalRefKind.ACTION, action_id),
         CausalRef(CausalRefKind.MODEL_CALL, model_turn_id),
         CausalRef(CausalRefKind.OBSERVATION, observation_id),
@@ -523,9 +522,7 @@ def canonicalize_tool_event(
         sequence=sequence,
         kind=EventKind.OBSERVATION_COMMITTED,
         authority=(
-            Authority.STRUCTURED
-            if event.semantics_authoritative
-            else Authority.RESULT_DERIVED
+            Authority.STRUCTURED if event.semantics_authoritative else Authority.RESULT_DERIVED
         ),
         outcomes=tuple(outcomes),
         revision_before=revision_before,
@@ -537,6 +534,7 @@ def canonicalize_tool_event(
         carrier=event.carrier_kind or event.kind or "",
         parents=parents,
     )
+
 
 # The def-facts kinds ROUTED to the mini's own ``_fmt_def_facts`` /
 # ``_fmt_def_facts_native`` via the injected ``def_facts_renderer`` (never
@@ -592,9 +590,7 @@ def canonical_test_failure_fingerprint(event: ToolEvent) -> str:
     signature = " ".join(signature.split())
     if not signature:
         return ""
-    return hashlib.sha256(
-        signature.encode("utf-8", "replace")
-    ).hexdigest()[:16]
+    return hashlib.sha256(signature.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------- #
@@ -631,8 +627,10 @@ def normalize_event(
     if not test_outcome:
         try:
             from groundtruth.runtime.patterns import classify_test_observation
+
             test_outcome, test_protocol = classify_test_observation(
-                command or "", output or "", returncode)
+                command or "", output or "", returncode
+            )
         except Exception:  # noqa: BLE001 -- normalization stays correct-or-quiet
             test_outcome = test_protocol = ""
     if not authoritative:
@@ -680,14 +678,14 @@ def normalize_event(
 # envelope's evidence_type). Higher wins the single dose. An unknown kind gets a
 # low floor so a new producer never silently out-ranks a verified world-fact.
 _EVIDENCE_TYPE_RANK: dict[str, int] = {
-    "covering_verdict": 60,       # executed world-fact (the repo's own RED)
-    "signature_mismatch": 50,     # edit-bound contract break (patch_delta, Python-only)
-    "caller_break": 48,           # cross-language caller-contract break (below the narrower
-    "caller_contract_view": 48,   # the same contract, attached before mutation on source view
+    "covering_verdict": 60,  # executed world-fact (the repo's own RED)
+    "signature_mismatch": 50,  # edit-bound contract break (patch_delta, Python-only)
+    "caller_break": 48,  # cross-language caller-contract break (below the narrower
+    "caller_contract_view": 48,  # the same contract, attached before mutation on source view
     #                               signature_mismatch — an arity diagnostic is more specific —
     #                               but above wrong_surface/trace so it wins an edit turn)
-    "wrong_surface": 45,          # every hit is a test/vendored copy
-    "trace_frame": 40,            # deepest in-repo stack frame
+    "wrong_surface": 45,  # every hit is a test/vendored copy
+    "trace_frame": 40,  # deepest in-repo stack frame
     # T0->T2 re-slot (2026-07-12): GT's ranked localization ANSWER at post-search. ABOVE
     # def_ref_partition (a ranked FILE answer wins the FIRST search dose, before the agent
     # has a bare symbol to complete), BELOW trace_frame/wrong_surface (a concrete crash
@@ -695,14 +693,14 @@ _EVIDENCE_TYPE_RANK: dict[str, int] = {
     # starting point (tunable via measure_brief on the stratum-B testset), NOT a fixture
     # constant / a ranking weight (localize()'s ranking is untouched).
     "localization": 37,
-    "def_ref_partition": 35,      # def/ref partition on an ambiguous/flood grep
-    "name_fold": 34,              # indexed under a fold variant
-    "companion_surface": 30,      # registration/companion gap
-    "missing_role": 22,           # change_surface missing role (hypothesis)
+    "def_ref_partition": 35,  # def/ref partition on an ambiguous/flood grep
+    "name_fold": 34,  # indexed under a fold variant
+    "companion_surface": 30,  # registration/companion gap
+    "missing_role": 22,  # change_surface missing role (hypothesis)
     "missing_role_postcreate": 22,  # same fact, honest post-creation edit boundary
-    "body_concept": 20,           # vocabulary-gap function bodies
-    "new_file_destination": 15,   # feature-add destination (hypothesis)
-    "cochange_partner": 12,       # co-change partner
+    "body_concept": 20,  # vocabulary-gap function bodies
+    "new_file_destination": 15,  # feature-add destination (hypothesis)
+    "cochange_partner": 12,  # co-change partner
 }
 _TIER_RANK: dict[str, int] = {VERIFIED: 3, WARNING: 2, INFO: 1, HYPOTHESIS: 0}
 
@@ -771,6 +769,7 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
         return 1
     try:
         from groundtruth.runtime.fact_registry import required_event
+
         if required_event(et) == observed_event:
             return 1
     except Exception:  # noqa: BLE001 -- unregistered/unresolvable type falls through
@@ -784,6 +783,7 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
     # payload owed HERE? Both are declarative and reviewed; neither is invented here.
     try:
         from groundtruth.runtime.context_policy import EVENT_BOUND_PAYLOADS
+
         for event, payloads in EVENT_BOUND_PAYLOADS.items():
             if et in payloads and getattr(event, "value", None) == observed_event:
                 return 1
@@ -796,8 +796,9 @@ def _boundary_match(env: EvidenceEnvelope, observed_event: "str | None") -> int:
 # contract inside this set: a fact contracted elsewhere can never be OBSERVED at its own boundary, so
 # treating "not equal" as expired would delete it at every observation. Keep in sync with
 # boundary_for_event — a test asserts they agree.
-_DERIVABLE_BOUNDARIES = frozenset({
-    "edit_result", "test_result", "file_view", "search_result", "failed_search"})
+_DERIVABLE_BOUNDARIES = frozenset(
+    {"edit_result", "test_result", "file_view", "search_result", "failed_search"}
+)
 
 BOUNDARY_MATCH = "match"
 BOUNDARY_MISMATCH = "mismatch"
@@ -849,6 +850,7 @@ def boundary_verdict(env: EvidenceEnvelope, observed_event: "str | None") -> str
     contracted = None
     try:
         from groundtruth.runtime.fact_registry import required_event
+
         contracted = required_event(et)
     except Exception:  # noqa: BLE001
         contracted = None
@@ -926,10 +928,16 @@ def _priority(
         base = _EVIDENCE_TYPE_RANK.get(et.split(":", 1)[0], 10)
     base += _xsession_boost(env)  # SM-9c rank-up (0 when unstamped -> byte-identical)
     if recently_delivered and (
-            et in recently_delivered or et.split(":", 1)[0] in recently_delivered):
+        et in recently_delivered or et.split(":", 1)[0] in recently_delivered
+    ):
         base -= _ROTATION_DECAY  # WS-1: already delivered this attempt -> yield the next dose
-    return (_boundary_match(env, observed_event), base,
-            _TIER_RANK.get(env.tier, 1), float(env.confidence), env.dedup_key)
+    return (
+        _boundary_match(env, observed_event),
+        base,
+        _TIER_RANK.get(env.tier, 1),
+        float(env.confidence),
+        env.dedup_key,
+    )
 
 
 def arbitrate(
@@ -984,8 +992,8 @@ def select(
     out: "list[EvidenceEnvelope]" = []
     seen: "set[str]" = set()
     for env in sorted(
-            envelopes, key=lambda e: _priority(e, recently_delivered, observed_event),
-            reverse=True):
+        envelopes, key=lambda e: _priority(e, recently_delivered, observed_event), reverse=True
+    ):
         if env.dedup_key in seen:
             continue
         out.append(env)
@@ -1083,13 +1091,15 @@ def _render_caller_break(env: EvidenceEnvelope) -> str:
     after = args.get("after_parameters")
     delta = ""
     if (
-        isinstance(before, tuple) and isinstance(after, tuple)
+        isinstance(before, tuple)
+        and isinstance(after, tuple)
         and before != after
         and all(isinstance(item, str) and item for item in (*before, *after))
     ):
         delta = f"{', '.join(before)} -> {', '.join(after)}"
     diagnostic = render_caller_contract_native(
-        env.fact_id, n_callers, n_files, def_file=env.target, sig_delta=delta)
+        env.fact_id, n_callers, n_files, def_file=env.target, sig_delta=delta
+    )
     if not diagnostic:
         return ""
     caller_rows = render_def_rows_native(args.get("caller_rows") or ())
@@ -1100,13 +1110,14 @@ def _render_caller_break(env: EvidenceEnvelope) -> str:
         except (TypeError, ValueError):
             continue
         rendered = render_caller_usage_native(
-            caller_file, caller_line, symbol, usage_kind,
+            caller_file,
+            caller_line,
+            symbol,
+            usage_kind,
         )
         if rendered and rendered not in usage_lines:
             usage_lines.append(rendered)
-    return "\n".join(
-        part for part in (diagnostic, caller_rows, *usage_lines) if part
-    )
+    return "\n".join(part for part in (diagnostic, caller_rows, *usage_lines) if part)
 
 
 def _render_caller_contract_view(env: EvidenceEnvelope) -> str:
@@ -1138,7 +1149,10 @@ def _render_caller_contract_view(env: EvidenceEnvelope) -> str:
         except (TypeError, ValueError):
             continue
         rendered = render_caller_usage_native(
-            caller_file, caller_line, symbol, usage_kind,
+            caller_file,
+            caller_line,
+            symbol,
+            usage_kind,
         )
         if rendered and rendered not in usage_lines:
             usage_lines.append(rendered)
@@ -1158,9 +1172,13 @@ def _render_signature_delta(env: EvidenceEnvelope) -> str:
     if not isinstance(caller_file, str) or not isinstance(symbol, str):
         return ""
     return render_signature_delta_native(
-        caller_file, a.get("caller_line"), symbol,
-        expected_min=a.get("new_min_params"), expected_max=a.get("new_max_params"),
-        given=a.get("positional_args"))
+        caller_file,
+        a.get("caller_line"),
+        symbol,
+        expected_min=a.get("new_min_params"),
+        expected_max=a.get("new_max_params"),
+        given=a.get("positional_args"),
+    )
 
 
 def _render_registration(env: EvidenceEnvelope) -> str:
@@ -1174,8 +1192,7 @@ def _render_registration(env: EvidenceEnvelope) -> str:
     symbol = a.get("symbol")
     if not isinstance(file_path, str) or not isinstance(symbol, str):
         return ""
-    return render_registration_native(
-        file_path, a.get("line"), symbol, a.get("siblings"))
+    return render_registration_native(file_path, a.get("line"), symbol, a.get("siblings"))
 
 
 def _render_def_rows(env: EvidenceEnvelope) -> str:
@@ -1369,8 +1386,10 @@ def seal_delivery(
     drop, law-8 budget drop) is deferred and re-offered, never destroyed."""
     rbh = hashlib.sha256(rendered_bytes).hexdigest()
     new_head = chain_hash(
-        parent_hash, rendered_bytes,
-        tool_output_bytes=tool_output_bytes, boundary=boundary,
+        parent_hash,
+        rendered_bytes,
+        tool_output_bytes=tool_output_bytes,
+        boundary=boundary,
     )
     if dedup_chain is not None:
         dedup_chain.add(env.dedup_key)

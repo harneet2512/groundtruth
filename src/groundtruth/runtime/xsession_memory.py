@@ -32,6 +32,7 @@ PURE · DETERMINISTIC · LLM-FREE · stdlib + fact_registry only. No time, no ra
 the value identity; the only I/O is the explicit :func:`load` / :func:`dump` of one small
 per-repo JSON file.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -84,9 +85,7 @@ INERT_CONSUMED_MAX = 0
 # ``delivered``). Mirror of the ladder in ``evidence_envelope`` (RECEIPT_REFERENCED /
 # _ACTED / _RESOLVED_STATE / _CAUSAL — the source of truth for the vocabulary). A delivery
 # that stayed at ``delivered`` / ``none`` is INERT.
-CONSUMED_STATES: frozenset[str] = frozenset(
-    {"referenced", "acted", "resolved_state", "causal"}
-)
+CONSUMED_STATES: frozenset[str] = frozenset({"referenced", "acted", "resolved_state", "causal"})
 
 
 # --------------------------------------------------------------------------- #
@@ -274,14 +273,19 @@ def _store_lock(path: str):
         handle.seek(0)
         try:
             import msvcrt
+
             msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
             def unlock() -> None:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         except ImportError:
             import fcntl
+
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
             def unlock() -> None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
         try:
             yield
         finally:
@@ -296,8 +300,12 @@ def _merge_snapshot_max(current: XSessionStore, incoming: XSessionStore) -> XSes
     for cls, pair in _sanitize_stats(dict(incoming.class_stats)).items():
         old = stats.get(cls, (0, 0))
         stats[cls] = (max(old[0], pair[0]), max(old[1], pair[1]))
-    return replace(current, schema_version=SCHEMA_VERSION,
-                   repo_key=current.repo_key or incoming.repo_key, class_stats=stats)
+    return replace(
+        current,
+        schema_version=SCHEMA_VERSION,
+        repo_key=current.repo_key or incoming.repo_key,
+        class_stats=stats,
+    )
 
 
 def dump(store: XSessionStore, path: str) -> bool:
@@ -335,9 +343,7 @@ def dump(store: XSessionStore, path: str) -> bool:
         return False
 
 
-def merge(
-    base: XSessionStore, session_stats: Mapping[str, tuple[int, int]]
-) -> XSessionStore:
+def merge(base: XSessionStore, session_stats: Mapping[str, tuple[int, int]]) -> XSessionStore:
     """Fold THIS session's per-class ``(delivered, consumed)`` into ``base`` (the frozen
     task-start snapshot) and return a NEW store. PURE — ``base`` is untouched; ``session_stats``
     is leak-sanitized (only registered classes survive), so a poisoned session row can never

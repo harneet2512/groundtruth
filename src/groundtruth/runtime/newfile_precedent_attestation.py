@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from groundtruth.pretask.change_surface import (
     _MAX_EVIDENCE_LINES,
@@ -183,15 +183,15 @@ def build_registration_snapshot(
         return None
     if not isinstance(registration_file, str) or not registration_file.strip():
         return None
-    member_tuple = tuple(
-        m for m in dict.fromkeys(members or ()) if isinstance(m, str) and m
-    )
+    member_tuple = tuple(m for m in dict.fromkeys(members or ()) if isinstance(m, str) and m)
     if len(member_tuple) < _MIN_SIBLINGS:
         return None
     if not isinstance(repo_root, str) or not repo_root:
         return None
-    path = registration_file if os.path.isabs(registration_file) else os.path.join(
-        repo_root, registration_file
+    path = (
+        registration_file
+        if os.path.isabs(registration_file)
+        else os.path.join(repo_root, registration_file)
     )
     try:
         with open(path, "rb") as handle:
@@ -237,9 +237,7 @@ def _rederive_registration(
     distinct = len(refs)
     entity_pattern = _ref_pattern(snapshot.entity)
     entity_registered = any(
-        entity_pattern.search(line)
-        for lines in refs.values()
-        for _, line in lines
+        entity_pattern.search(line) for lines in refs.values() for _, line in lines
     )
     reg_lines: list[tuple[int, str]] = []
     for member in sorted(refs):
@@ -379,9 +377,7 @@ def finalize_newfile_precedent_attestation(
         subject="exact delivered registration missing-role candidate",
         expectation="a re-checkable git commit + blob anchor binds the registry bytes",
         observation=(
-            "registry bytes bound to repo HEAD and their git blob id"
-            if freshness_complete
-            else ""
+            "registry bytes bound to repo HEAD and their git blob id" if freshness_complete else ""
         ),
         verdict=PASS if freshness_complete else UNMEASURED,
         proof_refs=tuple(sorted(freshness_proofs)) if freshness_complete else (),

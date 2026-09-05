@@ -66,8 +66,10 @@ def test_dedup_semantic_id_after_commit(pm):
     first = pm._budget_trim(a)
     assert first.strip() == a
     pm._PRODUCT_BUDGETER.commit_delivered([a])
-    b = "[WITNESS] capture_snapshot invoked from -> pkg/mod.py:44"
-    assert pm._budget_trim(b) == "", "same semantic ID should be suppressed"
+    respaced = "[WITNESS]  capture_snapshot   called by  ->  pkg/mod.py:44"
+    assert pm._budget_trim(respaced) == "", "same fact should be suppressed"
+    other = "[WITNESS] capture_snapshot calls -> pkg/other.py:9"
+    assert pm._budget_trim(other).strip() == other, "distinct relationships must survive"
 
 
 def test_imperative_survives_over_explanation(pm):
