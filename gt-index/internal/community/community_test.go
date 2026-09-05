@@ -46,6 +46,8 @@ var gitEnvFlags = []string{
 	"-c", "user.email=community@example.invalid",
 	"-c", "commit.gpgsign=false",
 	"-c", "init.defaultBranch=main",
+	"-c", "gc.auto=0",
+	"-c", "maintenance.auto=false",
 }
 
 func git(t *testing.T, dir string, args ...string) string {
