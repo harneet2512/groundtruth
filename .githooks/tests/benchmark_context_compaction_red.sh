@@ -5,7 +5,7 @@ if [ ! -f gt-index/cmd/gt-index/inspection.go ]; then
   echo "RED: deterministic inspection transport is absent"
   exit 1
 fi
-if ! grep -Fq 'case "inspect-source":' gt-index/cmd/gt-index/main.go; then
+if ! grep -Fq '"inspect-jsonl"' gt-index/cmd/gt-index/main.go; then
   echo "RED: deterministic inspection transport is not wired"
   exit 1
 fi
