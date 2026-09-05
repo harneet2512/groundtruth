@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=ef364f9084c3a935d0ecc2e12177d0f36c7716a0
+fixture_path=.githooks/tests/candidate_provenance_compaction_red.sh
+fixture_sha256=ba77fba456d70a734cc7aeb02af1c1b5f8cd19e36da054462aa58d57a83898ea
+command=.githooks/tests/candidate_provenance_compaction_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/candidate_provenance_compaction_red.out
+output_sha256=bb13e3ab663350ee3b95eb42150d1e1e0d5868dd7d542ee69d795a3ac72ed337

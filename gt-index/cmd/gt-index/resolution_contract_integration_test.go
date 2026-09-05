@@ -143,7 +143,7 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 		(SELECT count(*) FROM nodes WHERE node_type='query_policy_version' AND schema_version=2)`).Scan(&callsitesV2, &candidatesV2, &derivationsV2, &completenessV2, &policiesV2); err != nil {
 		t.Fatalf("canonical v2 graph counts: %v", err)
 	}
-	if callsitesV2 == 0 || candidatesV2 == 0 || derivationsV2 != candidatesV2 || completenessV2 == 0 || policiesV2 != 2 {
+	if callsitesV2 == 0 || candidatesV2 == 0 || derivationsV2 >= candidatesV2 || completenessV2 == 0 || policiesV2 != 2 {
 		t.Fatalf("canonical v2 graph incomplete: callsites=%d candidates=%d derivations=%d completeness=%d policies=%d", callsitesV2, candidatesV2, derivationsV2, completenessV2, policiesV2)
 	}
 	var conservationMismatch int

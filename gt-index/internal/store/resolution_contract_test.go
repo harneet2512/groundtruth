@@ -220,8 +220,8 @@ func TestAttachResolutionGraphPersistsTypedFactsWithoutCandidateConfidence(t *te
 		(SELECT count(*) FROM nodes WHERE node_type='completeness_fact')`).Scan(&unresolved, &derivations, &completeness); err != nil {
 		t.Fatal(err)
 	}
-	if unresolved != 1 || derivations != 2 || completeness == 0 {
-		t.Fatalf("canonical fact nodes missing: unresolved=%d derivations=%d completeness=%d", unresolved, derivations, completeness)
+	if unresolved != 1 || derivations != 0 || completeness == 0 {
+		t.Fatalf("lazy candidate provenance cardinality mismatch: unresolved=%d materialized_derivations=%d completeness=%d", unresolved, derivations, completeness)
 	}
 }
 
