@@ -1,0 +1,8 @@
+format=gt.fixture-red.v1
+base_sha=c3d994d60dffe42920abf3eef5f10980a0269f6a
+fixture_path=.githooks/tests/relationship_function_ambiguity_red.sh
+fixture_sha256=7dab9092f2119dc83063c2c0c3c95b1e18d71935db06327aaab531fdf20c4324
+command=.githooks/tests/relationship_function_ambiguity_red.sh
+exit_code=1
+output_path=.githooks/red-artifacts/relationship_function_ambiguity_red.out
+output_sha256=87af70c3fa9ed3982d9621aac6dcb39c3a13ebf4ffafe5aff3c99d4ac3440404

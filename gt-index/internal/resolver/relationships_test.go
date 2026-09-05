@@ -289,9 +289,10 @@ func edgeExists(t *testing.T, db *store.DB, typ string, src, tgt int64) bool {
 // TestRustGenericImplParse is the BITING test for the Rust generic-impl mis-parse fix
 // (P1-6). The positional strings.Fields parse read `impl<T>` (no space) as the trait
 // and mangled path/generic forms. The regex form handles all three live shapes:
-//   impl<T> Display for Wrapper        — impl-generic block before the trait
-//   impl fmt::Display for Foo          — qualified trait path (last segment = Display)
-//   impl Iterator<Item=u8> for Bytes   — trait carries its own generics
+//
+//	impl<T> Display for Wrapper        — impl-generic block before the trait
+//	impl fmt::Display for Foo          — qualified trait path (last segment = Display)
+//	impl Iterator<Item=u8> for Bytes   — trait carries its own generics
 func TestRustGenericImplParse(t *testing.T) {
 	root := t.TempDir()
 	src := `trait Display {}
@@ -426,5 +427,21 @@ func TestParseGoStructMethodSig(t *testing.T) {
 			t.Errorf("parseGoStructMethodSig(%q) = %+v, want name=%q arity=%d results=%v",
 				tc.in, got, tc.name, tc.arity, tc.hasResults)
 		}
+	}
+}
+
+func TestResolveClassOrFuncNodeAbstainsOnAmbiguousCrossFileFunction(t *testing.T) {
+	functions := map[string]map[string]int64{
+		"a.ts": {"Error": 11},
+		"b.ts": {"Error": 22},
+	}
+	if got := resolveClassOrFuncNode("Error", "use.ts", nil, functions); got != 0 {
+		t.Fatalf("ambiguous cross-file function resolved to %d", got)
+	}
+	if got := resolveClassOrFuncNode("Error", "a.ts", nil, functions); got != 11 {
+		t.Fatalf("same-file function resolved to %d, want 11", got)
+	}
+	if got := resolveClassOrFuncNode("Only", "use.ts", nil, map[string]map[string]int64{"a.ts": {"Only": 33}}); got != 33 {
+		t.Fatalf("unique cross-file function resolved to %d, want 33", got)
 	}
 }
