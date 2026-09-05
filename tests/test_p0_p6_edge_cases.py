@@ -22,6 +22,8 @@ P0 spec:
 import dataclasses
 from typing import Optional
 
+import pytest
+
 
 # ============================================================================
 # Simulated data structures (mirrors Go PropertyRef)
@@ -258,7 +260,7 @@ class TestResults:
         return self.failed == 0
 
 
-def test_edge_cases():
+def _check_edge_cases():
     t = TestResults()
 
     # ========================================================================
@@ -755,7 +757,7 @@ def test_edge_cases():
 # ============================================================================
 
 
-def test_only_top_level_ifs():
+def _check_only_top_level_ifs():
     """The if_statement must be a direct child of the function body."""
     t = TestResults()
     print("\n--- P0: Only top-level ifs are candidates ---")
@@ -792,14 +794,28 @@ def test_only_top_level_ifs():
     return t.summary()
 
 
+def test_edge_cases():
+    assert _check_edge_cases(), "one or more simulated extraction checks failed"
+
+
+def test_only_top_level_ifs():
+    assert _check_only_top_level_ifs(), "top-level extraction checks failed"
+
+
+def test_failed_summary_cannot_silently_pass_pytest(monkeypatch):
+    monkeypatch.setattr(TestResults, "summary", lambda self: False)
+    with pytest.raises(AssertionError):
+        test_only_top_level_ifs()
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("P0 + P6 ADVERSARIAL EDGE CASE TESTS")
     print("Simulating Go tree-sitter extraction logic in Python")
     print("=" * 70)
 
-    ok1 = test_edge_cases()
-    ok2 = test_only_top_level_ifs()
+    ok1 = _check_edge_cases()
+    ok2 = _check_only_top_level_ifs()
 
     print("\n" + "=" * 70)
     if ok1 and ok2:

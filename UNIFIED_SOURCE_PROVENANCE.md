@@ -64,3 +64,12 @@ these contracts; runtime safety checks were not relaxed to satisfy old tests.
 Two strict expected-failure markers were removed where the recovered runtime
 already satisfies the checks. Route/re-export retention now exercises the real
 filter instead of depending on source-code line formatting.
+
+## Compound semantic events
+
+After the green cac42da5c CI run, the edit/test/search producer branches were
+made independent. Previously an event containing both an edit and an executed
+test result skipped the covering-test producer. Source regressions use a real
+failing subprocess and preserve authoritative-empty-event behavior. The harness
+installed-wheel regression also checks the rendered covering failure and pending
+(uncommitted) exposure state; it fails against the pre-repair wheel.

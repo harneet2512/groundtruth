@@ -4724,9 +4724,9 @@ def _produce_raw_candidates(
             additions += produced
             if event.edit_before_after:
                 edit_bridge_candidates += produced
-    elif "test_result" in event.semantic_events:
+    if "test_result" in event.semantic_events:
         additions += _produce_covering(event, state)
-    elif {"search_result", "failed_search"} & set(event.semantic_events) and _loc_reslot_on():
+    if {"search_result", "failed_search"} & set(event.semantic_events) and _loc_reslot_on():
         # T0->T2 re-slot (2026-07-12, GT_LOC_RESLOT, default OFF -> byte-identical): GT's
         # ranked localization ANSWER, delivered reactively at the D2/post-search boundary
         # (issue-keyed, INDEPENDENT of the search-outcome lattice below — fires even on a
