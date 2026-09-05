@@ -369,8 +369,8 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 				continue
 			}
 			complete := c.ParserComplete
-			receiverChain, _ := json.Marshal(qualifiedCallChain(c.CalleeQualified))
-			importChain, _ := json.Marshal(c.CandidateImportChains[targetID])
+			receiverChain := marshalResolutionStringList(qualifiedCallChain(c.CalleeQualified))
+			importChain := marshalResolutionStringList(c.CandidateImportChains[targetID])
 			receiverType, receiverOrigin := c.ReceiverType, c.ReceiverOrigin
 			if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" && len(vta.FlowTypeNodeIDs) > 0 {
 				flowStableIDs := make([]string, 0, len(vta.FlowTypeNodeIDs))
@@ -399,7 +399,7 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 					flowEdgeFacts = append(flowEdgeFacts, store.ResolutionFlowFact{StableID: stableID, Kind: "edge", CallsiteID: callsiteID, TargetStableID: target.StableID, Payload: "edge=" + edgeID})
 				}
 			}
-			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: receiverType, ReceiverOrigin: receiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: string(receiverChain), ImportChain: string(importChain), FlowSourceStableIDs: flowSourceStableIDs, FlowEdgeStableIDs: flowEdgeStableIDs, FlowSourceFacts: flowSourceFacts, FlowEdgeFacts: flowEdgeFacts, DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
+			candidate := &store.ResolutionCandidate{CallsiteID: callsiteID, TargetID: targetID, TargetStableID: target.StableID, TargetNativeID: target.NativeID, Ordinal: ordinal, Mechanism: publishedMechanism, DeclaredScope: target.QualifiedName, ReceiverType: receiverType, ReceiverOrigin: receiverOrigin, ReceiverShape: c.CalleeQualified, ReceiverChain: receiverChain, ImportChain: importChain, FlowSourceStableIDs: flowSourceStableIDs, FlowEdgeStableIDs: flowEdgeStableIDs, FlowSourceFacts: flowSourceFacts, FlowEdgeFacts: flowEdgeFacts, DynamicDispatch: publishedDispatchState == string(resolver.DispatchDynamic), ExportStatus: target.ExportStatus, ParserComplete: &complete, VerificationStatus: c.VerificationStatus, Selected: selectedNodeID != nil && *selectedNodeID == targetID}
 			candidateRowCount++
 			graphCandidates = append(graphCandidates, candidate)
 		}
@@ -492,6 +492,17 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 		CallsiteCount:  len(callsiteRows),
 		CandidateCount: candidateRowCount,
 	}
+}
+
+func marshalResolutionStringList(values []string) string {
+	if values == nil {
+		values = []string{}
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
 }
 
 // injectAnalysisFault poisons one already-built candidate so that
