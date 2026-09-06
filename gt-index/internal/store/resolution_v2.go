@@ -367,7 +367,7 @@ func mapCoveragePassV2(pass string) string {
 	// and order a candidate set some other pass produced. They pass through
 	// under their own names so the v2 fact says which projection ran, rather
 	// than collapsing to legacy_unknown and losing the distinction.
-	case "direct_binding", "cha", "rta", "vta", "points_to_field_insensitive", "points_to_field_sensitive", "on_the_fly_refinement", "framework_route", "di_binding", "reflection_model", "higher_order_flow", "ffi_contract", "generated_mapping", "overload_narrowing", "mro":
+	case "direct_binding", "cha", "rta", "vta", "points_to_field_insensitive", "points_to_field_sensitive", "on_the_fly_refinement", "framework_route", "di_binding", "reflection_model", "higher_order_flow", "ffi_contract", "generated_mapping", "overload_narrowing", "mro", "lsp_definition":
 		return pass
 	case "lexical_binding":
 		return "direct_binding"

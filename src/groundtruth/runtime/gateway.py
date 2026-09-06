@@ -1345,6 +1345,58 @@ def _grep_result_empty(cmd: str, out: str) -> bool:
     return False
 
 
+def _stored_line_fragments(event: ToolEvent):
+    source = getattr(event, "stored_output", None)
+    iterator = getattr(source, "iter_line_fragments", None)
+    return iterator() if callable(iterator) else None
+
+
+def _grep_result_empty_event(event: ToolEvent) -> bool:
+    fragments = _stored_line_fragments(event)
+    if fragments is None:
+        return _grep_result_empty(event.command, event.output or "")
+    head = (event.command or "").split("\n", 1)[0]
+    if not _grep_is_final_stage(head):
+        return False
+    count_mode = _grep_is_count(_GREP_PIPE_SPLIT_RE.split(head)[-1])
+    any_content = False
+    line_started = False
+    line_only_zero = True
+    pending_space = ""
+    suffix = ""
+    valid_count_lines = True
+
+    for fragment, line_end in fragments:
+        for char in fragment:
+            if char.isspace():
+                if line_started:
+                    pending_space = (pending_space + char)[-2:]
+                continue
+            if pending_space:
+                line_only_zero = False
+                suffix = (suffix + pending_space)[-2:]
+                pending_space = ""
+            any_content = True
+            if not line_started:
+                line_started = True
+                line_only_zero = char == "0"
+            else:
+                line_only_zero = False
+            suffix = (suffix + char)[-2:]
+        if line_end:
+            if line_started and count_mode:
+                valid_count_lines = valid_count_lines and (
+                    line_only_zero or suffix == ":0"
+                )
+            line_started = False
+            line_only_zero = True
+            pending_space = ""
+            suffix = ""
+    if not any_content:
+        return True
+    return count_mode and valid_count_lines
+
+
 def _grep_hit_paths(out: str, root: str) -> set[str]:
     paths: set[str] = set()
     for ln in (out or "").splitlines():
@@ -1358,6 +1410,38 @@ def _grep_hit_paths(out: str, root: str) -> set[str]:
             continue
         if "/" in cand or _HIT_PATH_EXT_RE.search(cand):
             paths.add(_norm_fp(_to_repo_rel(cand, root)))
+    return paths
+
+
+def _grep_hit_paths_event(event: ToolEvent, root: str) -> set[str]:
+    fragments = _stored_line_fragments(event)
+    if fragments is None:
+        return _grep_hit_paths(event.output or "", root)
+    paths: set[str] = set()
+    candidate: list[str] = []
+    saw_colon = False
+
+    def finish_line() -> None:
+        nonlocal candidate, saw_colon
+        cand = "".join(candidate).strip()
+        if cand.startswith("./"):
+            cand = cand[2:]
+        if (
+            " " not in cand
+            and cand
+            and ("/" in cand or _HIT_PATH_EXT_RE.search(cand))
+        ):
+            paths.add(_norm_fp(_to_repo_rel(cand, root)))
+        candidate = []
+        saw_colon = False
+
+    for fragment, line_end in fragments:
+        if not saw_colon:
+            prefix, separator, _ = fragment.partition(":")
+            candidate.append(prefix)
+            saw_colon = bool(separator)
+        if line_end:
+            finish_line()
     return paths
 
 
@@ -2020,7 +2104,7 @@ def classify_outcome(event: ToolEvent, state: GatewayState) -> str:
         return SATISFIED  # edit/test/submit/view enriched by kind-dispatch, not outcome
 
     sym = search_pattern(event.command)
-    empty = _grep_result_empty(event.command, event.output or "")
+    empty = _grep_result_empty_event(event)
     idx = event.action_index
     for tok in _search_probe_tokens(event.command):
         _ledger_record(state, tok, idx, "zero" if empty else "hit")
@@ -2044,7 +2128,7 @@ def classify_outcome(event: ToolEvent, state: GatewayState) -> str:
                 return ZERO_BEHAVIOR
             return ZERO_ABSENT
         # non-empty (hits)
-        hit_paths = _grep_hit_paths(event.output or "", root)
+        hit_paths = _grep_hit_paths_event(event, root)
         info = _resolve_symbol_defs(con, sym, root)
         if hit_paths and all(_is_leaky(p) for p in hit_paths):
             # every hit is test/vendored — is there a real def elsewhere?
@@ -2121,7 +2205,7 @@ def _observe_semantic_events(event: ToolEvent, state: GatewayState) -> frozenset
     if event.kind == KIND_SEARCH and not ({"failed_search", "search_result"} & events):
         events.add(
             "failed_search"
-            if _grep_result_empty(event.command, event.output or "")
+            if _grep_result_empty_event(event)
             else "search_result"
         )
     if event.kind != KIND_SEARCH and EVENT_FAILURE_OBS not in events:
@@ -2829,7 +2913,7 @@ def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[Eviden
     if not info or not info["def_sites"]:
         audit.note("production_definition_absent", category="correct_quiet")
         return audit.finish([])
-    hit_paths = _grep_hit_paths(event.output or "", state.repo_root)
+    hit_paths = _grep_hit_paths_event(event, state.repo_root)
     novel = [(fp, ln) for fp, ln in info["def_sites"] if _norm_fp(fp) not in hit_paths]
     if not novel:
         audit.note(

@@ -113,7 +113,8 @@ func TestParameterProfilesAcrossTheBindingGrammars(t *testing.T) {
 		{"go", "func (s *Server) Handle(req Request, opts ...Option) error", 1, -1},
 		{"go", "func Handle(req Request, timeout time.Duration) error", 2, 2},
 		{"python", "def handle(request, retries=3):", 1, 2},
-		{"python", "def handle(request, *, verbose=False):", 1, 1},
+		{"python", "def handle(request, *, verbose=False):", 1, 2},
+		{"python", "def handle(*args, required):", 1, -1},
 		{"typescript", "function handle(request: Request, retries?: number): void", 1, 2},
 		{"typescript", "handle(request: Request, ...rest: Option[])", 1, -1},
 		{"java", "public void handle(Request request, String... tags)", 1, -1},
@@ -121,7 +122,8 @@ func TestParameterProfilesAcrossTheBindingGrammars(t *testing.T) {
 		{"kotlin", "fun handle(request: Request, vararg tags: String)", 1, -1},
 		{"ruby", "def handle(request, retries = 3, &block)", 1, 2},
 		{"rust", "fn handle(&self, request: Request) -> Result<(), Error>", 2, 2},
-		{"php", "function handle($request, $retries = 3)", 1, 2},
+		{"php", "function handle($request, $retries = 3)", 1, -1},
+		{"elixir", `def handle(value, opts \\ [])`, 1, 2},
 		{"java", "public void handle()", 0, 0},
 	}
 	for _, tc := range cases {
@@ -129,6 +131,31 @@ func TestParameterProfilesAcrossTheBindingGrammars(t *testing.T) {
 		if !got.Known || got.Min != tc.min || got.Max != tc.max {
 			t.Errorf("%s %q: profile %+v, want min=%d max=%d", tc.language, tc.signature, got, tc.min, tc.max)
 		}
+	}
+}
+
+func TestUnprototypedCFunctionDoesNotExcludeCandidatesByArity(t *testing.T) {
+	profile := ParameterProfile("c", "int handle()")
+	if profile.Known {
+		t.Fatalf("old-style empty C parameter list claimed a binding profile: %+v", profile)
+	}
+}
+
+func TestKeywordOnlyCandidateIsNotDroppedFromTotalArgumentCount(t *testing.T) {
+	// CallRef.ArgumentArity counts argument AST nodes, including keyword
+	// arguments. The declaration profile must count keyword-only parameters on
+	// the same basis or a valid candidate is removed from the primary graph.
+	meta := map[int64]NodeMeta{
+		1: {Name: "handle", File: "keyword.py", Signature: "def handle(*, required):"},
+		2: {Name: "handle", File: "positional.py", Signature: "def handle(value):"},
+		3: {Name: "handle", File: "two.py", Signature: "def handle(first, second):"},
+	}
+	got := NarrowByArity("python", arity(1), false, []int64{1, 2, 3}, nil, meta)
+	if got.Status != NarrowingStatusNarrowed {
+		t.Fatalf("narrowing did not exclude the incompatible two-argument candidate: %+v", got)
+	}
+	if !equalInt64s(got.Kept, []int64{1, 2}) {
+		t.Fatalf("keyword-only candidate was lost: kept=%v excluded=%v", got.Kept, got.Excluded)
 	}
 }
 

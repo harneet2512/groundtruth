@@ -30,8 +30,17 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "mod.py"), []byte("def target(value):\n    return value + 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "caller.py"), []byte("from mod import target\n\ndef local_target(value):\n    return value\n\ndef caller(value):\n    local_target(value)\n    return target(value)\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "caller.py"), []byte("from mod import target\n\ndef local_target(value):\n    return value\n\ndef caller(value):\n    local_target(value)\n    return target(value)\n\ndef ambiguous_keyword_call():\n    return handle(required=1)\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	for name, source := range map[string]string{
+		"keyword.py":    "def handle(*, required):\n    return required\n",
+		"positional.py": "def handle(value):\n    return value\n",
+		"two.py":        "def handle(first, second):\n    return first + second\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(repo, "dynamic.js"), []byte("function choose(name) { return handlers[name](); }\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -98,6 +107,41 @@ func TestResolutionContractIsWrittenByTheRealCLI(t *testing.T) {
 	}
 	if orphan != 0 {
 		t.Fatalf("candidate rows with no producer symbol identity: %d", orphan)
+	}
+	var keywordDispatch string
+	var keywordCandidateCount, keywordSelected int
+	if err := db.QueryRow(`SELECT dispatch_state,candidate_count,
+		CASE WHEN selected_target_stable_id IS NULL THEN 0 ELSE 1 END
+		FROM resolution_callsites WHERE callee='handle'`).Scan(
+		&keywordDispatch, &keywordCandidateCount, &keywordSelected,
+	); err != nil {
+		t.Fatalf("keyword-only consumer callsite: %v", err)
+	}
+	if keywordDispatch != "ambiguous" || keywordCandidateCount != 2 || keywordSelected != 0 {
+		t.Fatalf("keyword-only ambiguity was not conserved: dispatch=%s candidates=%d selected=%d", keywordDispatch, keywordCandidateCount, keywordSelected)
+	}
+	rows, err := db.Query(`SELECT target.file_path FROM nodes callsite
+		JOIN edges e ON e.source_id=callsite.id AND e.type='CANDIDATE_TARGET'
+		JOIN nodes target ON target.id=e.target_id
+		WHERE callsite.node_type='callsite' AND callsite.callee_lexeme='handle'
+		ORDER BY target.file_path`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keywordPaths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		keywordPaths = append(keywordPaths, filepath.Base(path))
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(keywordPaths, ",") != "keyword.py,positional.py" {
+		t.Fatalf("keyword-only primary candidates=%v, want keyword.py and positional.py", keywordPaths)
 	}
 	var dynamicCount, dynamicCandidates, dynamicSelected int
 	if err := db.QueryRow(`SELECT count(*),coalesce(sum(candidate_count),0),count(selected_target_stable_id)

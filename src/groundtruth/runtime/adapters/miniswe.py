@@ -39,9 +39,11 @@ episode-invariant by design; the chain head is not).
 from __future__ import annotations
 
 import dataclasses
+import codecs
 import hashlib
 import re
-from collections.abc import Callable, Mapping
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator, Mapping
 
 from groundtruth.runtime.evidence_envelope import (
     ObservationBinding,
@@ -87,6 +89,8 @@ __all__ = [
     "canonicalize_tool_result",
     "canonicalize_tool_event",
     "canonical_test_failure_fingerprint",
+    "StoredOutput",
+    "StoredToolEvent",
     "arbitrate",
     "render_envelope",
     "fits_budget",
@@ -553,6 +557,324 @@ DEF_FACTS_KINDS = frozenset({"def_ref_partition", "name_fold", "wrong_surface"})
 DEFAULT_MAX_DELTA_CHARS = 4000
 
 
+@dataclasses.dataclass(frozen=True)
+class StoredOutput:
+    """Repeatable, byte-identified source for one complete tool observation.
+
+    ``open_bytes`` is runtime-only and must return a fresh ordered stream on
+    every call.  :meth:`iter_bytes` independently validates the serializable
+    identity at exhaustion; consumers must finish iteration before committing
+    any derived fact.
+    """
+
+    sha256: str
+    total_length: int
+    encoding: str
+    open_bytes: Callable[[], Iterable[bytes]] = dataclasses.field(repr=False, compare=False)
+
+    def identity(self) -> dict[str, str | int]:
+        return {
+            "schema": "gt.output_artifact.v1",
+            "sha256": self.sha256,
+            "total_length": self.total_length,
+            "encoding": self.encoding,
+        }
+
+    def iter_bytes(self) -> Iterator[bytes]:
+        digest = hashlib.sha256()
+        length = 0
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        disposition = "utf-8"
+        for chunk in self.open_bytes():
+            if not isinstance(chunk, bytes):
+                raise TypeError("stored output opener must yield bytes")
+            digest.update(chunk)
+            length += len(chunk)
+            if disposition == "utf-8":
+                try:
+                    decoder.decode(chunk)
+                except UnicodeDecodeError:
+                    disposition = "base64"
+            yield chunk
+        if disposition == "utf-8":
+            try:
+                decoder.decode(b"", final=True)
+            except UnicodeDecodeError:
+                disposition = "base64"
+        if digest.hexdigest() != self.sha256:
+            raise ValueError("stored output digest mismatch")
+        if length != self.total_length:
+            raise ValueError("stored output length mismatch")
+        if disposition != self.encoding:
+            raise ValueError("stored output encoding mismatch")
+
+    def iter_text(self) -> Iterator[str]:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        for chunk in self.iter_bytes():
+            text = decoder.decode(chunk, final=False)
+            if text:
+                yield text
+        final = decoder.decode(b"", final=True)
+        if final:
+            yield final
+
+    def iter_line_fragments(self) -> Iterator[tuple[str, bool]]:
+        """Yield bounded text fragments and exact ``str.splitlines`` endings."""
+
+        boundaries = frozenset("\n\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+        pending_cr = False
+        line_open = False
+        for text in self.iter_text():
+            index = 0
+            if pending_cr:
+                if text.startswith("\n"):
+                    index = 1
+                yield "", True
+                pending_cr = False
+                line_open = False
+            start = index
+            while index < len(text):
+                char = text[index]
+                if char == "\r":
+                    fragment = text[start:index]
+                    if index + 1 == len(text):
+                        if fragment:
+                            yield fragment, False
+                            line_open = True
+                        pending_cr = True
+                        break
+                    if text[index + 1] == "\n":
+                        index += 1
+                    yield fragment, True
+                    line_open = False
+                    start = index + 1
+                elif char in boundaries:
+                    yield text[start:index], True
+                    line_open = False
+                    start = index + 1
+                index += 1
+            else:
+                fragment = text[start:]
+                if fragment:
+                    yield fragment, False
+                    line_open = True
+        if pending_cr:
+            yield "", True
+            line_open = False
+        elif line_open:
+            yield "", True
+
+
+@dataclasses.dataclass
+class StoredToolEvent(ToolEvent):
+    """ToolEvent carrying a runtime-only complete-output source."""
+
+    stored_output: StoredOutput | None = dataclasses.field(
+        default=None, repr=False, compare=False
+    )
+
+
+_FAILURE_MARKERS = (
+    "error", "failed", "failure", "exception", "traceback", "assert",
+    "fatal", "not found", "cannot", "no such", "panic",
+)
+
+
+class _FingerprintSink:
+    def __init__(self) -> None:
+        self.digest = hashlib.sha256()
+        self.has_content = False
+        self.pending_space = False
+
+    def copy(self) -> "_FingerprintSink":
+        clone = _FingerprintSink()
+        clone.digest = self.digest.copy()
+        clone.has_content = self.has_content
+        clone.pending_space = self.pending_space
+        return clone
+
+    def feed(self, char: str) -> None:
+        if char.isspace():
+            if self.has_content:
+                self.pending_space = True
+            return
+        if self.pending_space:
+            self.digest.update(b" ")
+            self.pending_space = False
+        self.digest.update(char.encode("utf-8", "replace"))
+        self.has_content = True
+
+
+class _FingerprintNormalizer:
+    """Streaming equivalent of the frozen fingerprint substitutions."""
+
+    def __init__(self) -> None:
+        self.sink = _FingerprintSink()
+        self.ansi = ""
+        self.number = ""
+        self.path = ""
+        self.path_candidate: _FingerprintSink | None = None
+
+    @staticmethod
+    def _word(char: str) -> bool:
+        return char == "_" or char.isalnum()
+
+    @classmethod
+    def _path_char(cls, char: str) -> bool:
+        return cls._word(char) or char in "./\\-"
+
+    def _path_feed(self, char: str) -> None:
+        while True:
+            if not self.path:
+                if self._word(char) or char == ".":
+                    self.path = "prefix"
+                    self.path_candidate = self.sink.copy()
+                    self.path_candidate.feed(char)
+                elif char in "/\\":
+                    self.path = "slash"
+                    self.path_candidate = self.sink.copy()
+                    self.path_candidate.feed(char)
+                else:
+                    self.sink.feed(char)
+                return
+            if self.path == "prefix":
+                if self._word(char) or char == ".":
+                    assert self.path_candidate is not None
+                    self.path_candidate.feed(char)
+                    return
+                if char in "/\\":
+                    self.path = "slash"
+                    assert self.path_candidate is not None
+                    self.path_candidate.feed(char)
+                    return
+            elif self.path == "slash":
+                if self._path_char(char):
+                    self.path = "consume"
+                    self.path_candidate = None
+                    return
+            elif self.path == "consume":
+                if self._path_char(char):
+                    return
+                self.path = ""
+                continue
+            assert self.path_candidate is not None
+            self.sink = self.path_candidate
+            self.path_candidate = None
+            self.path = ""
+
+    def _number_feed(self, char: str) -> None:
+        while True:
+            if not self.number:
+                if char == "0":
+                    self.number = "zero"
+                elif char.isdecimal():
+                    self.number = "digits"
+                else:
+                    self._path_feed(char)
+                return
+            if self.number == "zero":
+                if char == "x":
+                    self.number = "hex_start"
+                    return
+                if char.isdecimal():
+                    self.number = "digits"
+                    return
+                self.number = ""
+                continue
+            if self.number == "digits":
+                if char.isdecimal():
+                    return
+                self.number = ""
+                continue
+            if self.number == "hex_start":
+                if char in "0123456789abcdefABCDEF":
+                    self.number = "hex"
+                    return
+                self._path_feed("x")
+                self.number = ""
+                continue
+            if self.number == "hex":
+                if char in "0123456789abcdefABCDEF":
+                    return
+                self.number = ""
+                continue
+
+    def feed(self, text: str) -> None:
+        for char in text:
+            while True:
+                if not self.ansi:
+                    if char == "\x1b":
+                        self.ansi = char
+                    else:
+                        self._number_feed(char)
+                    break
+                if self.ansi == "\x1b":
+                    if char == "[":
+                        self.ansi += char
+                        break
+                elif char in "0123456789;":
+                    self.ansi += char
+                    break
+                elif ("A" <= char <= "Z") or ("a" <= char <= "z"):
+                    self.ansi = ""
+                    break
+                pending = self.ansi
+                self.ansi = ""
+                for literal in pending:
+                    self._number_feed(literal)
+
+    def finish(self) -> str:
+        for literal in self.ansi:
+            self._number_feed(literal)
+        self.ansi = ""
+        if self.number == "hex_start":
+            self._path_feed("x")
+        self.number = ""
+        if self.path in {"prefix", "slash"}:
+            assert self.path_candidate is not None
+            self.sink = self.path_candidate
+        self.path = ""
+        self.path_candidate = None
+        if not self.sink.has_content:
+            return ""
+        return self.sink.digest.hexdigest()[:16]
+
+
+def _stored_failure_fingerprint(source: StoredOutput) -> str:
+    significant_lines: deque[int] = deque(maxlen=8)
+    line_index = 0
+    significant = False
+    marker_tail = ""
+    marker_overlap = max(map(len, _FAILURE_MARKERS)) - 1
+    for fragment, line_end in source.iter_line_fragments():
+        lowered = fragment.lower()
+        probe = marker_tail + lowered
+        if any(marker in probe for marker in _FAILURE_MARKERS):
+            significant = True
+        marker_tail = probe[-marker_overlap:]
+        if line_end:
+            if significant:
+                significant_lines.append(line_index)
+            line_index += 1
+            significant = False
+            marker_tail = ""
+    if not significant_lines:
+        return ""
+
+    wanted = set(significant_lines)
+    last = significant_lines[-1]
+    normalizer = _FingerprintNormalizer()
+    line_index = 0
+    for fragment, line_end in source.iter_line_fragments():
+        if line_index in wanted:
+            normalizer.feed(fragment)
+        if line_end:
+            if line_index in wanted and line_index != last:
+                normalizer.feed("\n")
+            line_index += 1
+    return normalizer.finish()
+
+
 def canonical_test_failure_fingerprint(event: ToolEvent) -> str:
     """Return a stable host-only identity for one observed failing test result.
 
@@ -563,23 +885,13 @@ def canonical_test_failure_fingerprint(event: ToolEvent) -> str:
     """
     if event.test_outcome not in {"fail", "env_fail"}:
         return ""
-    markers = (
-        "error",
-        "failed",
-        "failure",
-        "exception",
-        "traceback",
-        "assert",
-        "fatal",
-        "not found",
-        "cannot",
-        "no such",
-        "panic",
-    )
+    stored_output = getattr(event, "stored_output", None)
+    if isinstance(stored_output, StoredOutput):
+        return _stored_failure_fingerprint(stored_output)
     significant = tuple(
         line.strip()
         for line in (event.output or "").splitlines()
-        if any(marker in line.lower() for marker in markers)
+        if any(marker in line.lower() for marker in _FAILURE_MARKERS)
     )
     if not significant:
         return ""
@@ -612,6 +924,7 @@ def normalize_event(
     test_outcome: str = "",
     test_protocol: str = "",
     state_revision: str = "",
+    stored_output: StoredOutput | None = None,
 ) -> ToolEvent:
     """Build the gateway :class:`ToolEvent` from the mini's raw per-turn values.
 
@@ -625,14 +938,24 @@ def normalize_event(
         observed = ("file_view",)
     authoritative = semantic_events is not None or bool(exact_viewed)
     if not test_outcome:
-        try:
-            from groundtruth.runtime.patterns import classify_test_observation
+        if stored_output is not None:
+            from groundtruth.runtime.patterns import classify_test_observation_stream
 
-            test_outcome, test_protocol = classify_test_observation(
-                command or "", output or "", returncode
+            chunks = stored_output.iter_bytes()
+            test_outcome, test_protocol = classify_test_observation_stream(
+                command or "", chunks, returncode
             )
-        except Exception:  # noqa: BLE001 -- normalization stays correct-or-quiet
-            test_outcome = test_protocol = ""
+            for _ in chunks:
+                pass
+        else:
+            try:
+                from groundtruth.runtime.patterns import classify_test_observation
+
+                test_outcome, test_protocol = classify_test_observation(
+                    command or "", output or "", returncode
+                )
+            except Exception:  # noqa: BLE001 -- legacy normalization is correct-or-quiet
+                test_outcome = test_protocol = ""
     if not authoritative:
         if test_outcome in {"pass", "fail", "env_fail"}:
             observed = ("test_result",)
@@ -650,7 +973,8 @@ def normalize_event(
             observed = ()
     if not primary_boundary and observed:
         primary_boundary = observed[0]
-    return ToolEvent(
+    event_type = StoredToolEvent if stored_output is not None else ToolEvent
+    return event_type(
         kind=carrier,
         command=command or "",
         output=output or "",
@@ -668,6 +992,7 @@ def normalize_event(
         test_protocol=test_protocol,
         state_revision=state_revision,
         semantics_authoritative=authoritative,
+        **({"stored_output": stored_output} if stored_output is not None else {}),
     )
 
 

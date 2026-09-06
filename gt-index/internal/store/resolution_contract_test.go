@@ -32,6 +32,15 @@ func TestStableCallsiteV2IDGoldenVectorAndClosedDispatch(t *testing.T) {
 	}
 }
 
+func TestLSPDefinitionIsCanonicalDerivationPass(t *testing.T) {
+	if _, ok := derivationPassKindsV2["lsp_definition"]; !ok {
+		t.Fatal("lsp_definition missing from canonical derivation pass vocabulary")
+	}
+	if got := mapCoveragePassV2("lsp_definition"); got != "lsp_definition" {
+		t.Fatalf("LSP definition provenance was downgraded to %q", got)
+	}
+}
+
 func TestV2CandidateOrdinalsStableAcrossOneHundredShuffles(t *testing.T) {
 	callsite := &ResolutionCallsite{CallsiteOrdinal: 7, SourceID: 1, SourceLine: 4, SourceFile: "main.py", Callee: "run", DispatchState: "ambiguous", CandidateCount: 3, Mechanism: "name_match", RepoID: "repo", FileNodeID: 9, CallerSymbolID: "caller", ASTPath: "0/1", ByteStart: 10, ByteEnd: 20, DispatchForm: "virtual", ParseState: "complete"}
 	base := []*ResolutionCandidate{

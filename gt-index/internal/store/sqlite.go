@@ -235,7 +235,7 @@ var derivationPassKindsV2 = map[string]struct{}{
 	"points_to_field_insensitive": {}, "points_to_field_sensitive": {}, "on_the_fly_refinement": {},
 	"import_binding": {}, "scope_binding": {}, "return_shape": {}, "unique_name_fallback": {},
 	"framework_route": {}, "di_binding": {}, "reflection_model": {}, "higher_order_flow": {},
-	"ffi_contract": {}, "generated_mapping": {}, "legacy_unknown": {},
+	"ffi_contract": {}, "generated_mapping": {}, "legacy_unknown": {}, "lsp_definition": {},
 }
 
 func canonicalResolutionID(fields ...string) string {
@@ -1640,14 +1640,14 @@ func (d *DB) queryAttachedCandidates(callee, callsiteID string, policy Candidate
 		COALESCE(ce.derivation_kind,hc.derivation_kind,''),
 		COALESCE(ce.evidence_set,hc.evidence_set,''),
 		COALESCE(ce.sibling_count,hc.sibling_count,0),
-		COALESCE((SELECT u.reason_code FROM nodes u WHERE u.node_type='unresolved_fact' AND u.callsite_id=c.stable_id LIMIT 1),''),
+		CASE WHEN c.candidate_state='selected' THEN '' ELSE COALESCE((SELECT u.reason_code FROM nodes u WHERE u.node_type='unresolved_fact' AND u.callsite_id=c.stable_id LIMIT 1),'') END,
 		'[]', '[]', COALESCE(ce.derivation_fact_ids,'[]'),
 		COALESCE(ce.declared_scope,''), COALESCE(ce.receiver_type,''), COALESCE(ce.receiver_origin,''),
 		COALESCE(ce.receiver_shape,''), COALESCE(ce.receiver_chain,'[]'), COALESCE(ce.import_chain,'[]'),
 		COALESCE(ce.export_status,''), ce.parser_complete
 		FROM nodes c
 		JOIN edges hc ON hc.target_id=c.id AND hc.type='HAS_CALLSITE'
-		LEFT JOIN edges ce ON ce.source_id=c.id AND ce.type='CANDIDATE_TARGET'
+		LEFT JOIN edges ce ON ce.source_id=c.id AND ce.type='CANDIDATE_TARGET' AND ce.viability='viable'
 		 AND ce.analysis_boundary=?
 		WHERE c.label='Callsite' AND ` + selector + `
 		  AND hc.analysis_boundary=?

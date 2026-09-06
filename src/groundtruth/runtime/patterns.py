@@ -15,7 +15,9 @@ TRAJEVAL (arXiv 2603.24631), "Beyond Resolution Rates" (arXiv 2604.02547).
 
 from __future__ import annotations
 
+import codecs
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -149,6 +151,338 @@ def classify_test_observation(
     :func:`classify_validation_observation` and never changes this result.
     """
     return _classify_formal_test(command, output, returncode)
+
+
+class StreamingTestClassifier:
+    """Incrementally apply the canonical formal-test marker precedence.
+
+    The scanner retains a fixed raw overlap and a bounded semantic shadow for
+    regexes whose whitespace or numeric repeats can span arbitrary chunks.
+    Ordered states cover the two patterns with arbitrary non-whitespace spans.
+    Boolean observations are monotonic, so a late failure keeps precedence over
+    an earlier pass without retaining the complete transcript.
+    """
+
+    _SCAN_CHARS = 64 * 1024
+    _OVERLAP_CHARS = 512
+    _FEED_BATCH_CHARS = 8 * 1024
+
+    def __init__(
+        self,
+        command: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+    ) -> None:
+        self.command = command or ""
+        self._decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
+        self._input_kind = ""
+        self._tail = ""
+        self._pending: list[str] = []
+        self._pending_chars = 0
+        self._native_protocol = False
+        self._failed = False
+        self._passed = False
+        self._environment_failed = False
+        self._no_tests = False
+        self._stream_tail = ""
+        self._env_command_open = False
+        self._env_command_tail = ""
+        self._special_tail = ""
+        self._special_tail_exact = ""
+        self._ok_duration_stage = ""
+        self._attribute_stage = ""
+        self._attribute_suffix_index = 0
+        self._shadow_tail = ""
+        self._shadow_total_chars = 0
+        self._run_kind = ""
+        self._run_first = ""
+        self._run_count = 0
+        self._run_has_newline = False
+        self._run_after_newline = False
+        self._total_chars = 0
+
+    @staticmethod
+    def _word(char: str) -> bool:
+        return char == "_" or char.isalnum()
+
+    def _scan_long_specials(self, text: str) -> None:
+        """Scan the two formal patterns with unbounded non-whitespace spans."""
+
+        lowered = text.lower()
+        probe = self._special_tail + lowered
+        exact_probe = self._special_tail_exact + text
+        if (
+            not self._ok_duration_stage
+            and not self._attribute_stage
+            and "\nok" not in "\n" + exact_probe
+            and "attributeerror: module '" not in probe
+        ):
+            self._special_tail = probe[-32:]
+            self._special_tail_exact = exact_probe[-32:]
+            return
+
+        suffix = "' has no attribute"
+        for char in text:
+            lower_tail = (self._special_tail + char.lower())[-32:]
+            exact_tail = (self._special_tail_exact + char)[-32:]
+            new_ok = exact_tail.endswith("\nok") or (
+                self._total_chars == 0 and exact_tail == "ok"
+            )
+            new_attribute = lower_tail.endswith("attributeerror: module '")
+
+            if new_ok:
+                self._ok_duration_stage = "need_whitespace"
+            elif self._ok_duration_stage == "need_whitespace":
+                self._ok_duration_stage = "whitespace" if char.isspace() else ""
+            elif self._ok_duration_stage == "whitespace":
+                if char.isspace():
+                    pass
+                else:
+                    self._ok_duration_stage = "token"
+            elif self._ok_duration_stage == "token":
+                if char.isspace():
+                    self._ok_duration_stage = "after_token"
+            elif self._ok_duration_stage == "after_token":
+                if char.isspace():
+                    pass
+                elif char.isdecimal() or char == ".":
+                    self._ok_duration_stage = "duration"
+                else:
+                    self._ok_duration_stage = ""
+            elif self._ok_duration_stage == "duration":
+                if char.isdecimal() or char == ".":
+                    pass
+                elif char == "s":
+                    self._passed = True
+                    self._ok_duration_stage = ""
+                else:
+                    self._ok_duration_stage = ""
+
+            if new_attribute:
+                self._attribute_stage = "module_first"
+            elif self._attribute_stage == "module_first":
+                self._attribute_stage = "module" if self._word(char) or char == "." else ""
+            elif self._attribute_stage == "module":
+                if self._word(char) or char == ".":
+                    pass
+                elif char == "'":
+                    self._attribute_stage = "suffix"
+                    self._attribute_suffix_index = 1
+                else:
+                    self._attribute_stage = ""
+            elif self._attribute_stage == "suffix":
+                index = self._attribute_suffix_index
+                if index < len(suffix) and char.lower() == suffix[index]:
+                    self._attribute_suffix_index += 1
+                    if self._attribute_suffix_index == len(suffix):
+                        self._environment_failed = True
+                        self._attribute_stage = ""
+                else:
+                    self._attribute_stage = ""
+            self._special_tail = lower_tail
+            self._special_tail_exact = exact_tail
+
+    def _flush_semantic_run(self) -> str:
+        """Return a bounded witness equivalent for the frozen regex set."""
+
+        if not self._run_kind:
+            return ""
+        if self._run_kind == "digit":
+            result = self._run_first if self._run_count == 1 else self._run_first + "0"
+        elif self._run_has_newline:
+            result = "\n\t" if self._run_after_newline else "\n"
+        elif self._run_count == 1 and self._run_first == " ":
+            result = " "
+        else:
+            result = "\t"
+        self._run_kind = ""
+        self._run_first = ""
+        self._run_count = 0
+        self._run_has_newline = False
+        self._run_after_newline = False
+        return result
+
+    def _semantic_shadow(self, text: str, *, eof: bool = False) -> str:
+        """Collapse only regex-unbounded whitespace and decimal runs.
+
+        The witness distinguishes a single literal space from general
+        whitespace, preserves whether a newline has trailing indentation, and
+        distinguishes a single digit from a longer digit run. Those are all
+        distinctions made by the frozen formal-test patterns.
+        """
+
+        output: list[str] = []
+        cursor = 0
+        for match in re.finditer(r"\s+|\d+", text):
+            if match.start() > cursor:
+                output.append(self._flush_semantic_run())
+                output.append(text[cursor:match.start()])
+            value = match.group()
+            kind = "space" if value[0].isspace() else "digit"
+            if self._run_kind and self._run_kind != kind:
+                output.append(self._flush_semantic_run())
+            if not self._run_kind:
+                self._run_kind = kind
+                self._run_first = value[0]
+            self._run_count += len(value)
+            if kind == "space" and "\n" in value:
+                self._run_has_newline = True
+                self._run_after_newline = not value.endswith("\n")
+            elif kind == "space" and self._run_has_newline:
+                self._run_after_newline = True
+            cursor = match.end()
+        if cursor < len(text):
+            output.append(self._flush_semantic_run())
+            output.append(text[cursor:])
+        if eof:
+            output.append(self._flush_semantic_run())
+        return "".join(output)
+
+    def _scan_unbounded(self, text: str) -> None:
+        self._scan_long_specials(text)
+        lowered = text.lower()
+        probe = self._stream_tail + lowered
+        if not self._env_command_open and "error: command " not in probe:
+            self._stream_tail = probe[-32:]
+            shadow = self._semantic_shadow(text)
+            if shadow:
+                self._scan_shadow(shadow)
+            return
+        for char in text:
+            lower_tail = (self._stream_tail + char.lower())[-32:]
+            newly_env = lower_tail.endswith("error: command ")
+            if newly_env:
+                self._env_command_open = True
+                self._env_command_tail = ""
+            elif self._env_command_open:
+                if char == "\n":
+                    self._env_command_open = False
+                    self._env_command_tail = ""
+                else:
+                    self._env_command_tail = (self._env_command_tail + char.lower())[-7:]
+                    if self._env_command_tail.endswith(" failed"):
+                        self._environment_failed = True
+            self._stream_tail = lower_tail
+
+        shadow = self._semantic_shadow(text)
+        if shadow:
+            self._scan_shadow(shadow)
+
+    def _scan_shadow(self, text: str, *, eof: bool = False) -> None:
+        for offset in range(0, len(text), self._SCAN_CHARS):
+            piece = text[offset:offset + self._SCAN_CHARS]
+            window = self._shadow_tail + piece
+            window_start = self._shadow_total_chars - len(self._shadow_tail)
+            self._shadow_total_chars += len(piece)
+            self._observe_matches(window, window_start=window_start, eof=eof)
+            self._shadow_tail = window[-self._OVERLAP_CHARS:]
+
+    def _observe_matches(self, window: str, *, window_start: int, eof: bool) -> None:
+        stable_end = len(window) if eof else max(0, len(window) - 1)
+        for pattern, attribute in (
+            (TEST_PROTOCOL_RE, "_native_protocol"),
+            (TEST_FAIL_RE, "_failed"),
+            (TEST_PASS_RE, "_passed"),
+            (ENV_FAIL_RE, "_environment_failed"),
+            (TEST_NO_TESTS_RE, "_no_tests"),
+        ):
+            if getattr(self, attribute):
+                continue
+            for match in pattern.finditer(window):
+                if match.end() > stable_end:
+                    continue
+                if window_start and match.start() == 0:
+                    continue
+                setattr(self, attribute, True)
+                break
+
+    def _scan(self, text: str) -> None:
+        self._scan_unbounded(text)
+        for offset in range(0, len(text), self._SCAN_CHARS):
+            piece = text[offset:offset + self._SCAN_CHARS]
+            window = self._tail + piece
+            window_start = self._total_chars - len(self._tail)
+            self._total_chars += len(piece)
+            self._observe_matches(window, window_start=window_start, eof=False)
+            self._tail = window[-self._OVERLAP_CHARS:]
+
+    def feed(self, chunk: str | bytes) -> None:
+        """Consume one bounded chunk without retaining prior output."""
+
+        kind = "bytes" if isinstance(chunk, bytes) else "text" if isinstance(chunk, str) else ""
+        if not kind:
+            raise TypeError("test observation chunks must be str or bytes")
+        if self._input_kind and self._input_kind != kind:
+            raise TypeError("test observation chunk types cannot be mixed")
+        self._input_kind = kind
+        text = self._decoder.decode(chunk, final=False) if kind == "bytes" else chunk
+        if text:
+            self._pending.append(text)
+            self._pending_chars += len(text)
+            if self._pending_chars >= self._FEED_BATCH_CHARS:
+                self._scan("".join(self._pending))
+                self._pending.clear()
+                self._pending_chars = 0
+
+    def finish(self, returncode: int | None = None) -> tuple[str, str]:
+        """Return the frozen classifier result after the final chunk."""
+
+        if self._input_kind == "bytes":
+            final = self._decoder.decode(b"", final=True)
+            if final:
+                self._pending.append(final)
+                self._pending_chars += len(final)
+        if self._pending:
+            self._scan("".join(self._pending))
+            self._pending.clear()
+            self._pending_chars = 0
+        final_shadow = self._semantic_shadow("", eof=True)
+        if final_shadow:
+            self._scan_shadow(final_shadow, eof=True)
+        elif self._shadow_tail:
+            self._observe_matches(
+                self._shadow_tail,
+                window_start=self._shadow_total_chars - len(self._shadow_tail),
+                eof=True,
+            )
+        self._observe_matches(
+            self._tail,
+            window_start=self._total_chars - len(self._tail),
+            eof=True,
+        )
+        protocol = (
+            "command" if TEST_RUNNER_RE.search(self.command)
+            else "native" if self._native_protocol
+            else ""
+        )
+        if not protocol:
+            return "", ""
+        if self._failed:
+            return "fail", protocol
+        if self._environment_failed and not (returncode == 0 and self._passed):
+            return "env_fail", protocol
+        if self._no_tests:
+            return "executed_no_tests", protocol
+        if self._passed and (returncode is None or returncode == 0):
+            return "pass", protocol
+        return "", protocol
+
+
+def classify_test_observation_stream(
+    command: str,
+    chunks: Iterable[str | bytes],
+    returncode: int | None = None,
+    *,
+    encoding: str = "utf-8",
+    errors: str = "replace",
+) -> tuple[str, str]:
+    """Classify a complete observation supplied as bounded ordered chunks."""
+
+    classifier = StreamingTestClassifier(command, encoding=encoding, errors=errors)
+    for chunk in chunks:
+        classifier.feed(chunk)
+    return classifier.finish(returncode)
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +932,8 @@ __all__ = [
     "TEST_NO_TESTS_RE",
     "TEST_PROTOCOL_RE",
     "classify_test_observation",
+    "StreamingTestClassifier",
+    "classify_test_observation_stream",
     "ENV_FAIL_RE",
     "COMPILE_FAIL_RE",
     "INFRA_NOISE_RE",

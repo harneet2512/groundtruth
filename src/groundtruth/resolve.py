@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -450,7 +451,80 @@ def _get_ambiguous_edges(
         print("Re-index with gt-index v14+ to add confidence scoring.", file=sys.stderr)
         return []
 
-    query = """
+    # A canonical v2 graph can bind an LSP request to the producer's exact
+    # callsite identity.  The legacy CALLS row has no column/ordinal and is not
+    # sufficient to distinguish ``a.f(); b.f()`` on one line.  Join through the
+    # caller's stable symbol and the callsite's own candidate edge, and abstain
+    # when a legacy row maps to more than one callsite.  Older graphs retain the
+    # legacy read-only discovery path for compatibility.
+    node_columns = {row[1] for row in conn.execute("PRAGMA table_info(nodes)")}
+    edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(edges)")}
+    primary_tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    has_primary = {
+        "stable_id",
+        "node_type",
+        "caller_symbol_id",
+        "line_start",
+        "column_start",
+        "byte_start",
+        "byte_end",
+        "callee_lexeme",
+    }.issubset(node_columns) and {
+        "callsite_stable_id",
+        "target_symbol_id",
+        "viability",
+    }.issubset(edge_columns) and "resolution_symbols" in primary_tables
+
+    if has_primary:
+        query = """
+        SELECT e.id, e.source_id, e.target_id, e.resolution_method,
+               e.confidence, e.source_file, e.source_line,
+               src.name as caller_name, src.language,
+               tgt.name as target_name, tgt.file_path as target_file,
+               cs.id AS callsite_node_id, cs.stable_id AS callsite_stable_id,
+               cs.column_start AS callsite_column,
+               (cs.byte_end - cs.byte_start) AS callsite_byte_length,
+               ct.id AS candidate_edge_id
+        FROM edges e
+        JOIN nodes src ON e.source_id = src.id
+        JOIN nodes tgt ON e.target_id = tgt.id
+        JOIN resolution_symbols caller_symbol
+          ON CAST(caller_symbol.native_id AS INTEGER) = e.source_id
+        JOIN nodes cs
+          ON cs.node_type = 'callsite'
+         AND cs.caller_symbol_id = caller_symbol.stable_id
+         AND cs.file_path = e.source_file
+         AND cs.line_start = e.source_line
+         AND cs.callee_lexeme = tgt.name
+        JOIN edges ct
+          ON ct.type = 'CANDIDATE_TARGET'
+         AND ct.source_id = cs.id
+         AND ct.callsite_stable_id = cs.stable_id
+         AND ct.target_id = e.target_id
+         AND ct.viability = 'viable'
+        WHERE e.confidence < ? AND e.type = 'CALLS'
+          AND cs.candidate_state = 'ambiguous'
+          AND (SELECT count(*)
+               FROM nodes cs2
+               JOIN edges ct2
+                 ON ct2.type = 'CANDIDATE_TARGET'
+                AND ct2.source_id = cs2.id
+                AND ct2.callsite_stable_id = cs2.stable_id
+                AND ct2.target_id = e.target_id
+                AND ct2.viability = 'viable'
+               WHERE cs2.node_type = 'callsite'
+                 AND cs2.caller_symbol_id = caller_symbol.stable_id
+                 AND cs2.file_path = e.source_file
+                 AND cs2.line_start = e.source_line
+                 AND cs2.callee_lexeme = tgt.name) = 1
+        """
+    else:
+        query = """
         SELECT e.id, e.source_id, e.target_id, e.resolution_method,
                e.confidence, e.source_file, e.source_line,
                src.name as caller_name, src.language,
@@ -459,7 +533,7 @@ def _get_ambiguous_edges(
         JOIN nodes src ON e.source_id = src.id
         JOIN nodes tgt ON e.target_id = tgt.id
         WHERE e.confidence < ? AND e.type = 'CALLS'
-    """
+        """
     params: list = [min_confidence]
 
     if language:
@@ -548,6 +622,240 @@ def _print_summary(
     print(f"{'=' * 60}")
 
 
+def _canonical_resolution_id(*fields: str) -> str:
+    """Match gt-index's NUL-delimited stable-id construction."""
+    import hashlib
+
+    return hashlib.sha256("\x00".join(fields).encode()).hexdigest()
+
+
+def _lsp_character_for_callsite(
+    line_text: str,
+    target_name: str,
+    call_expression_byte_column: int,
+    call_expression_byte_length: int | None = None,
+) -> tuple[int, bool]:
+    """Locate the callee after a tree-sitter byte column and return LSP UTF-16 units."""
+    encoded = line_text.encode("utf-8")
+    if call_expression_byte_column < 0 or call_expression_byte_column > len(encoded):
+        return -1, False
+    try:
+        prefix = encoded[:call_expression_byte_column].decode("utf-8")
+        end = (
+            call_expression_byte_column + call_expression_byte_length
+            if call_expression_byte_length is not None
+            else len(encoded)
+        )
+        suffix = encoded[call_expression_byte_column:end].decode("utf-8")
+    except UnicodeDecodeError:
+        return -1, False
+    match = re.search(r"\b" + re.escape(target_name) + r"\s*\(", suffix)
+    if not match:
+        return -1, False
+    before_callee = prefix + suffix[: match.start()]
+    return len(before_callee.encode("utf-16-le")) // 2, True
+
+
+def _synchronize_primary_lsp_selection(
+    conn: sqlite3.Connection,
+    *,
+    edge: dict,
+    lsp_target_id: int,
+    target_rel: str,
+    target_line: int,
+    target_column: int,
+    server_identity: str,
+) -> bool:
+    """Project one exact LSP result into the canonical callsite representation.
+
+    Returns false without mutation when the edge is legacy-only or the target is
+    not bound to a canonical stable symbol.  The caller can then preserve the
+    old graph instead of publishing mutually contradictory representations.
+    """
+    callsite_id = edge.get("callsite_stable_id")
+    callsite_node_id = edge.get("callsite_node_id")
+    candidate_edge_id = edge.get("candidate_edge_id")
+    if not callsite_id:
+        return True
+    if callsite_node_id is None or candidate_edge_id is None:
+        return False
+
+    target_symbol = conn.execute(
+        "SELECT stable_id FROM resolution_symbols WHERE native_id = ? LIMIT 1",
+        (str(lsp_target_id),),
+    ).fetchone()
+    if not target_symbol:
+        return False
+    target_stable_id = target_symbol[0]
+
+    candidate_rows = conn.execute(
+        """SELECT id,target_id,target_symbol_id,derivation_fact_ids,
+                  exclusion_fact_ids,analysis_boundary,producer_build_id,
+                  producer_source_fingerprint
+           FROM edges WHERE type='CANDIDATE_TARGET' AND source_id=?
+             AND callsite_stable_id=? ORDER BY ordinal,id""",
+        (callsite_node_id, callsite_id),
+    ).fetchall()
+    if not candidate_rows:
+        return False
+
+    source_binding = {
+        "callsite_stable_id": callsite_id,
+        "analysis_boundary": candidate_rows[0][5],
+        "source_file": edge.get("source_file", ""),
+        "source_line": edge.get("source_line", 0),
+        "source_character": edge.get("lsp_source_character"),
+        "definition_file": target_rel,
+        "definition_line": target_line,
+        "definition_character": target_column,
+        "definition_target_stable_id": target_stable_id,
+        "server": server_identity,
+    }
+    payload = json.dumps(source_binding, sort_keys=True, separators=(",", ":"))
+
+    def append_fact_ids(raw: str | None, fact_id: str) -> str:
+        try:
+            values = json.loads(raw or "[]")
+        except (TypeError, json.JSONDecodeError):
+            values = []
+        if fact_id not in values:
+            values.append(fact_id)
+        return json.dumps(values, separators=(",", ":"))
+
+    def materialize_fact(target_id: str, operation: str) -> str:
+        fact_id = _canonical_resolution_id(
+            callsite_id, target_id, "lsp_definition", operation, payload
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO nodes
+               (label,name,qualified_name,file_path,signature,language,stable_id,
+                node_type,schema_version,source_revision,producer_build_id,
+                callsite_id,target_symbol_id,pass_kind,pass_version,step_ordinal,
+                operation,input_fact_ids,boundary_id)
+               VALUES ('DerivationFact',?,?,?,?,?,?,'derivation_fact',2,?,?,?,?,
+                       'lsp_definition','1',0,?,'[]',?)""",
+            (
+                fact_id,
+                fact_id,
+                edge.get("source_file", ""),
+                payload,
+                edge.get("language", ""),
+                fact_id,
+                candidate_rows[0][5],
+                candidate_rows[0][6],
+                callsite_id,
+                target_id,
+                operation,
+                candidate_rows[0][5],
+            ),
+        )
+        return fact_id
+
+    # Prefer an already-retained candidate for the LSP target. When LSP reveals
+    # a target outside the producer's candidate set, append a new candidate
+    # whose sole derivation is the materialized LSP definition fact.
+    chosen = conn.execute(
+        """SELECT id FROM edges
+           WHERE type='CANDIDATE_TARGET' AND source_id=?
+             AND callsite_stable_id=? AND target_id=? AND viability='viable'
+           ORDER BY id LIMIT 1""",
+        (callsite_node_id, callsite_id, lsp_target_id),
+    ).fetchone()
+    candidate_id = _canonical_resolution_id(callsite_id, target_stable_id)
+    include_fact = materialize_fact(target_stable_id, "include")
+    if chosen:
+        chosen_id = chosen[0]
+        old_ids = conn.execute(
+            "SELECT derivation_fact_ids FROM edges WHERE id=?", (chosen_id,)
+        ).fetchone()[0]
+        conn.execute(
+            """UPDATE edges SET viability='viable',
+                      derivation_fact_ids=?, verification_status='source_supported'
+               WHERE id=?""",
+            (append_fact_ids(old_ids, include_fact), chosen_id),
+        )
+    else:
+        base = candidate_rows[0]
+        ordinal = max(index for index, _row in enumerate(candidate_rows)) + 1
+        conn.execute(
+            """INSERT INTO edges
+               (source_id,target_id,type,source_file,resolution_method,confidence,
+                trust_tier,candidate_count,evidence_type,verification_status,
+                stable_id,schema_version,callsite_stable_id,target_symbol_id,ordinal,
+                viability,derivation_fact_ids,exclusion_fact_ids,derivation_contract,
+                derivation_kind,evidence_set,analysis_boundary,pass_kind,pass_version,
+                pass_status,sibling_count,producer_build_id,producer_source_fingerprint)
+               VALUES (?,?,'CANDIDATE_TARGET',?,'lsp',NULL,'CANDIDATE',1,
+                       'resolver_candidate','source_supported',?,2,?,?,?,'viable',?,
+                       '[]','call_resolution_v2','lsp_definition','closed',?,
+                       'lsp_definition','1','completed',1,?,?)""",
+            (
+                callsite_node_id,
+                lsp_target_id,
+                edge.get("source_file", ""),
+                candidate_id,
+                callsite_id,
+                target_stable_id,
+                ordinal,
+                json.dumps([include_fact], separators=(",", ":")),
+                base[5],
+                base[6],
+                base[7],
+            ),
+        )
+        chosen_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    for candidate in candidate_rows:
+        if candidate[0] == chosen_id:
+            continue
+        exclusion_fact = materialize_fact(candidate[2], "exclude")
+        conn.execute(
+            """UPDATE edges SET viability='excluded', exclusion_fact_ids=?
+               WHERE id=?""",
+            (append_fact_ids(candidate[4], exclusion_fact), candidate[0]),
+        )
+
+    conn.execute(
+        """UPDATE nodes SET candidate_state='selected', selected_target_id=?,
+                  candidate_count_v2=1
+           WHERE id=? AND node_type='callsite' AND stable_id=?""",
+        (target_stable_id, callsite_node_id, callsite_id),
+    )
+    conn.execute(
+        "DELETE FROM edges WHERE type='SELECTED_TARGET' AND source_id=?",
+        (callsite_node_id,),
+    )
+    selection_rule = "lsp_definition"
+    selection_id = _canonical_resolution_id(
+        callsite_id, "SELECTED_TARGET", target_stable_id, selection_rule
+    )
+    conn.execute(
+        """INSERT INTO edges
+           (source_id,target_id,type,source_line,source_file,resolution_method,
+            confidence,trust_tier,candidate_count,evidence_type,verification_status,
+            stable_id,schema_version,callsite_stable_id,target_symbol_id,
+            selection_rule_id,analysis_boundary,producer_build_id,
+            producer_source_fingerprint,metadata)
+           VALUES (?,?,'SELECTED_TARGET',?,?,'lsp',NULL,'CERTIFIED',1,
+                   'call_resolution_v2','source_supported',?,2,?,?,?,?,?,?,?)""",
+        (
+            callsite_node_id,
+            lsp_target_id,
+            edge.get("source_line"),
+            edge.get("source_file"),
+            selection_id,
+            callsite_id,
+            target_stable_id,
+            selection_rule,
+            candidate_rows[0][5],
+            candidate_rows[0][6],
+            candidate_rows[0][7],
+            payload,
+        ),
+    )
+    return True
+
+
 def _apply_lsp_resolution(
     conn: sqlite3.Connection,
     *,
@@ -557,6 +865,9 @@ def _apply_lsp_resolution(
     target_name: str,
     stats: dict[str, int],
     has_trust_tier: bool,
+    definition_count: int = 1,
+    target_column: int = 0,
+    server_identity: str = "unknown",
 ) -> str:
     """Apply one LSP definition outcome to graph.db and bump ``stats``.
 
@@ -590,6 +901,13 @@ def _apply_lsp_resolution(
           must NOT trigger a destructive delete.
     Only when the file IS indexed AND still no window match → genuine FP → delete.
     """
+    if definition_count != 1:
+        stats["skipped"] += 1
+        stats["skipped_multiple_definitions"] = stats.get(
+            "skipped_multiple_definitions", 0
+        ) + 1
+        return "skipped"
+
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """SELECT id FROM nodes
@@ -602,20 +920,50 @@ def _apply_lsp_resolution(
     if row:
         lsp_target_id = row["id"]
         current_target_id = edge["target_id"]
-        _tier_clause = ", trust_tier = 'CERTIFIED'" if has_trust_tier else ""
-        if lsp_target_id == current_target_id:
-            conn.execute(
-                f"UPDATE edges SET confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
-                (edge["id"],),
+        conn.execute("SAVEPOINT lsp_primary_projection")
+        try:
+            primary_synchronized = _synchronize_primary_lsp_selection(
+                conn,
+                edge=edge,
+                lsp_target_id=lsp_target_id,
+                target_rel=target_rel,
+                target_line=target_line,
+                target_column=target_column,
+                server_identity=server_identity,
             )
-            stats["verified"] += 1
-            return "verified"
-        conn.execute(
-            f"UPDATE edges SET target_id = ?, confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
-            (lsp_target_id, edge["id"]),
-        )
-        stats["corrected"] += 1
-        return "corrected"
+        except Exception:
+            conn.execute("ROLLBACK TO lsp_primary_projection")
+            conn.execute("RELEASE lsp_primary_projection")
+            raise
+        if not primary_synchronized:
+            conn.execute("ROLLBACK TO lsp_primary_projection")
+            conn.execute("RELEASE lsp_primary_projection")
+            stats["skipped"] += 1
+            stats["skipped_primary_identity"] = stats.get(
+                "skipped_primary_identity", 0
+            ) + 1
+            return "skipped"
+        _tier_clause = ", trust_tier = 'CERTIFIED'" if has_trust_tier else ""
+        try:
+            if lsp_target_id == current_target_id:
+                conn.execute(
+                    f"UPDATE edges SET confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
+                    (edge["id"],),
+                )
+                conn.execute("RELEASE lsp_primary_projection")
+                stats["verified"] += 1
+                return "verified"
+            conn.execute(
+                f"UPDATE edges SET target_id = ?, confidence = 1.0, resolution_method = 'lsp'{_tier_clause} WHERE id = ?",
+                (lsp_target_id, edge["id"]),
+            )
+            conn.execute("RELEASE lsp_primary_projection")
+            stats["corrected"] += 1
+            return "corrected"
+        except Exception:
+            conn.execute("ROLLBACK TO lsp_primary_projection")
+            conn.execute("RELEASE lsp_primary_projection")
+            raise
 
     _is_external = not target_rel or target_rel.startswith("..") or os.path.isabs(target_rel)
     if _is_external:
@@ -674,7 +1022,11 @@ def _group_edges_by_callsite(edges: list[dict]) -> dict:
     of each group is the representative whose LSP answer all siblings share."""
     groups: dict[tuple, list[dict]] = {}
     for e in edges:
-        key = (e.get("source_file", ""), e.get("source_line", 0) or 0, e.get("target_name", ""))
+        key = e.get("callsite_stable_id") or (
+            e.get("source_file", ""),
+            e.get("source_line", 0) or 0,
+            e.get("target_name", ""),
+        )
         groups.setdefault(key, []).append(e)
     return groups
 
@@ -1165,7 +1517,9 @@ async def _resolve_edges(
 
     for i, (_cs_key, _group_edges) in enumerate(_callsite_groups.items()):
         edge = _group_edges[0]  # representative — all siblings share this call-site's LSP answer
-        source_file, source_line, target_name = _cs_key
+        source_file = edge.get("source_file", "")
+        source_line = edge.get("source_line", 0) or 0
+        target_name = edge.get("target_name", "")
 
         if not source_file or not target_name:
             stats["skipped"] += 1
@@ -1211,7 +1565,17 @@ async def _resolve_edges(
                 stats["skipped"] += 1
                 continue
             line_text = lines[source_line - 1]  # 1-indexed
-            col, _found_call = _find_call_column(line_text, target_name)
+            call_expression_byte_column = edge.get("callsite_column")
+            if call_expression_byte_column is None:
+                col, _found_call = _find_call_column(line_text, target_name)
+            else:
+                col, _found_call = _lsp_character_for_callsite(
+                    line_text,
+                    target_name,
+                    int(call_expression_byte_column),
+                    edge.get("callsite_byte_length"),
+                )
+            edge["lsp_source_character"] = col
             # C-Finding2 (Fable LIPI): count the call-shaped occurrences of target_name on this
             # line. The call-site group key is (source_file, source_line, target_name) — but an edge
             # carries NO column, so when a single line has TWO distinct same-named calls with
@@ -1275,6 +1639,13 @@ async def _resolve_edges(
                 stats["failed_empty"] += 1
                 continue
 
+            if len(locations) != 1:
+                stats["skipped"] += 1
+                stats["skipped_multiple_definitions"] = stats.get(
+                    "skipped_multiple_definitions", 0
+                ) + 1
+                continue
+
             # Got a definition location
             target_uri = locations[0].uri
             target_line = locations[0].range.start.line + 1  # 0-indexed → 1-indexed
@@ -1298,6 +1669,9 @@ async def _resolve_edges(
                 target_name=target_name,
                 stats=stats,
                 has_trust_tier=_has_trust_tier,
+                definition_count=len(locations),
+                target_column=locations[0].range.start.character,
+                server_identity=" ".join(config.command) if config else language,
             )
             # LSP1 sibling collapse: when the call-site resolved to a KNOWN true target
             # (verify/correct), the OTHER name_match candidates for the SAME call are false
@@ -1629,6 +2003,15 @@ async def _resolve_edges(
     return stats
 
 
+def _gt_index_binary() -> str | None:
+    """Resolve the installed producer path, retaining the older env alias."""
+    return (
+        os.environ.get("GT_INDEX_BINARY")
+        or os.environ.get("GT_INDEX_BIN")
+        or shutil.which("gt-index")
+    )
+
+
 def _rebuild_closure(db_path: str) -> bool:
     """Recompute the transitive-closure sidecar after the LSP pass mutated edges.
 
@@ -1641,14 +2024,14 @@ def _rebuild_closure(db_path: str) -> bool:
     reimplement the BFS in Python. Non-fatal: if the binary is not reachable the
     resolve still succeeded — the closure simply stays as stale as it was before
     this refresh existed (no regression vs. the prior behaviour). Binary is found
-    via ``GT_INDEX_BIN`` then ``PATH``.
+    via the installer contract ``GT_INDEX_BINARY``, legacy ``GT_INDEX_BIN``,
+    then ``PATH``.
     """
-    import shutil
     import subprocess
 
     from groundtruth.runtime import proof as _proof
 
-    bin_path = os.environ.get("GT_INDEX_BIN") or shutil.which("gt-index")
+    bin_path = _gt_index_binary()
     if not bin_path or not os.path.exists(bin_path):
         # PROOF MODE (Stage 2): a stale closure is a partial-operation signal — the
         # closure must rebuild over the LSP-corrected edges or the run fails closed.
@@ -1656,7 +2039,7 @@ def _rebuild_closure(db_path: str) -> bool:
         _proof.require(
             False,
             "closure_binary_present",
-            "gt-index binary not found (set GT_INDEX_BIN) — closure NOT rebuilt; "
+            "gt-index binary not found (set GT_INDEX_BINARY) — closure NOT rebuilt; "
             "it remains pre-LSP stale",
         )
         return False

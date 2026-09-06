@@ -37,9 +37,11 @@ const (
 	NarrowingStatusNotApplicable = "not_applicable"
 )
 
-// ArityProfile is the positional-argument shape a definition accepts, derived
-// from its declaration header alone. Max is -1 when a variadic parameter makes
-// the upper bound unbounded.
+// ArityProfile is the supplied-argument shape a definition accepts, derived
+// from its declaration header alone. CallRef.ArgumentArity counts argument AST
+// nodes, including named arguments, so this profile counts positional and
+// keyword-only declaration parameters on the same basis. Max is -1 when a
+// variadic parameter makes the upper bound unbounded.
 type ArityProfile struct {
 	Min   int
 	Max   int
@@ -110,9 +112,9 @@ func LanguageForFile(path string) string {
 	return spec.Name
 }
 
-// ParameterProfile derives the positional arity a declaration accepts. It never
-// guesses: a header without a balanced parameter group returns an unknown
-// profile, which accepts every arity.
+// ParameterProfile derives the total supplied-argument arity a declaration
+// accepts. It never guesses: a header without a balanced parameter group
+// returns an unknown profile, which accepts every arity.
 func ParameterProfile(language, signature string) ArityProfile {
 	params, ok := declarationParameters(language, signature)
 	if !ok {
@@ -155,7 +157,6 @@ func receiverParamName(param string) string {
 
 func profileFromParams(language string, params []string) ArityProfile {
 	profile := ArityProfile{Known: true}
-	keywordOnly := false
 	for _, raw := range params {
 		param := strings.TrimSpace(raw)
 		switch {
@@ -165,16 +166,18 @@ func profileFromParams(language string, params []string) ArityProfile {
 			// Python's positional-only marker consumes no argument.
 			continue
 		case param == "*":
-			// Python's keyword-only marker: nothing after it is positional.
-			keywordOnly = true
+			// Python's keyword-only marker consumes no argument itself. The
+			// parameters after it still consume named argument AST nodes and
+			// therefore remain part of this total-argument profile.
+			continue
 		case isBlockParam(language, param):
 			continue
 		case isVariadicParam(language, param):
 			profile.Max = -1
-			return profile
-		case keywordOnly:
+			// Required keyword-only parameters may follow Python *args. Keep
+			// scanning so they still contribute to the minimum.
 			continue
-		case isOptionalParam(param):
+		case isOptionalParam(language, param):
 			if profile.Max >= 0 {
 				profile.Max++
 			}
@@ -184,6 +187,12 @@ func profileFromParams(language string, params []string) ArityProfile {
 				profile.Max++
 			}
 		}
+	}
+	// Source-defined PHP functions accept extra positional arguments; they are
+	// available through func_get_args even without an explicit variadic
+	// parameter. A declaration supplies a useful minimum, never a binding max.
+	if language == "php" {
+		profile.Max = -1
 	}
 	if profile.Max >= 0 && profile.Max < profile.Min {
 		profile.Max = profile.Min
@@ -212,10 +221,13 @@ func isBlockParam(language, param string) bool {
 	return language == "ruby" && strings.HasPrefix(param, "&")
 }
 
-// isOptionalParam reports a parameter a call may omit: a default value, or a
-// TypeScript or Swift optional marker on the parameter name.
-func isOptionalParam(param string) bool {
+// isOptionalParam reports a parameter a call may omit: a default value
+// (`=` or Elixir's `\\`), or a TypeScript/Swift optional name marker.
+func isOptionalParam(language, param string) bool {
 	if strings.Contains(stripNestedGroups(param), "=") {
+		return true
+	}
+	if language == "elixir" && strings.Contains(param, `\\`) {
 		return true
 	}
 	name := param
@@ -275,6 +287,11 @@ func declarationParameters(language, signature string) ([]string, bool) {
 		return nil, false
 	}
 	if strings.TrimSpace(inner) == "" {
+		// In C (unlike C++), an empty parameter list is the historical
+		// non-prototype form and does not prove zero accepted arguments.
+		if language == "c" {
+			return nil, false
+		}
 		return nil, true
 	}
 	return splitTopLevel(inner), true
