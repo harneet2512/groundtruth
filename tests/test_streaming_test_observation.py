@@ -57,6 +57,11 @@ def test_failure_beyond_transport_preview_keeps_precedence() -> None:
     assert classifier.finish(0) == ("fail", "command")
 
 
+# Deliberately heavy: this feeds megabytes through the classifier to prove the
+# bound holds at scale, so it costs tens of seconds by design. The suite-wide
+# --timeout=60 is sized for ordinary tests; declaring this one's real budget
+# keeps the assertion intact instead of shrinking the input it exists to test.
+@pytest.mark.timeout(300)
 def test_giant_single_line_preserves_late_markers_and_unbounded_env_form() -> None:
     passing = StreamingTestClassifier("pytest")
     environmental = StreamingTestClassifier("pytest")

@@ -171,6 +171,11 @@ def test_binary_stored_fingerprint_preserves_utf8_replacement_semantics() -> Non
     assert canonical_test_failure_fingerprint(event) == expected
 
 
+# Deliberately heavy: this feeds megabytes through the classifier to prove the
+# bound holds at scale, so it costs tens of seconds by design. The suite-wide
+# --timeout=60 is sized for ordinary tests; declaring this one's real budget
+# keeps the assertion intact instead of shrinking the input it exists to test.
+@pytest.mark.timeout(300)
 def test_giant_significant_line_has_bounded_fingerprint_memory() -> None:
     payload = b"AssertionError " + b"x" * 3_000_000 + b" src/pkg/test.py:731\n"
     normalized = b"AssertionError " + b"x" * 3_000_000 + b" :"
