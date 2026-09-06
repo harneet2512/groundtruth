@@ -293,10 +293,20 @@ class LSPPromotionScheduler:
     @staticmethod
     def _finalize_candidate(path: Path) -> str:
         """Checkpoint resolver WAL content into the single publishable DB file."""
-        connection = sqlite3.connect(path)
+        connection = sqlite3.connect(path, timeout=5.0)
         try:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            connection.execute("PRAGMA journal_mode=DELETE").fetchone()
+            connection.execute("PRAGMA busy_timeout=5000")
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is None or int(checkpoint[0]) != 0:
+                raise RuntimeError("lsp_promotion_checkpoint_busy")
+            try:
+                journal_mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                    raise RuntimeError("lsp_promotion_journal_transition_busy") from exc
+                raise
+            if journal_mode is None or str(journal_mode[0]).lower() != "delete":
+                raise RuntimeError("lsp_promotion_journal_transition_incomplete")
             return str(connection.execute("PRAGMA quick_check").fetchone()[0])
         finally:
             connection.close()

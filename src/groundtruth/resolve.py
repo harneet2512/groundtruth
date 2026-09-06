@@ -1208,8 +1208,9 @@ def _write_pyright_shim_config(abs_root: str, config):
     """LSP8 (Fable): write a minimal pyrightconfig.json ONLY when the server is pyright and the
     repo has none, so pyright evaluates modern `str | None` union syntax for go-to-definition.
 
-    Returns a CLEANUP CALLABLE that removes exactly the file GT created; the caller registers it
-    (atexit) so the shim NEVER persists in the agent's working repo. Returns None when nothing was
+    Returns a CLEANUP CALLABLE that removes exactly the file GT created; the resolver's resource
+    owner runs it when the pass exits so the shim NEVER persists in the agent's working repo.
+    Returns None when nothing was
     written (not pyright / a config already exists / [tool.pyright] in pyproject / write failed) —
     in which case there is nothing to clean up. Correct-or-quiet: never raises.
     """
@@ -1259,6 +1260,55 @@ async def _resolve_edges(
     edges: list[dict],
     language: str,
     source_files: list[str] | None = None,
+) -> dict:
+    """Run one resolver pass and deterministically release every SQLite handle."""
+    connections: list[sqlite3.Connection] = []
+    clients = []
+    source_cleanups = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = sqlite3.connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    try:
+        return await _resolve_edges_impl(
+            db_path,
+            root,
+            edges,
+            language,
+            source_files,
+            connection_factory=tracked_connect,
+            client_registry=clients,
+            source_cleanup_registry=source_cleanups,
+        )
+    finally:
+        for connection in reversed(connections):
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+        try:
+            for client in reversed(clients):
+                try:
+                    await client.shutdown()
+                except Exception:
+                    pass
+        finally:
+            for cleanup in reversed(source_cleanups):
+                cleanup()
+
+
+async def _resolve_edges_impl(
+    db_path: str,
+    root: str,
+    edges: list[dict],
+    language: str,
+    source_files: list[str] | None = None,
+    *,
+    connection_factory=sqlite3.connect,
+    client_registry,
+    source_cleanup_registry,
 ) -> dict:
     """Resolve ambiguous edges using LSP textDocument/definition.
 
@@ -1356,19 +1406,16 @@ async def _resolve_edges(
 
     # δ: when the server is pyright and the project has no pyrightconfig, drop a minimal one so
     # pyright doesn't assume python<3.10 and refuse to evaluate `str | None` union annotations.
-    # LSP8 (Fable): this shim is GT's, NOT part of the task — register its removal at process exit
-    # so it never persists in the agent's working repo (was: written and never cleaned →
-    # agent-visible + could leak into a `git add -A` patch). resolve.py is a short-lived CLI, so
-    # atexit fires after the whole LSP pass completes, before the agent touches the repo.
+    # LSP8 (Fable): this shim is GT's, NOT part of the task. Its removal belongs to this pass's
+    # resource owner so a long-lived scheduler cannot retain it or leak it into an agent patch.
     if language == "python":
         _pyright_cleanup = _write_pyright_shim_config(abs_root, config)
         if _pyright_cleanup is not None:
-            import atexit
-
-            atexit.register(_pyright_cleanup)
+            source_cleanup_registry.append(_pyright_cleanup)
 
     print(f"  Starting {config.command[0]} for {language}...")
     client = LSPClient(config.command, root_uri)
+    client_registry.append(client)
 
     try:
         start_result = await client.start()
@@ -1432,6 +1479,15 @@ async def _resolve_edges(
                 pass
             return stats
         await client.send_notification("initialized", {})
+        # Pyright 1.1.408 answers workspace/symbol before its document analyzer
+        # is active. This standard post-initialize event starts that analyzer;
+        # without it definition requests remain pending indefinitely.
+        configuration_result = await client.send_notification(
+            "workspace/didChangeConfiguration",
+            {"settings": config.settings or {}},
+        )
+        if isinstance(configuration_result, LspErr):
+            raise RuntimeError(configuration_result.error.message)
         await client.drain(timeout=2.0)
         await client.wait_for_progress_complete(timeout=120.0)
         # WARM PROBE (Stage 1 LSP-liveness): prove the server actually ANSWERS, not just
@@ -1478,7 +1534,7 @@ async def _resolve_edges(
         stats["failed"] = len(edges)
         return stats
 
-    conn = sqlite3.connect(db_path)
+    conn = connection_factory(db_path)
     conn.row_factory = sqlite3.Row
     # WAL mode allows concurrent readers + one writer without SQLITE_BUSY.
     # busy_timeout retries for 5s before raising OperationalError.
@@ -1495,6 +1551,7 @@ async def _resolve_edges(
 
     # Check if trust_tier column exists (absent in older graph.db versions)
     _has_trust_tier = False
+    _enrich_conn = None
     try:
         conn.execute("SELECT trust_tier FROM edges LIMIT 0")
         _has_trust_tier = True
@@ -1754,7 +1811,7 @@ async def _resolve_edges(
         # enrichment must finish in ~10-12 min or the whole task times out and uploads nothing.
         _enrich_budget_s = float(os.environ.get("GT_LSP_ENRICH_BUDGET_S", "600") or "600")
         _enrich_t0 = time.time()
-        _enrich_conn = sqlite3.connect(db_path)
+        _enrich_conn = connection_factory(db_path)
         _enrich_conn.row_factory = sqlite3.Row
         _enrich_conn.execute("PRAGMA journal_mode=WAL")
         _enrich_conn.execute("PRAGMA busy_timeout=5000")
@@ -1982,7 +2039,6 @@ async def _resolve_edges(
                 continue
 
         _enrich_conn.commit()
-        _enrich_conn.close()
         print(
             f"  LSP type enrichment: {enrich_stats['hover_ok']} hover OK, "
             f"{enrich_stats['hover_fail']} failed, {enrich_stats['hover_skip']} skipped, "
@@ -1991,6 +2047,9 @@ async def _resolve_edges(
         )
     except Exception as _enrich_exc:
         print(f"  LSP type enrichment failed (non-fatal): {_enrich_exc}", file=sys.stderr)
+    finally:
+        if _enrich_conn is not None:
+            _enrich_conn.close()
 
     conn.close()
 
