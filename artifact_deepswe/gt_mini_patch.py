@@ -2948,7 +2948,7 @@ except ImportError:
     _TEST_RUNNER_RE = re.compile(
         r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
         r"|python[\d.]*\s+(?=\S*\.py\b))*(?:"
-        r"python[\d.]*\s+-m\s+(?:pytest|unittest|nose2?|tox)\b"
+        r"python[\d.]*\s+(?:(?-i:-[bBdEIOPqRsSuv]+)\s+)*-m\s+(?:pytest|unittest|nose2?|tox)\b"
         r"|pytest\b|py\.test\b|tox\b|nose2?\b"
         r"|(?:\S*/)?(?:runtests?|run_tests?)\.py\b"
         r"|(?:\S*/)?manage\.py\s+test\b"
