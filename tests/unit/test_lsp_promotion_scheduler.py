@@ -56,9 +56,7 @@ def test_scheduler_enriches_a_copy_and_returns_revision_bound_terminal_receipt(t
     async def resolve(db_path, _root, edges, language):
         assert language == "python" and len(edges) == 1
         with sqlite3.connect(db_path) as connection:
-            connection.execute(
-                "UPDATE edges SET confidence=1.0,resolution_method='lsp' WHERE id=1"
-            )
+            connection.execute("UPDATE edges SET confidence=1.0,resolution_method='lsp' WHERE id=1")
         return {"verified": 1, "corrected": 0, "deleted": 0, "failed": 0}
 
     scheduler = LSPPromotionScheduler(
@@ -97,9 +95,10 @@ def test_scheduler_enriches_a_copy_and_returns_revision_bound_terminal_receipt(t
     assert not Path(f"{candidate}-wal").exists()
     assert not Path(f"{candidate}-shm").exists()
     with sqlite3.connect(candidate) as connection:
-        assert connection.execute(
-            "SELECT resolution_method FROM edges WHERE id=1"
-        ).fetchone()[0] == "lsp"
+        assert (
+            connection.execute("SELECT resolution_method FROM edges WHERE id=1").fetchone()[0]
+            == "lsp"
+        )
 
 
 def test_scheduler_cancellation_never_leaves_a_publishable_candidate(tmp_path):
@@ -171,9 +170,7 @@ def test_scheduler_rejects_a_source_snapshot_changed_after_request(tmp_path):
         scheduler.close()
 
     assert receipt["status"] == "failed"
-    assert receipt["reason"] == (
-        "ValueError:lsp_promotion_repository_snapshot_changed"
-    )
+    assert receipt["reason"] == ("ValueError:lsp_promotion_repository_snapshot_changed")
     assert receipt["publishable"] is False
     assert not candidate.exists()
 
@@ -191,12 +188,17 @@ def test_interrupted_language_pass_receipt_does_not_claim_queued_languages(tmp_p
         raise RuntimeError("language_pass_interrupted")
 
     scheduler = LSPPromotionScheduler(
-        server_detector=lambda: {"python": "pyright-langserver", "typescript": "typescript-language-server"},
+        server_detector=lambda: {
+            "python": "pyright-langserver",
+            "typescript": "typescript-language-server",
+        },
         edge_loader=lambda _path, _language: [{"id": 1}],
         resolver=resolve,
     )
     try:
-        receipt = scheduler.schedule(_request(graph, tmp_path / "candidate.db")).terminal_receipt(timeout=5)
+        receipt = scheduler.schedule(_request(graph, tmp_path / "candidate.db")).terminal_receipt(
+            timeout=5
+        )
     finally:
         scheduler.close()
     assert receipt["status"] == "failed"

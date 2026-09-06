@@ -25,8 +25,7 @@ def _stored(payload: bytes, chunk_size: int = 17) -> StoredOutput:
         total_length=len(payload),
         encoding=encoding,
         open_bytes=lambda: (
-            payload[index:index + chunk_size]
-            for index in range(0, len(payload), chunk_size)
+            payload[index : index + chunk_size] for index in range(0, len(payload), chunk_size)
         ),
     )
 
@@ -68,7 +67,9 @@ def test_normalization_classifies_complete_stored_output_not_preview() -> None:
 
 
 def test_stored_failure_fingerprint_matches_full_output_across_giant_lines() -> None:
-    lines = [f"FAILED case {index} at src/pkg/mod_{index}.py:0x{index + 16:x}" for index in range(12)]
+    lines = [
+        f"FAILED case {index} at src/pkg/mod_{index}.py:0x{index + 16:x}" for index in range(12)
+    ]
     lines.insert(5, "\x1b[31mAssertionError\x1b[0m " + "x" * 1_000 + " C:\\repo\\test.py:731")
     output = "\r\n".join(lines) + "\r\nignored success"
     expected = canonical_test_failure_fingerprint(
@@ -89,9 +90,24 @@ def test_stored_failure_fingerprint_matches_full_output_across_giant_lines() -> 
 def test_stored_fingerprint_matches_frozen_transform_for_random_fragments() -> None:
     generator = random.Random(731)
     atoms = (
-        "error", "FAILED", "failure", "AssertionError", "panic", "safe",
-        "  ", "\t", "\n", "\r\n", "0xdeadbeef", "0Xdeadbeef", "731", "src/pkg/mod.py",
-        "C:\\repo\\test.py", "\x1b[31m", "\x1b[0m", "Ok",
+        "error",
+        "FAILED",
+        "failure",
+        "AssertionError",
+        "panic",
+        "safe",
+        "  ",
+        "\t",
+        "\n",
+        "\r\n",
+        "0xdeadbeef",
+        "0Xdeadbeef",
+        "731",
+        "src/pkg/mod.py",
+        "C:\\repo\\test.py",
+        "\x1b[31m",
+        "\x1b[0m",
+        "Ok",
     )
     for _ in range(500):
         output = "".join(generator.choice(atoms) for _ in range(generator.randrange(1, 60)))
@@ -132,9 +148,7 @@ def test_stored_output_integrity_failure_is_not_normalized_or_fingerprinted(
     with pytest.raises(ValueError, match="stored output digest mismatch"):
         normalize_event("pytest", "[preview]", 1, 1, stored_output=source)
 
-    event = normalize_event(
-        "pytest", "[preview]", 1, 1, test_outcome="fail", stored_output=source
-    )
+    event = normalize_event("pytest", "[preview]", 1, 1, test_outcome="fail", stored_output=source)
     with pytest.raises(ValueError, match="stored output digest mismatch"):
         canonical_test_failure_fingerprint(event)
 
@@ -142,9 +156,7 @@ def test_stored_output_integrity_failure_is_not_normalized_or_fingerprinted(
 def test_binary_stored_fingerprint_preserves_utf8_replacement_semantics() -> None:
     payload = b"AssertionError \xff at src/pkg/test.py:731\n"
     expected = canonical_test_failure_fingerprint(
-        normalize_event(
-            "pytest", payload.decode("utf-8", "replace"), 1, 1, test_outcome="fail"
-        )
+        normalize_event("pytest", payload.decode("utf-8", "replace"), 1, 1, test_outcome="fail")
     )
     event = normalize_event(
         "pytest",

@@ -136,9 +136,7 @@ def test_lsp_correction_updates_exact_primary_callsite_and_consumer() -> None:
 def test_primary_scope_abstains_when_legacy_row_has_no_exact_callsite() -> None:
     conn = _graph()
     # Make the second exact callsite a candidate for the same legacy endpoint.
-    conn.execute(
-        "UPDATE edges SET target_id=2,target_symbol_id='sym-old' WHERE id=102"
-    )
+    conn.execute("UPDATE edges SET target_id=2,target_symbol_id='sym-old' WHERE id=102")
     assert _get_ambiguous_edges(conn, limit=10) == []
 
 

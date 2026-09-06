@@ -23,8 +23,7 @@ def _stored(text: str, chunk_size: int = 7) -> StoredOutput:
         len(payload),
         "utf-8",
         lambda: (
-            payload[index:index + chunk_size]
-            for index in range(0, len(payload), chunk_size)
+            payload[index : index + chunk_size] for index in range(0, len(payload), chunk_size)
         ),
     )
 
@@ -40,9 +39,7 @@ def _stored(text: str, chunk_size: int = 7) -> StoredOutput:
 def test_normalized_stored_output_drives_gateway_search_outcome(
     complete: str, preview: str, expected: str
 ) -> None:
-    event = normalize_event(
-        "rg -c needle .", preview, 0, 4, stored_output=_stored(complete, 1)
-    )
+    event = normalize_event("rg -c needle .", preview, 0, 4, stored_output=_stored(complete, 1))
     state = GatewayState()
 
     classify_outcome(event, state)
@@ -54,8 +51,15 @@ def test_normalized_stored_output_drives_gateway_search_outcome(
 def test_stored_grep_helpers_match_legacy_complete_text() -> None:
     generator = random.Random(812)
     lines = (
-        "", " ", "0", "pkg:0", "pkg:1", "src/app.py:12:value",
-        "./tests/test_app.py:7:hit", "not a path:hit", "README.md:hit",
+        "",
+        " ",
+        "0",
+        "pkg:0",
+        "pkg:1",
+        "src/app.py:12:value",
+        "./tests/test_app.py:7:hit",
+        "not a path:hit",
+        "README.md:hit",
     )
     commands = ("rg needle .", "rg -c needle .", "grep --count needle .")
     for _ in range(500):

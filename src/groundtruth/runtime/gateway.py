@@ -1385,9 +1385,7 @@ def _grep_result_empty_event(event: ToolEvent) -> bool:
             suffix = (suffix + char)[-2:]
         if line_end:
             if line_started and count_mode:
-                valid_count_lines = valid_count_lines and (
-                    line_only_zero or suffix == ":0"
-                )
+                valid_count_lines = valid_count_lines and (line_only_zero or suffix == ":0")
             line_started = False
             line_only_zero = True
             pending_space = ""
@@ -1426,11 +1424,7 @@ def _grep_hit_paths_event(event: ToolEvent, root: str) -> set[str]:
         cand = "".join(candidate).strip()
         if cand.startswith("./"):
             cand = cand[2:]
-        if (
-            " " not in cand
-            and cand
-            and ("/" in cand or _HIT_PATH_EXT_RE.search(cand))
-        ):
+        if " " not in cand and cand and ("/" in cand or _HIT_PATH_EXT_RE.search(cand)):
             paths.add(_norm_fp(_to_repo_rel(cand, root)))
         candidate = []
         saw_colon = False
@@ -2203,11 +2197,7 @@ def _observe_semantic_events(event: ToolEvent, state: GatewayState) -> frozenset
         elif event.kind == KIND_SUBMIT:
             events.add("submit")
     if event.kind == KIND_SEARCH and not ({"failed_search", "search_result"} & events):
-        events.add(
-            "failed_search"
-            if _grep_result_empty_event(event)
-            else "search_result"
-        )
+        events.add("failed_search" if _grep_result_empty_event(event) else "search_result")
     if event.kind != KIND_SEARCH and EVENT_FAILURE_OBS not in events:
         if _has_repo_trace(event, state):
             events.add(EVENT_FAILURE_OBS)

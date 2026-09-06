@@ -226,9 +226,7 @@ class StreamingTestClassifier:
         for char in text:
             lower_tail = (self._special_tail + char.lower())[-32:]
             exact_tail = (self._special_tail_exact + char)[-32:]
-            new_ok = exact_tail.endswith("\nok") or (
-                self._total_chars == 0 and exact_tail == "ok"
-            )
+            new_ok = exact_tail.endswith("\nok") or (self._total_chars == 0 and exact_tail == "ok")
             new_attribute = lower_tail.endswith("attributeerror: module '")
 
             if new_ok:
@@ -317,7 +315,7 @@ class StreamingTestClassifier:
         for match in re.finditer(r"\s+|\d+", text):
             if match.start() > cursor:
                 output.append(self._flush_semantic_run())
-                output.append(text[cursor:match.start()])
+                output.append(text[cursor : match.start()])
             value = match.group()
             kind = "space" if value[0].isspace() else "digit"
             if self._run_kind and self._run_kind != kind:
@@ -371,12 +369,12 @@ class StreamingTestClassifier:
 
     def _scan_shadow(self, text: str, *, eof: bool = False) -> None:
         for offset in range(0, len(text), self._SCAN_CHARS):
-            piece = text[offset:offset + self._SCAN_CHARS]
+            piece = text[offset : offset + self._SCAN_CHARS]
             window = self._shadow_tail + piece
             window_start = self._shadow_total_chars - len(self._shadow_tail)
             self._shadow_total_chars += len(piece)
             self._observe_matches(window, window_start=window_start, eof=eof)
-            self._shadow_tail = window[-self._OVERLAP_CHARS:]
+            self._shadow_tail = window[-self._OVERLAP_CHARS :]
 
     def _observe_matches(self, window: str, *, window_start: int, eof: bool) -> None:
         stable_end = len(window) if eof else max(0, len(window) - 1)
@@ -400,12 +398,12 @@ class StreamingTestClassifier:
     def _scan(self, text: str) -> None:
         self._scan_unbounded(text)
         for offset in range(0, len(text), self._SCAN_CHARS):
-            piece = text[offset:offset + self._SCAN_CHARS]
+            piece = text[offset : offset + self._SCAN_CHARS]
             window = self._tail + piece
             window_start = self._total_chars - len(self._tail)
             self._total_chars += len(piece)
             self._observe_matches(window, window_start=window_start, eof=False)
-            self._tail = window[-self._OVERLAP_CHARS:]
+            self._tail = window[-self._OVERLAP_CHARS :]
 
     def feed(self, chunk: str | bytes) -> None:
         """Consume one bounded chunk without retaining prior output."""
@@ -452,8 +450,10 @@ class StreamingTestClassifier:
             eof=True,
         )
         protocol = (
-            "command" if TEST_RUNNER_RE.search(self.command)
-            else "native" if self._native_protocol
+            "command"
+            if TEST_RUNNER_RE.search(self.command)
+            else "native"
+            if self._native_protocol
             else ""
         )
         if not protocol:

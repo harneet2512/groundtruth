@@ -460,25 +460,26 @@ def _get_ambiguous_edges(
     node_columns = {row[1] for row in conn.execute("PRAGMA table_info(nodes)")}
     edge_columns = {row[1] for row in conn.execute("PRAGMA table_info(edges)")}
     primary_tables = {
-        row[0]
-        for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
-    has_primary = {
-        "stable_id",
-        "node_type",
-        "caller_symbol_id",
-        "line_start",
-        "column_start",
-        "byte_start",
-        "byte_end",
-        "callee_lexeme",
-    }.issubset(node_columns) and {
-        "callsite_stable_id",
-        "target_symbol_id",
-        "viability",
-    }.issubset(edge_columns) and "resolution_symbols" in primary_tables
+    has_primary = (
+        {
+            "stable_id",
+            "node_type",
+            "caller_symbol_id",
+            "line_start",
+            "column_start",
+            "byte_start",
+            "byte_end",
+            "callee_lexeme",
+        }.issubset(node_columns)
+        and {
+            "callsite_stable_id",
+            "target_symbol_id",
+            "viability",
+        }.issubset(edge_columns)
+        and "resolution_symbols" in primary_tables
+    )
 
     if has_primary:
         query = """
@@ -903,9 +904,7 @@ def _apply_lsp_resolution(
     """
     if definition_count != 1:
         stats["skipped"] += 1
-        stats["skipped_multiple_definitions"] = stats.get(
-            "skipped_multiple_definitions", 0
-        ) + 1
+        stats["skipped_multiple_definitions"] = stats.get("skipped_multiple_definitions", 0) + 1
         return "skipped"
 
     conn.row_factory = sqlite3.Row
@@ -939,9 +938,7 @@ def _apply_lsp_resolution(
             conn.execute("ROLLBACK TO lsp_primary_projection")
             conn.execute("RELEASE lsp_primary_projection")
             stats["skipped"] += 1
-            stats["skipped_primary_identity"] = stats.get(
-                "skipped_primary_identity", 0
-            ) + 1
+            stats["skipped_primary_identity"] = stats.get("skipped_primary_identity", 0) + 1
             return "skipped"
         _tier_clause = ", trust_tier = 'CERTIFIED'" if has_trust_tier else ""
         try:
@@ -1698,9 +1695,9 @@ async def _resolve_edges_impl(
 
             if len(locations) != 1:
                 stats["skipped"] += 1
-                stats["skipped_multiple_definitions"] = stats.get(
-                    "skipped_multiple_definitions", 0
-                ) + 1
+                stats["skipped_multiple_definitions"] = (
+                    stats.get("skipped_multiple_definitions", 0) + 1
+                )
                 continue
 
             # Got a definition location

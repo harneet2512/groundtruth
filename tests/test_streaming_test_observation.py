@@ -34,10 +34,7 @@ from groundtruth.runtime.patterns import (
 def test_streaming_classifier_matches_complete_canonical_result(
     command: str, output: str, returncode: int, chunk_size: int
 ) -> None:
-    chunks = (
-        output[index:index + chunk_size]
-        for index in range(0, len(output), chunk_size)
-    )
+    chunks = (output[index : index + chunk_size] for index in range(0, len(output), chunk_size))
     assert classify_test_observation_stream(command, chunks, returncode) == (
         classify_test_observation(command, output, returncode)
     )
@@ -45,11 +42,9 @@ def test_streaming_classifier_matches_complete_canonical_result(
 
 def test_stream_accepts_utf8_bytes_split_inside_codepoint() -> None:
     output = ("progress café\n" * 200 + "17 passed\n").encode()
-    chunks = (output[index:index + 3] for index in range(0, len(output), 3))
+    chunks = (output[index : index + 3] for index in range(0, len(output), 3))
 
-    assert classify_test_observation_stream("pytest", chunks, 0) == (
-        "pass", "command"
-    )
+    assert classify_test_observation_stream("pytest", chunks, 0) == ("pass", "command")
 
 
 def test_failure_beyond_transport_preview_keeps_precedence() -> None:
@@ -84,7 +79,7 @@ def test_unbounded_numeric_and_whitespace_forms_cross_every_internal_buffer() ->
         ("pytest", "1" + "0" * 70_000 + " failed\n", ("fail", "command")),
     ]
     for command, output, expected in cases:
-        chunks = (output[index:index + 257] for index in range(0, len(output), 257))
+        chunks = (output[index : index + 257] for index in range(0, len(output), 257))
         assert classify_test_observation_stream(command, chunks, 1) == expected
         assert expected == classify_test_observation(command, output, 1)
 
@@ -113,7 +108,7 @@ def test_unbounded_numeric_and_whitespace_forms_cross_every_internal_buffer() ->
 def test_all_unbounded_formal_markers_match_complete_classifier(
     command: str, output: str, returncode: int
 ) -> None:
-    chunks = (output[index:index + 509] for index in range(0, len(output), 509))
+    chunks = (output[index : index + 509] for index in range(0, len(output), 509))
     assert classify_test_observation_stream(command, chunks, returncode) == (
         classify_test_observation(command, output, returncode)
     )
@@ -154,39 +149,57 @@ def test_all_unbounded_formal_markers_match_complete_classifier(
         ("Interrupted: " + "1" * 70_000 + " error", 1),
     ],
     ids=[
-        "passed-digits", "passing-digits", "tests-passed", "failed-digits",
-        "failing-digits", "tests-failed", "failures-mixed-space",
-        "errors-newlines", "no-tests-ran", "ran-zero", "zero-passing",
-        "tests-run-zero", "no-tests-found", "tests-zero-total",
-        "tests-zero-passed-total", "unittest-duration-token",
-        "attribute-module", "linker-digits", "interrupted-digits",
+        "passed-digits",
+        "passing-digits",
+        "tests-passed",
+        "failed-digits",
+        "failing-digits",
+        "tests-failed",
+        "failures-mixed-space",
+        "errors-newlines",
+        "no-tests-ran",
+        "ran-zero",
+        "zero-passing",
+        "tests-run-zero",
+        "no-tests-found",
+        "tests-zero-total",
+        "tests-zero-passed-total",
+        "unittest-duration-token",
+        "attribute-module",
+        "linker-digits",
+        "interrupted-digits",
     ],
 )
 def test_every_unbounded_repeat_in_formal_patterns_has_streaming_parity(
     output: str, returncode: int
 ) -> None:
     expected = classify_test_observation("pytest", output, returncode)
-    chunks = (output[index:index + 509] for index in range(0, len(output), 509))
+    chunks = (output[index : index + 509] for index in range(0, len(output), 509))
     assert classify_test_observation_stream("pytest", chunks, returncode) == expected
 
 
 def test_failure_precedence_is_independent_of_long_environment_marker_order() -> None:
     output = "1 failed\nerror: command " + "x" * 70_000 + " failed\n"
-    assert classify_test_observation_stream(
-        "pytest", (output[index:index + 509] for index in range(0, len(output), 509)), 1
-    ) == classify_test_observation("pytest", output, 1) == ("fail", "command")
+    assert (
+        classify_test_observation_stream(
+            "pytest", (output[index : index + 509] for index in range(0, len(output), 509)), 1
+        )
+        == classify_test_observation("pytest", output, 1)
+        == ("fail", "command")
+    )
 
     carriage_return = "error: command " + "x" * 70_000 + "\r failed"
-    assert classify_test_observation_stream(
-        "pytest",
-        (
-            carriage_return[index:index + 509]
-            for index in range(0, len(carriage_return), 509)
-        ),
-        1,
-    ) == classify_test_observation("pytest", carriage_return, 1) == (
-        "env_fail",
-        "command",
+    assert (
+        classify_test_observation_stream(
+            "pytest",
+            (carriage_return[index : index + 509] for index in range(0, len(carriage_return), 509)),
+            1,
+        )
+        == classify_test_observation("pytest", carriage_return, 1)
+        == (
+            "env_fail",
+            "command",
+        )
     )
 
 
@@ -194,7 +207,7 @@ def test_artificial_window_boundary_cannot_create_word_boundary() -> None:
     output = "x" * 70_000 + "FAILED suffix\n"
     assert classify_test_observation("pytest", output, 1) == ("", "command")
     assert classify_test_observation_stream(
-        "pytest", (output[index:index + 8_192] for index in range(0, len(output), 8_192)), 1
+        "pytest", (output[index : index + 8_192] for index in range(0, len(output), 8_192)), 1
     ) == ("", "command")
 
 
@@ -212,13 +225,14 @@ def test_ansi_and_marker_splits_match_frozen_classifier(output: str) -> None:
     expected = classify_test_observation("pytest", output, 1)
     encoded = output.encode()
     for split in range(len(encoded) + 1):
-        assert classify_test_observation_stream(
-            "pytest", (encoded[:split], encoded[split:]), 1
-        ) == expected
+        assert (
+            classify_test_observation_stream("pytest", (encoded[:split], encoded[split:]), 1)
+            == expected
+        )
 
 
 def test_streaming_peak_memory_is_independent_of_complete_output_size() -> None:
-    script = r'''
+    script = r"""
 import ctypes
 import json
 import os
@@ -262,7 +276,7 @@ print(json.dumps({
     "result": result, "tracemalloc_peak": peak,
     "rss_growth": process_peak_bytes() - baseline_rss,
 }))
-'''
+"""
     completed = subprocess.run(
         [sys.executable, "-c", script],
         check=True,

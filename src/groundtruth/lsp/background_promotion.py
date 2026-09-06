@@ -226,9 +226,7 @@ class LSPPromotionScheduler:
 
         connection = sqlite3.connect(db_path)
         try:
-            return _get_ambiguous_edges(
-                connection, min_confidence=0.95, language=language
-            )
+            return _get_ambiguous_edges(connection, min_confidence=0.95, language=language)
         finally:
             connection.close()
 
@@ -261,9 +259,7 @@ class LSPPromotionScheduler:
         candidate.parent.mkdir(parents=True, exist_ok=True)
         if candidate.exists():
             raise FileExistsError("lsp_promotion_candidate_exists")
-        source_connection = sqlite3.connect(
-            f"{source.as_uri()}?mode=ro", uri=True
-        )
+        source_connection = sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)
         target_connection = sqlite3.connect(candidate)
         try:
             source_connection.backup(target_connection)
@@ -377,10 +373,12 @@ class LSPPromotionScheduler:
             receipt["loaded_edge_count"] = len(edges)
             receipt["selection_limit"] = 500
             receipt["candidate_unit_count"] = terminal["candidate_unit_counts"][language]
-            receipt["selected_unit_count"] = len({
-                edge.get("callsite_stable_id") or edge.get("id") for edge in edges
-            })
-            receipt["selection_complete"] = receipt["selected_unit_count"] == receipt["candidate_unit_count"]
+            receipt["selected_unit_count"] = len(
+                {edge.get("callsite_stable_id") or edge.get("id") for edge in edges}
+            )
+            receipt["selection_complete"] = (
+                receipt["selected_unit_count"] == receipt["candidate_unit_count"]
+            )
             if not receipt["selection_complete"]:
                 receipt["selection_limitation"] = "bounded_or_primary_identity_unavailable"
             terminal["language_receipts"][language] = receipt
@@ -435,13 +433,9 @@ class LSPPromotionScheduler:
             asyncio.run(self._run_languages(handle, candidate, attempted, receipt))
             if handle.cancellation_requested:
                 raise asyncio.CancelledError
-            edge_mutations = sum(
-                int(receipt[key]) for key in ("verified", "corrected", "deleted")
-            )
+            edge_mutations = sum(int(receipt[key]) for key in ("verified", "corrected", "deleted"))
             if edge_mutations:
-                receipt["closure_rebuilt"] = bool(
-                    self._closure_rebuilder(str(candidate))
-                )
+                receipt["closure_rebuilt"] = bool(self._closure_rebuilder(str(candidate)))
                 if not receipt["closure_rebuilt"]:
                     raise ValueError("lsp_promotion_closure_rebuild_failed")
             if handle.cancellation_requested:
@@ -465,9 +459,7 @@ class LSPPromotionScheduler:
             return receipt
         except Exception as exc:
             receipt["cleanup_errors"] = _delete_sqlite_candidate(candidate)
-            receipt.update(
-                status="failed", reason=f"{type(exc).__name__}:{str(exc)[:160]}"
-            )
+            receipt.update(status="failed", reason=f"{type(exc).__name__}:{str(exc)[:160]}")
             return receipt
 
     def close(self, *, wait: bool = True) -> None:

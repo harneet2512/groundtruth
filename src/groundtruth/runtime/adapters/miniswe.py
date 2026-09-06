@@ -669,14 +669,21 @@ class StoredOutput:
 class StoredToolEvent(ToolEvent):
     """ToolEvent carrying a runtime-only complete-output source."""
 
-    stored_output: StoredOutput | None = dataclasses.field(
-        default=None, repr=False, compare=False
-    )
+    stored_output: StoredOutput | None = dataclasses.field(default=None, repr=False, compare=False)
 
 
 _FAILURE_MARKERS = (
-    "error", "failed", "failure", "exception", "traceback", "assert",
-    "fatal", "not found", "cannot", "no such", "panic",
+    "error",
+    "failed",
+    "failure",
+    "exception",
+    "traceback",
+    "assert",
+    "fatal",
+    "not found",
+    "cannot",
+    "no such",
+    "panic",
 )
 
 
