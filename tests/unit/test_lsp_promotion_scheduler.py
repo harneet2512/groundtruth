@@ -205,3 +205,31 @@ def test_interrupted_language_pass_receipt_does_not_claim_queued_languages(tmp_p
     assert receipt["all_promotable_languages_attempted"] is False
     assert receipt["language_receipts"]["python"]["status"] == "failed"
     assert not receipt["publishable"]
+
+
+def test_edge_loader_closes_its_read_connection_without_gc(tmp_path, monkeypatch):
+    graph = _graph(tmp_path / "graph.db")
+    real_connect = sqlite3.connect
+    close_calls = []
+    monkeypatch.setattr(
+        "groundtruth.resolve._get_ambiguous_edges",
+        lambda _connection, **_kwargs: [{"id": 1}],
+    )
+
+    class ConnectionProxy:
+        def __init__(self, *args, **kwargs):
+            self.inner = real_connect(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def close(self):
+            close_calls.append(True)
+            self.inner.close()
+
+    monkeypatch.setattr(sqlite3, "connect", ConnectionProxy)
+
+    edges = LSPPromotionScheduler._load_edges(str(graph), "python")
+
+    assert edges == [{"id": 1}]
+    assert close_calls == [True]

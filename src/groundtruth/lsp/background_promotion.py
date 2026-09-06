@@ -224,10 +224,13 @@ class LSPPromotionScheduler:
     def _load_edges(db_path: str, language: str) -> list[dict[str, Any]]:
         from groundtruth.resolve import _get_ambiguous_edges
 
-        with sqlite3.connect(db_path) as connection:
+        connection = sqlite3.connect(db_path)
+        try:
             return _get_ambiguous_edges(
                 connection, min_confidence=0.95, language=language
             )
+        finally:
+            connection.close()
 
     @staticmethod
     async def _resolve_edges(
