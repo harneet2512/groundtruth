@@ -212,10 +212,16 @@ ClosureRebuilder = Callable[[str], bool]
 # while the receipt reported a positive promoted count. The CLI was wired to the
 # caller's budget and the path under measurement was not.
 #
-# The default here is the tier, not a fraction of it. It stays finite so a
-# pathological graph cannot make one pass unbounded, and it is overridable
-# because the right ceiling is a property of the repository and the time budget,
-# not of this file. The receipt records the value actually used, which it
+# The default here is UNBOUNDED. A cap is the wrong instrument: the point of the
+# tier is that it is verified, and a verified tier covering 7.5% of the
+# callsites is not a smaller version of the product, it is a different one. The
+# cost of a large graph belongs to scoping and scheduling - promote only what an
+# edit actually moved, and let the run's own budget stop the pass - not to
+# silently dropping 92.5% of the work and reporting a positive count.
+#
+# SQLite treats a negative LIMIT as no limit, so -1 removes the bound without
+# touching the query. GT_PROMOTION_MAX_EDGES still sets a positive ceiling where
+# an operator wants one. The receipt records the value actually used, which it
 # previously hardcoded to 500 whatever the limit was.
 def promotion_max_edges() -> int:
     raw = os.environ.get("GT_PROMOTION_MAX_EDGES", "").strip()
@@ -229,7 +235,7 @@ def promotion_max_edges() -> int:
     return DEFAULT_PROMOTION_MAX_EDGES
 
 
-DEFAULT_PROMOTION_MAX_EDGES = 50_000
+DEFAULT_PROMOTION_MAX_EDGES = -1  # SQLite: negative LIMIT means no limit
 
 
 class LSPPromotionScheduler:
