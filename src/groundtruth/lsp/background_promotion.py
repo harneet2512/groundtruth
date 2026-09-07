@@ -269,7 +269,9 @@ class LSPPromotionScheduler:
         connection = sqlite3.connect(db_path)
         try:
             return _get_ambiguous_edges(
-                connection, min_confidence=0.95, language=language,
+                connection,
+                min_confidence=0.95,
+                language=language,
                 limit=promotion_max_edges(),
             )
         finally:
@@ -587,7 +589,9 @@ async def _promote_edges_progressive(
         try:
             edge_conn = sqlite3.connect(db_path, timeout=30)
             edges = _get_ambiguous_edges(
-                edge_conn, min_confidence=0.95, language=lang,
+                edge_conn,
+                min_confidence=0.95,
+                language=lang,
                 limit=promotion_max_edges(),
             )
             edge_conn.close()
