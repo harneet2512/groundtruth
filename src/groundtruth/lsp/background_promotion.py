@@ -9,6 +9,7 @@ for compatibility callers.
 from __future__ import annotations
 
 import asyncio
+import os
 import hashlib
 import secrets
 import shutil
@@ -196,6 +197,41 @@ EdgeResolver = Callable[[str, str, list[dict[str, Any]], str], Awaitable[dict[st
 ClosureRebuilder = Callable[[str], bool]
 
 
+# How many ambiguous callsites one promotion pass may select.
+#
+# _get_ambiguous_edges takes limit=500 and its own docstring calls the old
+# hardcoded cap "the broken-machine-gun cap": graphs with thousands of
+# name_match edges could never be more than partially LSP-resolved, so the
+# structural graph stayed 30-50% name_match noise. It says the bound is "now
+# driven by the caller's --max-edges so a full resolve cleans all", and the CLI
+# does exactly that (resolve.py passes limit=args.max_edges).
+#
+# The SCHEDULER never did. Both of its call sites omitted the argument and took
+# the default, and the scheduler is the benchmark path - so on a graph with
+# 6,621 ambiguous callsites the highest-precision edge tier was 7.5% attempted
+# while the receipt reported a positive promoted count. The CLI was wired to the
+# caller's budget and the path under measurement was not.
+#
+# The default here is the tier, not a fraction of it. It stays finite so a
+# pathological graph cannot make one pass unbounded, and it is overridable
+# because the right ceiling is a property of the repository and the time budget,
+# not of this file. The receipt records the value actually used, which it
+# previously hardcoded to 500 whatever the limit was.
+def promotion_max_edges() -> int:
+    raw = os.environ.get("GT_PROMOTION_MAX_EDGES", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return DEFAULT_PROMOTION_MAX_EDGES
+        if parsed > 0:
+            return parsed
+    return DEFAULT_PROMOTION_MAX_EDGES
+
+
+DEFAULT_PROMOTION_MAX_EDGES = 50_000
+
+
 class LSPPromotionScheduler:
     """Produce revision-bound enriched candidates; never publish or mutate input.
 
@@ -226,7 +262,10 @@ class LSPPromotionScheduler:
 
         connection = sqlite3.connect(db_path)
         try:
-            return _get_ambiguous_edges(connection, min_confidence=0.95, language=language)
+            return _get_ambiguous_edges(
+                connection, min_confidence=0.95, language=language,
+                limit=promotion_max_edges(),
+            )
         finally:
             connection.close()
 
@@ -371,7 +410,7 @@ class LSPPromotionScheduler:
                 if isinstance(value, (str, int, float, bool)) or value is None
             }
             receipt["loaded_edge_count"] = len(edges)
-            receipt["selection_limit"] = 500
+            receipt["selection_limit"] = promotion_max_edges()
             receipt["candidate_unit_count"] = terminal["candidate_unit_counts"][language]
             receipt["selected_unit_count"] = len(
                 {edge.get("callsite_stable_id") or edge.get("id") for edge in edges}
@@ -541,7 +580,10 @@ async def _promote_edges_progressive(
 
         try:
             edge_conn = sqlite3.connect(db_path, timeout=30)
-            edges = _get_ambiguous_edges(edge_conn, min_confidence=0.95, language=lang)
+            edges = _get_ambiguous_edges(
+                edge_conn, min_confidence=0.95, language=lang,
+                limit=promotion_max_edges(),
+            )
             edge_conn.close()
             lang_stats = await _resolve_edges(db_path, root_path, edges, lang)
         except Exception:
