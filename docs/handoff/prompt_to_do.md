@@ -358,7 +358,7 @@ git push origin validate_me
 | `src/groundtruth/hooks/post_edit.py` | L3 evidence (5 families) |
 | `src/groundtruth/hooks/post_view.py` | L3b structural coupling |
 | `docs/handoff/OH_INTEGRATION_LEGITIMACY.md` | Full integration architecture |
-| `docs/handoff/final_tccomp.md` | Complete run autopsy with all data |
+| `docs/sessions/final_tccomp.md` | Complete run autopsy with all data |
 | `docs/handoff/PHASE5_FORWARD.md` | Inform→Reinforce→Enforce framework |
 | `docs/handoff/PHASE6_BUILD_PROMPT.md` | Prior handoff (noisy GT verification) |
 
