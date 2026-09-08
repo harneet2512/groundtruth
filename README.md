@@ -1,5 +1,17 @@
 # GroundTruth
 
+> **GroundTruth is evolving into GT Harness.**
+
+GroundTruth began as an MCP server for giving AI coding agents verified structural evidence about the repositories they edit. It is now being improved into a complete agent harness with live sessions, repository awareness, worker coordination, verification, replay, receipts, and a visual Cloud Agent workspace.
+
+The current harness development and product implementation are maintained in:
+
+**[GT Harness](https://github.com/harneet2512/gt-harness)**
+
+GroundTruth remains the foundation for repository indexing, structural evidence, and grounded agent decisions. GT Harness extends that foundation into a complete, observable, interactive agent workflow.
+
+---
+
 ### The missing layer between AI coding agents and the codebases they edit.
 
 AI agents hallucinate because they generate code from partial context. They see a few files, guess the rest, and produce plausible-looking code that silently breaks callers, misuses APIs, and invents imports that don't exist.
