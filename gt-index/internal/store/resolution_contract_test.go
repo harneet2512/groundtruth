@@ -578,7 +578,7 @@ func TestAttachResolutionGraphRejectsUnknownDerivationKindAtomically(t *testing.
 	}
 }
 
-func TestAttachResolutionGraphRejectsKnownDerivationMissingTypedDetails(t *testing.T) {
+func TestAttachResolutionGraphAbstainsKnownDerivationMissingTypedDetails(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "graph.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -591,8 +591,24 @@ func TestAttachResolutionGraphRejectsKnownDerivationMissingTypedDetails(t *testi
 		Callsite:   &ResolutionCallsite{CallsiteID: "missing-details", SourceID: sourceID, SourceFile: "main.py", Callee: "run", DispatchState: "candidate_only", CandidateCount: 1, Mechanism: "type_flow"},
 		Candidates: []*ResolutionCandidate{{TargetID: targetID, TargetStableID: "target", TargetNativeID: "target", Ordinal: 0, Mechanism: "type_flow"}},
 	}
-	if err := db.AttachResolutionGraph(testGraphIdentity("rev"), []AttachedResolution{row}); err == nil {
-		t.Fatal("known derivation missing receiver details was accepted")
+	// A candidate the producer cannot derive is dropped as an abstention, and
+	// the rest of the graph is still published (see GraphSkippedCandidatesKey).
+	if err := db.AttachResolutionGraph(testGraphIdentity("rev"), []AttachedResolution{row}); err != nil {
+		t.Fatalf("known derivation missing receiver details aborted the graph: %v", err)
+	}
+	var candidateEdges int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM edges WHERE target_id=? AND type IN ('CANDIDATE','CANDIDATE_TARGET')`, targetID).Scan(&candidateEdges); err != nil {
+		t.Fatal(err)
+	}
+	if candidateEdges != 0 {
+		t.Fatalf("candidate missing receiver details was published as %d candidate edges", candidateEdges)
+	}
+	skipped, recorded, err := db.GraphSkippedCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recorded || skipped != 1 {
+		t.Fatalf("graph receipt skip counter = (%d, recorded=%t), want (1, true)", skipped, recorded)
 	}
 }
 
