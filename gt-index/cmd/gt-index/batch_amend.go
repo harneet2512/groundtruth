@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-// copyBatchParent accepts only a closed, self-contained graph. It never opens
+// copyBatchParent accepts only a checkpointed, self-contained graph. It never opens
 // the parent with a writable SQLite connection or replaces its published path.
 func copyBatchParent(parent, staged, target string) error {
 	parentAbs, err := filepath.Abs(parent)
@@ -31,8 +31,10 @@ func copyBatchParent(parent, staged, target string) error {
 	if parentAbs == targetAbs {
 		return fmt.Errorf("batch output must differ from parent")
 	}
-	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-		if _, err := os.Stat(parentAbs + suffix); !os.IsNotExist(err) {
+	for _, suffix := range []string{"-wal", "-journal"} {
+		// Read-only SQLite consumers may leave an empty WAL and shared-memory
+		// index. Only a nonempty data sidecar makes copying the main file unsafe.
+		if sidecar, err := os.Stat(parentAbs + suffix); !os.IsNotExist(err) && (err != nil || sidecar.Size() != 0) {
 			return fmt.Errorf("batch parent is not checkpointed: %s", suffix)
 		}
 	}
