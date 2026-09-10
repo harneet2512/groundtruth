@@ -70,10 +70,24 @@ BUILD_TAGS="netgo,osusergo,sqlite_fts5"
 # Hash every checked-in compiler input, including C/C++ headers. Relative paths
 # are part of the digest so renames are identity changes while checkout location
 # is not. The toolchain and build tags are bound separately below.
-# sha256sum emits `hash *path` on Windows/MSYS but `hash  path` on Linux, so the
-# outer digest differed by build host for identical content. Normalize the mode
-# marker to two spaces before the outer hash so the fingerprint is canonical.
-SOURCE_FINGERPRINT="$(cd "$SRC_DIR" && find . -type f \( -name '*.go' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.s' -o -name 'go.mod' -o -name 'go.sum' \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sed 's/^\([0-9a-f]\{64\}\) \*/\1  /' | sha256sum | awk '{print $1}')"
+# The fingerprint reads git OBJECT content, not worktree bytes: a checkout may
+# carry CRLF where the blob is LF (autocrlf), and hashing worktree files makes
+# the stamp depend on the build host's eol policy. `git ls-tree -r` emits
+# `mode type sha\tpath` straight from the commit tree — canonical on every
+# platform. When HEAD is unavailable (tarball build) the fingerprint falls back
+# to the worktree bytes with CR stripped, matching blob content for sources.
+if git -C "$REPO_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+  # The fingerprint names the COMMIT's tree; a dirty worktree would build bytes
+  # the stamp does not describe (the original binding failure's exact shape).
+  if ! git -C "$REPO_DIR" diff --quiet HEAD -- gt-index || \
+     ! git -C "$REPO_DIR" diff --cached --quiet HEAD -- gt-index; then
+    echo "FATAL: gt-index worktree differs from HEAD — build from a clean tree" >&2
+    exit 1
+  fi
+  SOURCE_FINGERPRINT="$(cd "$REPO_DIR" && git ls-tree -r HEAD -- gt-index | sed 's|\tgt-index/|\t|' | LC_ALL=C sort | grep -E '\.(go|c|cc|cpp|h|hpp|s)$|go\.(mod|sum)[[:space:]]*$' | sha256sum | awk '{print $1}')"
+else
+  SOURCE_FINGERPRINT="$(cd "$SRC_DIR" && find . -type f \( -name '*.go' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.s' -o -name 'go.mod' -o -name 'go.sum' \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sed 's/^\([0-9a-f]\{64\}\) \*/\1  /' | sha256sum | awk '{print $1}')"
+fi
 
 LDFLAGS="-X main.commitSHA=${COMMIT_SHA} -X main.buildTimeUTC=${BUILD_TIME_UTC} -X main.sourceFingerprint=${SOURCE_FINGERPRINT} -X main.compiledBuildTags=${BUILD_TAGS}"
 
