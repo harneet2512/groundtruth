@@ -1549,6 +1549,20 @@ func resolveInternal(
 				if methodsByClass[m.ParentID] == nil {
 					methodsByClass[m.ParentID] = make(map[string]int64)
 				}
+				// A class can hold TWO members with one name (@overload, a
+				// conditional redefinition, a decorator pair). nodeMeta[0] is a
+				// map, so this loop's order is randomized, and last-write-wins
+				// made WHICH definition the index names run-dependent -- every
+				// impl_method resolution then flipped between them. Lowest
+				// (start_line, id) wins instead: a CONTENT rule, stable across
+				// runs and independent of how the parse assigned ids.
+				if prev, seen := methodsByClass[m.ParentID][m.Name]; seen {
+					pm := nodeMeta[0][prev]
+					if m.StartLine > pm.StartLine ||
+						(m.StartLine == pm.StartLine && id > prev) {
+						continue
+					}
+				}
 				methodsByClass[m.ParentID][m.Name] = id
 			}
 		}
