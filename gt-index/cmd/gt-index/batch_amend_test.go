@@ -14,6 +14,15 @@ import (
 	"testing"
 )
 
+func TestBuildDeclaresBoundedBatchParserReuse(t *testing.T) {
+	for _, capability := range declaredBuildIdentity().Capabilities {
+		if capability == "batch_parser_node_reuse_v1" {
+			return
+		}
+	}
+	t.Fatal("installed caller cannot select the proven batch parser-node reuse API")
+}
+
 func TestBatchAmendRetainsUnchangedStructureAndParent(t *testing.T) {
 	bin := buildDerivedIndexer(t)
 	root := t.TempDir()
@@ -77,7 +86,7 @@ func TestBatchAmendRetainsUnchangedStructureAndParent(t *testing.T) {
 
 func TestBatchAmendMatchesFreshCoreAndResolution(t *testing.T) {
 	bin := buildDerivedIndexer(t)
-	for _, change := range []string{"unchanged", "edit", "add", "delete", "rename", "import"} {
+	for _, change := range []string{"unchanged", "edit", "add", "delete", "rename", "import", "inheritance", "ambiguity", "new_target"} {
 		t.Run(change, func(t *testing.T) {
 			root := t.TempDir()
 			repo := filepath.Join(root, "repo")
@@ -117,6 +126,15 @@ func TestBatchAmendMatchesFreshCoreAndResolution(t *testing.T) {
 			case "import":
 				write("new.py", "def entry(value):\n    return value * 2\n")
 				write("caller.py", "from new import entry\ndef run(value):\n    return entry(value)\n")
+			case "inheritance":
+				write("mod.py", "class Base:\n    def leaf(self, value):\n        return value + 1\n")
+				write("caller.py", "from mod import Base\nclass Child(Base):\n    def run(self, value):\n        return self.leaf(value)\n")
+			case "ambiguity":
+				write("new.py", "def leaf(value):\n    return value * 3\n")
+				write("caller.py", "def run(value):\n    return leaf(value)\n")
+			case "new_target":
+				write("new.py", "def newly_added(value):\n    return value * 2\n")
+				write("caller.py", "from new import newly_added\ndef run(value):\n    return newly_added(value)\n")
 			}
 			amended, fresh := build("amended", parent), build("fresh", "")
 			queries := map[string]string{
