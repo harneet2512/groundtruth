@@ -380,6 +380,14 @@ func main() {
 	// Parse files in parallel
 	results := make([]*parser.ParseResult, len(files))
 	resultCh := make(chan fileParseResult, len(files))
+	cache := parser.ParseCache{Root: os.Getenv("GT_PARSE_CACHE_ROOT"), ProducerFingerprint: sourceFingerprint}
+	if cache.ProducerFingerprint == "" || cache.ProducerFingerprint == "unknown" {
+		if identity, err := currentBuildIdentity(); err == nil {
+			cache.ProducerFingerprint = identity.ExecutableSHA256
+		}
+	}
+	var cacheMu sync.Mutex
+	cacheHits := 0
 
 	var wg sync.WaitGroup
 	fileCh := make(chan int, len(files))
@@ -394,7 +402,12 @@ func main() {
 				// Mark test AND non-source (benchmark/example/fixture/docs/vendored)
 				// nodes is_test so their call edges stay OUT of the fact surface.
 				isTest := walker.IsTestFile(sf.Path) || walker.IsNonSourceFile(sf.Path)
-				result, err := parser.ParseFile(sf, isTest)
+				result, hit, err := cache.ParseFile(sf, isTest)
+				if hit {
+					cacheMu.Lock()
+					cacheHits++
+					cacheMu.Unlock()
+				}
 				resultCh <- fileParseResult{fileIdx: idx, result: result, err: err}
 			}
 		}()
@@ -414,6 +427,7 @@ func main() {
 
 	// Collect results and preserve parser failures in project_meta.
 	results, parseFailures, failSample := collectParseResults(files, resultCh)
+	fmt.Fprintf(os.Stderr, "  Parse cache: %d hits, %d misses\n", cacheHits, len(files)-cacheHits)
 
 	parseElapsed := time.Since(parseStart)
 	parsedOK := len(files) - parseFailures
