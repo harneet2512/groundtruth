@@ -31,7 +31,7 @@ from enum import Enum
 _PYTHON_EXECUTABLE = (
     r'''(?:"(?:[^"\r\n;&|]*[/\\])?python[\d.]*(?:\.exe)?"'''
     r"|'(?:[^'\r\n;&|]*[/\\])?python[\d.]*(?:\.exe)?'"
-    r'''|(?:[^\s"';&|]+[/\\])?python[\d.]*(?:\.exe)?)'''
+    r"""|(?:[^\s"';&|]+[/\\])?python[\d.]*(?:\.exe)?)"""
 )
 TEST_RUNNER_RE = re.compile(
     r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
