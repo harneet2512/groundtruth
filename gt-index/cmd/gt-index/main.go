@@ -235,6 +235,7 @@ func vtaCallsiteMechanism(vtaCandidates, publishedCandidates []int64) string {
 func main() {
 	root := flag.String("root", ".", "Project root directory")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
+	amendParent := flag.String("amend-parent", "", "Build a batch amendment from a closed parent graph into a distinct output")
 	maxFiles := flag.Int("max-files", 10000, "Maximum files to index")
 	workers := flag.Int("workers", 0, "Parallel parse workers (0 = NumCPU)")
 	file := flag.String("file", "", "Incremental mode: re-index only this single file (relative to -root) into an existing -output graph.db")
@@ -244,6 +245,9 @@ func main() {
 	frameworkValidation := flag.Bool("framework-validation", false, "Print the HAR-70 framework overlay validation report and exit")
 	inspectJSONL := flag.Bool("inspect-jsonl", false, "Parse caller-supplied source bytes as pure JSONL without graph mutation")
 	flag.Parse()
+	if *amendParent != "" && (*file != "" || *rebuildClosure) {
+		log.Fatal("amend-parent cannot be combined with file or rebuild-closure")
+	}
 	if *inspectJSONL {
 		if err := runInspectionJSONL(os.Stdin, os.Stdout); err != nil {
 			log.Fatalf("inspect-jsonl: %v", err)
@@ -341,6 +345,11 @@ func main() {
 		}
 	}()
 	*output = stagedOutput
+	if *amendParent != "" {
+		if err := copyBatchParent(*amendParent, stagedOutput, requestedOutput); err != nil {
+			abortStagedBuild(nil, stagedOutput, "batch parent: %v", err)
+		}
+	}
 
 	// Open database
 	db, err := store.Open(stagedOutput)
@@ -519,9 +528,16 @@ func main() {
 
 	// Batch insert all nodes in one transaction
 	insertStart := time.Now()
-	nodeDBIDs, err := db.BatchInsertNodes(allNodePtrs)
+	batchIdentity, err := currentBuildIdentity()
+	if err != nil {
+		abortStagedBuild(db, stagedOutput, "batch producer identity: %v", err)
+	}
+	nodeDBIDs, retainedNodes, err := db.ReplaceParsedStructure(allNodePtrs, *amendParent != "", batchIdentity.ExecutableSHA256)
 	if err != nil {
 		abortStagedBuild(db, stagedOutput, "batch insert nodes: %v", err)
+	}
+	if *amendParent != "" {
+		fmt.Fprintf(os.Stderr, "  Batch structure: %d retained, %d inserted; one full resolver pass\n", retainedNodes, len(nodeDBIDs)-retainedNodes)
 	}
 
 	// Fix up parent IDs: map global index → DB ID
