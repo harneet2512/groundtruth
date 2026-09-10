@@ -47,17 +47,43 @@ type index map[string][]int64
 
 func buildIndex(nodes []*store.Node, ids []int64, labels map[string]bool) index {
 	out := index{}
+	byID := make(map[int64]*store.Node, len(ids))
 	for i, n := range nodes {
 		if n == nil || i >= len(ids) || ids[i] <= 0 {
 			continue
 		}
+		byID[ids[i]] = n
 		if !labels[n.Label] || n.Name == "" {
 			continue
 		}
 		out[n.Name] = append(out[n.Name], ids[i])
 	}
 	for name := range out {
-		sort.Slice(out[name], func(a, b int) bool { return out[name][a] < out[name][b] })
+		ids := out[name]
+		// CONTENT order (file_path, start_line, id), not ascending id. emit
+		// truncates a name's candidate set at MaxTaxonomyCandidates, so an
+		// id-ordered list retains a different SUBSET once a batch amend re-enters
+		// the edited file's nodes at the top of the AUTOINCREMENT id space —
+		// the taxonomy edge set then differs between an amend and a rebuild even
+		// though every name still binds to the same declarations. Content order
+		// retains the same subset either way.
+		sort.Slice(ids, func(a, b int) bool {
+			na, nb := byID[ids[a]], byID[ids[b]]
+			fa, fb, la, lb := "", "", 0, 0
+			if na != nil {
+				fa, la = na.FilePath, na.StartLine
+			}
+			if nb != nil {
+				fb, lb = nb.FilePath, nb.StartLine
+			}
+			if fa != fb {
+				return fa < fb
+			}
+			if la != lb {
+				return la < lb
+			}
+			return ids[a] < ids[b]
+		})
 	}
 	return out
 }

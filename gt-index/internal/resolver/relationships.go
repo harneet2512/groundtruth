@@ -491,7 +491,11 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 type classNodeEntry struct {
 	Name     string
 	FilePath string
-	ID       int64
+	// Line is the declaration's start_line — part of the CONTENT key
+	// (file_path, start_line, id) that disambiguates same-named classes without
+	// riding the AUTOINCREMENT id space a batch amend renumbers.
+	Line int
+	ID   int64
 }
 
 // funcRange carries a function/method node's source line span so an enclosing-scope
@@ -874,18 +878,21 @@ func buildRelationshipIndexes(db *store.DB) (
 	}
 	defer tx.Rollback()
 
-	// Class/Struct nodes
-	rows, err := tx.Query(`SELECT id, name, file_path, label FROM nodes WHERE label IN ('Class', 'Struct', 'Interface', 'Enum', 'Type')`)
+	// Class/Struct nodes — start_line rides along so same-name picks can be made
+	// on the CONTENT key (file_path, start_line, id), not the AUTOINCREMENT id
+	// space a batch amend renumbers.
+	rows, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line, 0), label FROM nodes WHERE label IN ('Class', 'Struct', 'Interface', 'Enum', 'Type')`)
 	if err != nil {
 		return
 	}
 	for rows.Next() {
 		var id int64
 		var name, filePath, label string
-		if err := rows.Scan(&id, &name, &filePath, &label); err != nil {
+		var line int
+		if err := rows.Scan(&id, &name, &filePath, &line, &label); err != nil {
 			continue
 		}
-		entry := classNodeEntry{Name: name, FilePath: filePath, ID: id}
+		entry := classNodeEntry{Name: name, FilePath: filePath, Line: line, ID: id}
 		if label == "Interface" {
 			interfaceIndex[name] = append(interfaceIndex[name], entry)
 		} else {
@@ -924,20 +931,65 @@ func buildRelationshipIndexes(db *store.DB) (
 // Resolution helpers
 // ---------------------------------------------------------------------------
 
+// classEntryLess orders same-named class/interface candidates by the CONTENT key
+// (file_path, start_line, id). The index scan has no ORDER BY and the ids it
+// reads are AUTOINCREMENT artifacts — a batch amend re-inserts the edited file's
+// nodes at the TOP of the id space — so a scan-order or raw-id pick names a
+// different declaration under an amend than under a full rebuild. Content order
+// is insertion-order-invariant; the raw id is only a within-(file,line) tiebreak.
+func classEntryLess(a, b classNodeEntry) bool {
+	if a.FilePath != b.FilePath {
+		return a.FilePath < b.FilePath
+	}
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	return a.ID < b.ID
+}
+
+// minClassEntry returns the content-smallest entry (see classEntryLess).
+func minClassEntry(entries []classNodeEntry) classNodeEntry {
+	best := entries[0]
+	for _, e := range entries[1:] {
+		if classEntryLess(e, best) {
+			best = e
+		}
+	}
+	return best
+}
+
+// sameFileMinEntry returns the content-smallest same-file entry — the earliest
+// declaration by (start_line, id) — so the pick is stable across both the
+// unordered index scan and the id renumbering a batch amend produces.
+func sameFileMinEntry(entries []classNodeEntry, file string) (classNodeEntry, bool) {
+	var best classNodeEntry
+	found := false
+	for _, e := range entries {
+		if e.FilePath != file {
+			continue
+		}
+		if !found || e.Line < best.Line || (e.Line == best.Line && e.ID < best.ID) {
+			best, found = e, true
+		}
+	}
+	return best, found
+}
+
 // resolveClassNode finds a Class/Struct node by name, preferring same-file.
 func resolveClassNode(name, currentFile string, classIndex map[string][]classNodeEntry) int64 {
 	entries := classIndex[name]
 	if len(entries) == 0 {
 		return 0
 	}
-	// Prefer same-file match
-	for _, e := range entries {
-		if e.FilePath == currentFile {
-			return e.ID
-		}
+	// Prefer a same-file match — the content-smallest (start_line, id) one.
+	if e, ok := sameFileMinEntry(entries, currentFile); ok {
+		return e.ID
 	}
-	// Fall back to first match
-	return entries[0].ID
+	// Cross-file fallback: the content-smallest (file_path, start_line, id)
+	// match, not entries[0] — a scan-order pick rides the unordered index scan
+	// AND the id space a batch amend renumbers, flipping the chosen class
+	// between an amend and a full rebuild.
+	return minClassEntry(entries).ID
 }
 
 // resolveClassNodeSameFileOrUnique resolves a class/struct name SAME-FILE-FIRST, and
@@ -951,10 +1003,8 @@ func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[s
 	if len(entries) == 0 {
 		return 0
 	}
-	for _, e := range entries {
-		if e.FilePath == currentFile {
-			return e.ID // same-file is unambiguous by construction
-		}
+	if e, ok := sameFileMinEntry(entries, currentFile); ok {
+		return e.ID // same-file is unambiguous by construction
 	}
 	if len(entries) == 1 {
 		return entries[0].ID // cross-file but globally unique — safe
@@ -968,12 +1018,12 @@ func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]
 	if len(entries) == 0 {
 		return 0
 	}
-	for _, e := range entries {
-		if e.FilePath == currentFile {
-			return e.ID
-		}
+	if e, ok := sameFileMinEntry(entries, currentFile); ok {
+		return e.ID
 	}
-	return entries[0].ID
+	// Cross-file fallback: content-smallest (file_path, start_line, id), not
+	// entries[0] — same batch-amend id renumbering hazard as resolveClassNode.
+	return minClassEntry(entries).ID
 }
 
 // resolveInterfaceOrClassNode tries interface first, then class.

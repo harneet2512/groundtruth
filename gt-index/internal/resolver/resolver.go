@@ -960,6 +960,30 @@ func pickBestNameMatchTarget(candidates []int64, callerID int64, callerFile stri
 	return best
 }
 
+// sortIDsByContent orders node IDs by (file_path, start_line, id) — the same
+// CONTENT key pickBestNameMatchTarget sorts by. The nameIndex slices a caller
+// passes here are built in insertion order, which is NOT invariant across
+// build modes: a batch amend / -file reindex re-inserts the edited file's
+// nodes at the TOP of the AUTOINCREMENT id space (appended last), so a
+// first-found-in-slice or smallest-id pick lands on a different logical node
+// than a full rebuild's. Sorting by content makes the pick identical either
+// way; the raw id remains only as a within-(file,line) tie-break.
+func sortIDsByContent(ids []int64, meta map[int64]NodeMeta) {
+	if len(ids) < 2 || meta == nil {
+		return
+	}
+	sort.Slice(ids, func(a, b int) bool {
+		ma, mb := meta[ids[a]], meta[ids[b]]
+		if ma.File != mb.File {
+			return ma.File < mb.File
+		}
+		if ma.StartLine != mb.StartLine {
+			return ma.StartLine < mb.StartLine
+		}
+		return ids[a] < ids[b]
+	})
+}
+
 // NodeMeta carries class/interface membership data for self.method resolution.
 type NodeMeta struct {
 	Label      string
@@ -2239,6 +2263,14 @@ func resolveInternal(
 							className194a := stripTypeWrapper(declaredType)
 							if className194a != "" {
 								if classIDs, ok := nodeIDs[className194a]; ok {
+									// Same-named classes across files: the slice is
+									// insertion order, which a batch amend / -file
+									// reindex turns into id-space order (the edited
+									// file's nodes land at the top of AUTOINCREMENT).
+									// First-found must not ride that — sort by the
+									// CONTENT key (file, start_line, id) so the pick
+									// is identical under an amend and a rebuild.
+									sortIDsByContent(classIDs, nodeMeta[0])
 									for _, classID := range classIDs {
 										cm, hasMeta := nodeMeta[0][classID]
 										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
@@ -2329,15 +2361,23 @@ func resolveInternal(
 						} else if numClasses == 2 {
 							conf194 = 0.5
 						}
-						// Pick the best target: prefer same-file class, then the smallest
-						// class node ID. #B8a: the previous `range classes194` map
-						// iteration made the cross-file pick RUN-DEPENDENT (Go map order
-						// is randomized) — sort the class IDs so the pick is deterministic.
+						// Pick the best target: prefer a same-file class, else the
+						// content-smallest class. #B8a: the previous `range classes194`
+						// map iteration made the cross-file pick RUN-DEPENDENT (Go map
+						// order is randomized) — sort the class IDs deterministically.
 						classIDs194 := make([]int64, 0, len(classes194))
 						for classID := range classes194 {
 							classIDs194 = append(classIDs194, classID)
 						}
-						sort.Slice(classIDs194, func(a, b int) bool { return classIDs194[a] < classIDs194[b] })
+						// Raw-id sort made the pick deterministic within one build,
+						// but the id space is not content-addressed: a batch amend
+						// retains unchanged files' ids and re-inserts the edited
+						// file's nodes at the TOP of AUTOINCREMENT, so "smallest id"
+						// names a different class under an amend than under a full
+						// rebuild (the measured ±726/713 gross CALLS relabel). Order
+						// by the class node's CONTENT key (file, start_line, id) —
+						// identical either way.
+						sortIDsByContent(classIDs194, nodeMeta[0])
 						// Keep a deterministic preferred endpoint only for the backward-
 						// compatible legacy CALLS projection. The attached callsite trace
 						// below derives ambiguity from the complete candidate set and will
@@ -2410,6 +2450,13 @@ func resolveInternal(
 				methodName := call.CalleeQualified[dotIdx195+sep195:]
 				if qualifier != "self" && qualifier != "this" && qualifier != "Self" {
 					if classIDs, ok := nodeIDs[qualifier]; ok {
+						// Same-named classes across files: insertion order is not
+						// content order — a batch amend / -file reindex turns it
+						// into id-space order (the edited file's nodes land at the
+						// top of AUTOINCREMENT). First-found must not ride that:
+						// sort by the CONTENT key (file, start_line, id) so the
+						// pick is identical under an amend and a rebuild.
+						sortIDsByContent(classIDs, nodeMeta[0])
 						for _, classID := range classIDs {
 							cm, hasMeta := nodeMeta[0][classID]
 							if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
@@ -2480,6 +2527,11 @@ func resolveInternal(
 							className := ""
 							if viaReturn {
 								if funcIDs, ok := nodeIDs[typeName]; ok {
+									// Same-named callees across files: content-sort
+									// (file, start_line, id) so the first-with-a-
+									// return-type pick cannot ride the id-space
+									// order a batch amend produces.
+									sortIDsByContent(funcIDs, nodeMeta[0])
 									for _, funcID := range funcIDs {
 										fm, hasMeta := nodeMeta[0][funcID]
 										if !hasMeta {
@@ -2510,6 +2562,11 @@ func resolveInternal(
 							if className != "" {
 								// Look up the class in nodeIDs, then find the method via CHA.
 								if classIDs, ok := nodeIDs[className]; ok {
+									// Same-named classes across files: content-sort
+									// (file, start_line, id) so the first-with-the-
+									// method pick cannot ride the id-space order a
+									// batch amend produces.
+									sortIDsByContent(classIDs, nodeMeta[0])
 									for _, classID := range classIDs {
 										cm, hasMeta := nodeMeta[0][classID]
 										if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {
@@ -2562,6 +2619,11 @@ func resolveInternal(
 				if qualifier != "self" && qualifier != "this" && qualifier != "super" {
 					// Check if qualifier is a function call: look for a function with this name
 					if funcIDs, ok := nodeIDs[qualifier]; ok {
+						// Same-named factories across files: content-sort
+						// (file, start_line, id) so the first-with-a-return-type
+						// pick cannot ride the id-space order a batch amend
+						// produces.
+						sortIDsByContent(funcIDs, nodeMeta[0])
 						for _, funcID := range funcIDs {
 							fm, hasMeta := nodeMeta[0][funcID]
 							if !hasMeta {
@@ -2582,6 +2644,11 @@ func resolveInternal(
 								continue
 							}
 							if classIDs, ok := nodeIDs[retType]; ok {
+								// Same-named classes across files: content-sort
+								// (file, start_line, id) so the first-with-the-
+								// method pick cannot ride the id-space order a
+								// batch amend produces.
+								sortIDsByContent(classIDs, nodeMeta[0])
 								for _, classID := range classIDs {
 									cm, hasMeta := nodeMeta[0][classID]
 									if !hasMeta || (cm.Label != "Class" && cm.Label != "Struct" && cm.Label != "Interface") {

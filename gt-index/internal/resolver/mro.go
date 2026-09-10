@@ -1,5 +1,7 @@
 package resolver
 
+import "sort"
+
 // MROPass is the pass name under which method-resolution-order linearisation
 // publishes its outcome in a callsite's pass coverage. Like narrowing it can
 // never win a callsite: it orders a candidate set, it does not derive one.
@@ -291,7 +293,7 @@ func OrderCandidatesByMRO(language, mechanism string, candidates []int64, bases 
 		ordering.Reason = MROReasonNoDefiningClass
 		return ordering
 	}
-	linear, ok := mostDerivedLinearisation(language, classes, bases)
+	linear, ok := mostDerivedLinearisation(language, classes, bases, meta)
 	if !ok {
 		ordering.Reason = MROReasonNoCommonLinearisation
 		return ordering
@@ -321,19 +323,23 @@ func definingClasses(candidates []int64, meta map[int64]NodeMeta) map[int64]int6
 
 // mostDerivedLinearisation picks the candidate class whose own linearisation
 // covers the most of the other candidate classes. That class is the one the
-// dispatch actually starts from; ties break on the lowest class ID so the order
-// does not depend on map iteration.
-func mostDerivedLinearisation(language string, classes map[int64]int64, bases map[int64][]int64) ([]int64, bool) {
+// dispatch actually starts from. Ties break on the CONTENT-first class — the
+// (file_path, start_line, id) key, insertion-order-invariant — not the lowest
+// class ID: a batch amend re-inserts the edited file's nodes at the top of the
+// AUTOINCREMENT space, so a raw-id tie-break flipped the chosen linearisation
+// between an amend and a full rebuild.
+func mostDerivedLinearisation(language string, classes map[int64]int64, bases map[int64][]int64, meta map[int64]NodeMeta) ([]int64, bool) {
 	var best []int64
-	bestCovered, bestClass := -1, int64(0)
-	for _, class := range sortedDistinct(classes) {
+	bestCovered := -1
+	for _, class := range sortedDistinctByContent(classes, meta) {
 		result := LinearizeMRO(language, class, bases)
 		if result.Status != MROStatusLinearized && result.Status != MROStatusNoBases {
 			continue
 		}
 		covered := countCovered(result.Order, classes)
-		if covered > bestCovered || (covered == bestCovered && class < bestClass) {
-			best, bestCovered, bestClass = result.Order, covered, class
+		// Strict >: a coverage tie keeps the content-first class.
+		if covered > bestCovered {
+			best, bestCovered = result.Order, covered
 		}
 	}
 	return best, bestCovered > 0
@@ -365,6 +371,33 @@ func sortedDistinct(classes map[int64]int64) []int64 {
 		}
 	}
 	insertionSortIDs(out)
+	return out
+}
+
+// sortedDistinctByContent returns the distinct defining classes in CONTENT
+// order — (file_path, start_line, id) — so a traversal that picks a winner does
+// not ride the AUTOINCREMENT id space a batch amend renumbers (the edited
+// file's nodes re-enter at the top of the id space). Meta entries absent from
+// meta compare as ("", 0, id): degenerate but still deterministic.
+func sortedDistinctByContent(classes map[int64]int64, meta map[int64]NodeMeta) []int64 {
+	seen := make(map[int64]bool, len(classes))
+	var out []int64
+	for _, class := range classes {
+		if !seen[class] {
+			seen[class] = true
+			out = append(out, class)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool {
+		ma, mb := meta[out[a]], meta[out[b]]
+		if ma.File != mb.File {
+			return ma.File < mb.File
+		}
+		if ma.StartLine != mb.StartLine {
+			return ma.StartLine < mb.StartLine
+		}
+		return out[a] < out[b]
+	})
 	return out
 }
 

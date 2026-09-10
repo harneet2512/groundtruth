@@ -2021,11 +2021,41 @@ func resolveAssertionTarget(
 		}
 	}
 
-	// Pick winner: highest score, break ties by lowest nodeID for determinism
+	// Pick winner: highest score, ties break on the CONTENT key (file_path,
+	// start_line, id) — not lowest nodeID. Node ids are AUTOINCREMENT artifacts
+	// a batch amend rewrites (the edited file's nodes re-enter at the top of the
+	// id space), so `id < best` flipped the winner between an amend and a full
+	// rebuild. The id→node map is built lazily, only when a tie needs it.
+	var nodeByID map[int64]*store.Node
+	contentLess := func(a, b int64) bool {
+		if nodeByID == nil {
+			nodeByID = make(map[int64]*store.Node, len(allNodes))
+			for i, n := range allNodes {
+				if i < len(nodeDBIDs) && n != nil {
+					nodeByID[nodeDBIDs[i]] = n
+				}
+			}
+		}
+		na, nb := nodeByID[a], nodeByID[b]
+		fa, fb, la, lb := "", "", 0, 0
+		if na != nil {
+			fa, la = na.FilePath, na.StartLine
+		}
+		if nb != nil {
+			fb, lb = nb.FilePath, nb.StartLine
+		}
+		if fa != fb {
+			return fa < fb
+		}
+		if la != lb {
+			return la < lb
+		}
+		return a < b
+	}
 	var bestID int64
 	var bestScore float64
 	for id, score := range candidates {
-		if score > bestScore || (score == bestScore && (bestID == 0 || id < bestID)) {
+		if score > bestScore || (score == bestScore && (bestID == 0 || contentLess(id, bestID))) {
 			bestScore = score
 			bestID = id
 		}
@@ -2101,11 +2131,12 @@ func resolveAssertionTarget(
 					}
 				}
 			}
-			// Pick best rescue candidate, threshold 2.0
+			// Pick best rescue candidate, threshold 2.0 — same CONTENT-keyed
+			// tie-break as the main pass (id order is not amend-stable).
 			var rescueBestID int64
 			var rescueBestScore float64
 			for id, score := range rescueCandidates {
-				if score > rescueBestScore || (score == rescueBestScore && (rescueBestID == 0 || id < rescueBestID)) {
+				if score > rescueBestScore || (score == rescueBestScore && (rescueBestID == 0 || contentLess(id, rescueBestID))) {
 					rescueBestScore = score
 					rescueBestID = id
 				}
@@ -2463,21 +2494,45 @@ func buildInheritanceMap(files []walker.SourceFile, root string, nameIndex map[s
 		if !ok {
 			return 0
 		}
-		for _, id := range ids {
+		isClass := func(id int64) (resolver.NodeMeta, bool) {
 			m, ok := nodeMeta[id]
-			if ok && (m.Label == "Class" || m.Label == "Struct" || m.Label == "Interface") {
-				if m.File == filePath {
-					return id
-				}
+			return m, ok && (m.Label == "Class" || m.Label == "Struct" || m.Label == "Interface")
+		}
+		// Same-file first: the content-smallest (start_line, id) class in THIS
+		// file — not first-in-slice. The nameIndex slice order is insertion
+		// order, which a batch amend / -file reindex turns into id-space order
+		// (the edited file's nodes re-enter at the top of AUTOINCREMENT), so a
+		// first-found pick flipped the resolved parent between an amend and a
+		// full rebuild.
+		best := int64(0)
+		var bm resolver.NodeMeta
+		for _, id := range ids {
+			m, ok := isClass(id)
+			if !ok || m.File != filePath {
+				continue
+			}
+			if best == 0 || m.StartLine < bm.StartLine ||
+				(m.StartLine == bm.StartLine && id < best) {
+				best, bm = id, m
 			}
 		}
+		if best != 0 {
+			return best
+		}
+		// Cross-file fallback: the content-smallest (file, start_line, id) class
+		// carrying the name — identical under an amend and a rebuild.
 		for _, id := range ids {
-			m, ok := nodeMeta[id]
-			if ok && (m.Label == "Class" || m.Label == "Struct" || m.Label == "Interface") {
-				return id
+			m, ok := isClass(id)
+			if !ok {
+				continue
+			}
+			if best == 0 || m.File < bm.File ||
+				(m.File == bm.File &&
+					(m.StartLine < bm.StartLine || (m.StartLine == bm.StartLine && id < best))) {
+				best, bm = id, m
 			}
 		}
-		return 0
+		return best
 	}
 
 	for _, sf := range files {

@@ -142,8 +142,12 @@ type promoteIndexes struct {
 	// BuildFieldTypeIndex). PRECEDES receiver-type resolution reads this to turn a
 	// `self.<field>` receiver into the field's declared class.
 	fieldTypes map[int64]map[string]string
-	// classByName: typeName -> classNodeID (first writer wins, id-ordered), for
-	// resolving a declared receiver TYPE name to its class node when gating PRECEDES.
+	// classByName: typeName -> classNodeID — the CONTENT-smallest (file_path,
+	// start_line, id) class carrying the name, NOT first-writer on the id-ordered
+	// scan: a batch amend re-enters the edited file's nodes at the top of the
+	// AUTOINCREMENT space, so smallest-id names a different class under an amend
+	// than under a full rebuild. Used to turn a receiver TYPE name into the class
+	// node for PRECEDES receiver-type gating.
 	classByName map[string]int64
 }
 
@@ -381,11 +385,20 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 		if _, ok := idx.fnl[k]; !ok {
 			idx.fnl[k] = m.ID
 		}
-		// classByName: a class/struct/enum/interface name -> its node id (first
-		// writer wins, id-ordered scan). Used to turn a receiver TYPE name into the
-		// class node for PRECEDES receiver-type gating.
+		// classByName: a class/struct/enum/interface name -> its node id. Keep the
+		// CONTENT-smallest (file_path, start_line, id) candidate — first-writer on
+		// this id-ordered scan is not stable: a batch amend re-inserts the edited
+		// file's nodes at the top of the AUTOINCREMENT id space, so the named
+		// class flipped between an amend and a full rebuild. (idx.byID already
+		// holds the incumbent — it was populated in its own iteration.)
 		if classLabels[m.Label] {
-			if _, ok := idx.classByName[m.Name]; !ok {
+			cur, seen := idx.classByName[m.Name]
+			if !seen {
+				idx.classByName[m.Name] = m.ID
+			} else if pm, ok := idx.byID[cur]; ok &&
+				(m.FilePath < pm.FilePath ||
+					(m.FilePath == pm.FilePath &&
+						(m.Line < pm.Line || (m.Line == pm.Line && m.ID < pm.ID)))) {
 				idx.classByName[m.Name] = m.ID
 			}
 		}
@@ -564,12 +577,7 @@ func promoteSerde(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 		if tgt == 0 {
 			// Partner may live in another file — accept any file with that
 			// (name,line) pair, still EXACT on name+line (non-invention safe).
-			for k, id := range idx.fnl {
-				if k.name == partnerName && k.line == partnerLine {
-					tgt = id
-					break
-				}
-			}
+			tgt = idx.fnlAnyFile(partnerName, partnerLine)
 		}
 		if tgt == 0 {
 			return // partner unresolved -> stays a property
@@ -577,6 +585,28 @@ func promoteSerde(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 		add(nodeID, tgt, "CO_SERIALIZES", "promote_serde", 1.0, 1, "serde_pair",
 			partnerName, src.FilePath, line, true /*undirected*/)
 	})
+}
+
+// fnlAnyFile resolves an exact (name, line) pair in ANY file — the content-
+// smallest (file_path, id) match. idx.fnl is a Go map: ranging it is run-order-
+// dependent (the previous `for k, id := range idx.fnl { ...; break }` picked a
+// random same-named match), and the ids it stores are AUTOINCREMENT values that
+// renumber when a batch amend re-inserts the edited file's nodes at the top of
+// the id space. (file_path, id) is the content key — identical under an amend
+// and a full rebuild, deterministic across runs. fnl is keyed by (file, name,
+// line), so two surviving matches always differ in file.
+func (idx *promoteIndexes) fnlAnyFile(name string, line int) int64 {
+	best := int64(0)
+	bestFile := ""
+	for k, id := range idx.fnl {
+		if k.name != name || k.line != line {
+			continue
+		}
+		if best == 0 || k.file < bestFile || (k.file == bestFile && id < best) {
+			best, bestFile = id, k.file
+		}
+	}
+	return best
 }
 
 // ---------------------------------------------------------------------------
