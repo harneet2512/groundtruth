@@ -973,9 +973,11 @@ type NodeMeta struct {
 	// and anonymous receivers. Used by rung 2b to accept `<recv>.<field>.method()` as the
 	// Go analogue of self./this. — abstains (stays empty) when the receiver is unnamed.
 	ReceiverName string
-	// StartLine is the node's definition line. Used ONLY as a CONTENT-based, insertion-
-	// order-invariant tiebreak in name_match candidate selection (node IDs are assigned
-	// non-deterministically by the parallel parse — see pickBestNameMatchTarget).
+	// StartLine is the node's definition line. Used as a CONTENT-based, insertion-
+	// order-invariant tiebreak in name_match candidate selection and in the
+	// class-method index's same-name collision rule (node IDs are assigned
+	// non-deterministically by the parallel parse — see pickBestNameMatchTarget
+	// and the methodsByClass build in resolveInternal).
 	StartLine int
 }
 
@@ -1553,13 +1555,16 @@ func resolveInternal(
 				// conditional redefinition, a decorator pair). nodeMeta[0] is a
 				// map, so this loop's order is randomized, and last-write-wins
 				// made WHICH definition the index names run-dependent -- every
-				// impl_method resolution then flipped between them. Lowest
+				// impl_method resolution then flipped between them. Highest
 				// (start_line, id) wins instead: a CONTENT rule, stable across
-				// runs and independent of how the parse assigned ids.
+				// runs and independent of how the parse assigned ids. It also
+				// matches Python runtime semantics -- the LAST definition binds
+				// the name, so @overload stubs (which precede the real def)
+				// lose to the implementation they describe.
 				if prev, seen := methodsByClass[m.ParentID][m.Name]; seen {
 					pm := nodeMeta[0][prev]
-					if m.StartLine > pm.StartLine ||
-						(m.StartLine == pm.StartLine && id > prev) {
+					if m.StartLine < pm.StartLine ||
+						(m.StartLine == pm.StartLine && id < prev) {
 						continue
 					}
 				}
