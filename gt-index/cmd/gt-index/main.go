@@ -1282,11 +1282,16 @@ func main() {
 	importResolved := methodCounts["import"]
 	sameFileResolved := methodCounts["same_file"]
 	nameMatchResolved := methodCounts["name_match"]
-	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d}`,
+	buildMode := "full"
+	if *amendParent != "" {
+		buildMode = "batch"
+	}
+	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d,"build_mode":%q,"parser_nodes_retained":%d,"parser_nodes_inserted":%d,"parse_cache_hits":%d,"parse_cache_misses":%d,"resolver_passes":1}`,
 		len(files), nodeCount, edgeCount, len(allImports),
 		propertyCount, assertionCount,
 		importResolved, sameFileResolved, nameMatchResolved,
-		elapsed.Milliseconds(), *workers)
+		elapsed.Milliseconds(), *workers, buildMode, retainedNodes,
+		len(nodeDBIDs)-retainedNodes, cacheHits, len(files)-cacheHits)
 	fmt.Println()
 
 	// Fail-closed stays fail-closed: an operator who requires the analysis layer

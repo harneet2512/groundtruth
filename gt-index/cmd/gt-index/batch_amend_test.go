@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,8 +42,23 @@ func TestBatchAmendRetainsUnchangedStructureAndParent(t *testing.T) {
 	candidate := filepath.Join(root, "candidate.db")
 	amend := exec.Command(bin, "-root", repo, "-output", candidate, "-amend-parent", parent)
 	amend.Env = cmd.Env
-	if out, err := amend.CombinedOutput(); err != nil {
+	out, err := amend.Output()
+	if err != nil {
 		t.Fatalf("amend: %v\n%s", err, out)
+	}
+	var summary struct {
+		Mode           string `json:"build_mode"`
+		Retained       int    `json:"parser_nodes_retained"`
+		Inserted       int    `json:"parser_nodes_inserted"`
+		CacheHits      int    `json:"parse_cache_hits"`
+		CacheMisses    int    `json:"parse_cache_misses"`
+		ResolverPasses int    `json:"resolver_passes"`
+	}
+	if err := json.Unmarshal(out, &summary); err != nil {
+		t.Fatalf("invalid producer summary: %v: %s", err, out)
+	}
+	if summary.Mode != "batch" || summary.Retained < 1 || summary.Inserted < 1 || summary.CacheHits != 2 || summary.CacheMisses != 1 || summary.ResolverPasses != 1 {
+		t.Fatalf("missing or inaccurate batch work counters: %+v", summary)
 	}
 	if got := batchNodeID(t, candidate, "caller.py", "run"); got != oldCaller {
 		t.Fatalf("unchanged node rebuilt: %d -> %d", oldCaller, got)
