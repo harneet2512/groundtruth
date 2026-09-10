@@ -532,7 +532,18 @@ func main() {
 	if err != nil {
 		abortStagedBuild(db, stagedOutput, "batch producer identity: %v", err)
 	}
-	nodeDBIDs, retainedNodes, err := db.ReplaceParsedStructure(allNodePtrs, *amendParent != "", batchIdentity.ExecutableSHA256)
+	// Coupling reuse must be decided while the staged copy still holds the
+	// parent's project_meta: ReplaceParsedStructure clears it below. The check
+	// is the recorded history-window key, not the working tree — a disabled
+	// derived stage declines reuse so an amend with the layers off produces
+	// the same empty tables a fresh disabled build would.
+	var couplingReusePlan *couplingReuse
+	if *amendParent != "" {
+		if dopts, derr := resolveDerivedOptions(os.LookupEnv); derr == nil && dopts.Enabled {
+			couplingReusePlan = resolveCouplingReuse(db, *root)
+		}
+	}
+	nodeDBIDs, retainedNodes, err := db.ReplaceParsedStructure(allNodePtrs, *amendParent != "", batchIdentity.ExecutableSHA256, couplingReusePlan != nil)
 	if err != nil {
 		abortStagedBuild(db, stagedOutput, "batch insert nodes: %v", err)
 	}
@@ -1082,7 +1093,7 @@ func main() {
 		abortStagedBuild(db, stagedOutput, "%v", derivedOptionsErr)
 	}
 	fmt.Fprintf(os.Stderr, "Pass 4g: deriving co-change, communities and processes...\n")
-	derived := runDerivedLayers(context.Background(), db, stagedOutput, *root, derivedOptions)
+	derived := runDerivedLayers(context.Background(), db, stagedOutput, *root, derivedOptions, couplingReusePlan)
 	fmt.Fprintf(os.Stderr, "  %s\n", derived.Summary())
 	if err := setRequiredMetadata(db, derived.Metadata); err != nil {
 		abortStagedBuild(db, stagedOutput, "%v", err)

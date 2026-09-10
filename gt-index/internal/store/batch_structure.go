@@ -11,7 +11,14 @@ import (
 // ReplaceParsedStructure keeps parser-owned rows whose entire source file and
 // declaration are unchanged. All repository-wide products are recomputed by
 // the normal pipeline. The caller operates only on a private staged database.
-func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA string) ([]int64, int, error) {
+//
+// preserveCoupling asks the amend to keep the copied parent's cochanges,
+// communities and community_members rows instead of clearing them with the
+// rest of the repository-wide products. The caller sets it only after proving
+// the amend re-walks the parent's recorded history window — see
+// resolveCouplingReuse in cmd/gt-index/derived.go — and the publication path
+// still decides per table whether the carried rows stand or are rebuilt.
+func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA string, preserveCoupling bool) ([]int64, int, error) {
 	tx, err := d.db.Begin()
 	if err != nil {
 		return nil, 0, err
@@ -70,7 +77,21 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 	// Parent pointers are resolved from this revision's complete parser inputs
 	// after this transaction. Never carry an old resolution or analysis receipt.
 	if amend {
-		for _, table := range []string{"resolution_candidates", "resolution_callsites", "resolution_symbols", "closure", "community_members", "communities", "process_steps", "processes", "cochanges", "file_hashes", "project_meta"} {
+		tables := []string{"resolution_candidates", "resolution_callsites", "resolution_symbols", "closure", "community_members", "communities", "process_steps", "processes", "cochanges", "file_hashes", "project_meta"}
+		if preserveCoupling {
+			// The caller proved the amend re-walks the parent's recorded
+			// coupling window; the copied tables stay for the derived-layers
+			// pass to adopt or rebuild rather than being cleared here.
+			kept := tables[:0]
+			for _, table := range tables {
+				if table == "community_members" || table == "communities" || table == "cochanges" {
+					continue
+				}
+				kept = append(kept, table)
+			}
+			tables = kept
+		}
+		for _, table := range tables {
 			var exists int
 			if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
 				return nil, 0, err

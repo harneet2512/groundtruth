@@ -186,6 +186,154 @@ func TestBatchAmendMatchesFreshCoreAndResolution(t *testing.T) {
 	}
 }
 
+// TestBatchAmendReusesCouplingOverPinnedHistory pins the batch-amend coupling
+// reuse contract: when the amend walks the same recorded history window as the
+// parent — same HEAD, same shallow boundary, same co-change window ends — the
+// parent's cochanges/communities/community_members rows are carried into the
+// published graph untouched rather than deleted and rewritten.
+//
+// The sentinel rows are the observable: a wholesale DELETE + repopulate drops
+// rows the analysis could never have produced, while a carried table keeps
+// them. The committed-edit half is the negative control: once HEAD moves, the
+// four-tuple no longer matches and the amend must recompute — the sentinels
+// must die.
+func TestBatchAmendReusesCouplingOverPinnedHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the gt-index binary; skipped under -short")
+	}
+	bin := buildDerivedIndexer(t)
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	writeDerivedFixtureRepo(t, repo)
+	parent := filepath.Join(root, "parent.db")
+	cmd := exec.Command(bin, "-root", repo, "-output", parent)
+	cmd.Env = append(os.Environ(), "GT_PARSE_CACHE_ROOT="+filepath.Join(root, "cache"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("parent: %v\n%s", err, out)
+	}
+
+	// Seed marker rows a real extraction could never produce. The parent file
+	// is in WAL mode after the indexer wrote it, so checkpoint before closing
+	// or copyBatchParent will (correctly) refuse a parent with live sidecars.
+	seed, err := sql.Open("sqlite3", parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.Exec(`INSERT INTO cochanges (file_a, file_b, count, commits_a, commits_b, confidence_a_to_b, confidence_b_to_a) VALUES ('reuse_sentinel_a.py', 'reuse_sentinel_b.py', 42, 42, 42, 1.0, 1.0)`); err != nil {
+		t.Fatalf("seed cochanges sentinel: %v", err)
+	}
+	if _, err := seed.Exec(`INSERT INTO communities (id, label, heuristic_label, keywords, description, enriched_by, cohesion, cohesion_lo, cohesion_hi, cohesion_n, cohesion_reason, structural_cohesion, member_count, internal_weight, external_weight, evidence_edge_ids, evidence_truncated, algorithm, resolution, w_call, w_cochange, holdout_commits) VALUES ('community:reuse_sentinel', 'reuse-sentinel', 'reuse-sentinel', '[]', 'reuse sentinel row', 'heuristic', NULL, NULL, NULL, 0, 'no_holdout_commits', 0.0, 1, 0.0, 0.0, '[]', 0, 'sentinel-algorithm', 0.25, 1.0, 1.0, 0)`); err != nil {
+		t.Fatalf("seed communities sentinel: %v", err)
+	}
+	if _, err := seed.Exec(`INSERT INTO community_members (community_id, member, member_kind) VALUES ('community:reuse_sentinel', 'reuse_sentinel.py', 'file')`); err != nil {
+		t.Fatalf("seed community_members sentinel: %v", err)
+	}
+	if _, err := seed.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatalf("checkpoint seeded parent: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-journal"} {
+		if side, err := os.Stat(parent + suffix); err == nil && side.Size() != 0 {
+			t.Fatalf("seeded parent still has a nonempty %s sidecar", suffix)
+		}
+	}
+
+	parentCochange := batchQueryRows(t, parent, "SELECT * FROM cochanges")
+	parentCommunities := batchQueryRows(t, parent, "SELECT * FROM communities")
+	parentMembers := batchQueryRows(t, parent, "SELECT * FROM community_members")
+	if len(parentCochange) < 4 || len(parentCommunities) < 2 || len(parentMembers) < 3 {
+		t.Fatalf("fixture parent lacks coupling data to reuse: %d cochanges, %d communities, %d members",
+			len(parentCochange), len(parentCommunities), len(parentMembers))
+	}
+
+	// An uncommitted body edit: HEAD is pinned, the window is identical, and a
+	// comment line changes no call edge — the reuse condition in full.
+	modPath := filepath.Join(repo, "mod.py")
+	modSource, err := os.ReadFile(modPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modPath, append(modSource, []byte("\n# amended\n")...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(root, "candidate.db")
+	amend := exec.Command(bin, "-root", repo, "-output", candidate, "-amend-parent", parent)
+	amend.Env = cmd.Env
+	if out, err := amend.CombinedOutput(); err != nil {
+		t.Fatalf("amend: %v\n%s", err, out)
+	}
+
+	for table, want := range map[string][]string{
+		"cochanges":         parentCochange,
+		"communities":       parentCommunities,
+		"community_members": parentMembers,
+	} {
+		if got := batchQueryRows(t, candidate, "SELECT * FROM "+table); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s was rewritten over an identical history window\ncandidate: %v\nparent:    %v", table, got, want)
+		}
+	}
+
+	cdb, err := sql.Open("sqlite3", candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cdb.Close()
+	if reused, err := derivedMetaValue(cdb, "derived_coupling_reused"); err != nil || reused != "cochange,community" {
+		t.Errorf("derived_coupling_reused = %q, %v; want cochange,community", reused, err)
+	}
+	for _, key := range []string{"derived_cochange_window_start", "derived_cochange_window_end", "derived_cochange_state"} {
+		got, gerr := derivedMetaValue(cdb, key)
+		pdb, err := sql.Open("sqlite3", parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, werr := derivedMetaValue(pdb, key)
+		pdb.Close()
+		if gerr != nil || werr != nil || got != want {
+			t.Errorf("project_meta[%s] = %q (%v), parent had %q (%v)", key, got, gerr, want, werr)
+		}
+	}
+
+	// Negative control: commit the edit so HEAD moves. The four-tuple no
+	// longer matches the parent's, so the amend must recompute — which a
+	// carried sentinel cannot survive.
+	git := func(args ...string) {
+		full := append([]string{"-C", repo,
+			"-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+			"-c", "commit.gpgsign=false"}, args...)
+		if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("add", "-A")
+	git("commit", "-q", "-m", "move HEAD")
+	candidate2 := filepath.Join(root, "candidate2.db")
+	amend2 := exec.Command(bin, "-root", repo, "-output", candidate2, "-amend-parent", parent)
+	amend2.Env = cmd.Env
+	if out, err := amend2.CombinedOutput(); err != nil {
+		t.Fatalf("amend2: %v\n%s", err, out)
+	}
+	for table, sentinel := range map[string]string{
+		"cochanges":         "SELECT count(*) FROM cochanges WHERE file_a='reuse_sentinel_a.py'",
+		"communities":       "SELECT count(*) FROM communities WHERE id='community:reuse_sentinel'",
+		"community_members": "SELECT count(*) FROM community_members WHERE community_id='community:reuse_sentinel'",
+	} {
+		if rows := batchQueryRows(t, candidate2, sentinel); len(rows) != 1 || rows[0] != "[0]" {
+			t.Errorf("%s sentinel survived a moved HEAD — the recompute never ran: %v", table, rows)
+		}
+	}
+	cdb2, err := sql.Open("sqlite3", candidate2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cdb2.Close()
+	if reused, err := derivedMetaValue(cdb2, "derived_coupling_reused"); err != nil || reused != "" {
+		t.Errorf("derived_coupling_reused under a moved HEAD = %q, %v; want empty", reused, err)
+	}
+}
+
 func batchQueryRows(t *testing.T, path, query string) []string {
 	t.Helper()
 	db, err := sql.Open("sqlite3", path)

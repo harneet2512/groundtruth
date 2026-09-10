@@ -12,7 +12,7 @@ func parsedFactDB(t *testing.T) (*DB, int64) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	ids, _, err := db.ReplaceParsedStructure([]*Node{{Label: "Function", Name: "test_work", FilePath: "test_work.py", FileHash: "source"}}, false, "")
+	ids, _, err := db.ReplaceParsedStructure([]*Node{{Label: "Function", Name: "test_work", FilePath: "test_work.py", FileHash: "source"}}, false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

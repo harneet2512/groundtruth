@@ -107,6 +107,8 @@ func TestDisabledDerivedOutcomeStillNamesEveryLayer(t *testing.T) {
 		metaCochangeWindowStart, metaCochangeWindowEnd,
 		metaCommunityState, metaCommunityCount, metaCommunityMembers, metaCommunityCohesion,
 		metaCommunityCertifiedCallRows, metaCommunityExcludedCallRows, metaCommunityHoldoutCommits,
+		metaCommunityWindowStart, metaCommunityWindowEnd, metaCommunityCallDigest,
+		metaCouplingReused,
 		metaProcessState, metaProcessCount, metaProcessSteps, metaProcessAssertionsScanned,
 		metaProcessAssertionsWithTarget, metaProcessTargetsWithoutPath, metaProcessTruncated,
 	}

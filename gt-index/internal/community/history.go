@@ -56,6 +56,11 @@ type history struct {
 	// HoldoutOldest and HoldoutNewest bound the falsification window.
 	HoldoutOldest string
 	HoldoutNewest string
+	// WindowStart and WindowEnd bound the whole walked window — the oldest and
+	// newest commit SHAs the walk saw, holdout included — following
+	// cochange.Result's convention. Both stay empty when the walk abstained.
+	WindowStart string
+	WindowEnd   string
 	// Reason reuses cochange's vocabulary; ReasonOK means the walk answered.
 	Reason string
 	// Shallow records a grafted checkout independently of whether it cost
@@ -119,6 +124,12 @@ func loadHistory(ctx context.Context, repoRoot string, opts Options) (history, e
 		h.Reason = cochange.ReasonShallowClone
 		return h, nil
 	}
+
+	// The walked window bounds are set only once the abstain checks pass, so a
+	// recorded boundary always describes a window that was actually answered —
+	// the same convention cochange.Extract keeps for WindowStart/WindowEnd.
+	h.WindowEnd = commits[0].SHA
+	h.WindowStart = commits[len(commits)-1].SHA
 
 	// commits is newest first, so the holdout is the prefix.
 	cut := opts.HoldoutCommits

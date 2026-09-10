@@ -1210,6 +1210,18 @@ func (d *DB) SetMeta(key, value string) error {
 	return err
 }
 
+// MetaValue reads one project_meta value, or "" when the key is absent or
+// unreadable. The batch-amend path uses it to recover the parent's coupling
+// receipt from the staged copy before ReplaceParsedStructure clears
+// project_meta for rebuild.
+func (d *DB) MetaValue(key string) string {
+	var value string
+	if err := d.db.QueryRow(`SELECT COALESCE(value,'') FROM project_meta WHERE key=?`, key).Scan(&value); err != nil {
+		return ""
+	}
+	return value
+}
+
 // GetFileHash returns the stored hash for a file, or empty string if not found.
 func (d *DB) GetFileHash(filePath string) string {
 	var hash string

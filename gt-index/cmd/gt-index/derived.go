@@ -36,8 +36,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,6 +114,18 @@ const (
 	metaCommunityCertifiedCallRows = "derived_community_certified_call_rows"
 	metaCommunityExcludedCallRows  = "derived_community_excluded_call_rows"
 	metaCommunityHoldoutCommits    = "derived_community_holdout_commits"
+	// The community layer walks a DEEPER window than co-change (fit +
+	// holdout) and mixes in the certified call graph, so its reuse proof
+	// needs both bounds of its own window and a digest of the call pairs —
+	// the co-change four-tuple alone does not pin either input.
+	metaCommunityWindowStart = "derived_community_window_start"
+	metaCommunityWindowEnd   = "derived_community_window_end"
+	metaCommunityCallDigest  = "derived_community_call_pairs_sha256"
+
+	// metaCouplingReused names which coupling layers a batch amend carried
+	// from its parent instead of recomputing: "cochange", "community", both
+	// comma-joined, or "" when neither was reused.
+	metaCouplingReused = "derived_coupling_reused"
 
 	metaProcessState                = "derived_process_state"
 	metaProcessCount                = "derived_process_count"
@@ -228,14 +243,14 @@ func (o DerivedOutcome) Summary() string {
 // Co-change and communities share one transaction so that a graph which commits
 // cannot commit half a coupling analysis. Processes own their tables outright
 // and publish in their own transaction, which is the seam item 9 splits.
-func runDerivedLayers(ctx context.Context, db *store.DB, dbPath, repoPath string, opts DerivedOptions) DerivedOutcome {
+func runDerivedLayers(ctx context.Context, db *store.DB, dbPath, repoPath string, opts DerivedOptions, reuse *couplingReuse) DerivedOutcome {
 	out := DerivedOutcome{Metadata: make(map[string]string, 24)}
 	if !opts.Enabled {
 		disableDerivedOutcome(&out)
 		return out
 	}
 	started := time.Now()
-	runCouplingLayers(ctx, db, repoPath, &out)
+	runCouplingLayers(ctx, db, repoPath, &out, reuse)
 	runProcessLayer(ctx, dbPath, &out)
 	out.Elapsed = time.Since(started)
 
@@ -270,16 +285,219 @@ func disableDerivedOutcome(out *DerivedOutcome) {
 	out.Metadata[metaCochangeWindowStart] = ""
 	out.Metadata[metaCochangeWindowEnd] = ""
 	out.Metadata[metaCommunityCohesion] = "absent:" + StateDisabledByOperator
+	out.Metadata[metaCommunityWindowStart] = ""
+	out.Metadata[metaCommunityWindowEnd] = ""
+	out.Metadata[metaCommunityCallDigest] = ""
+	out.Metadata[metaCouplingReused] = ""
+}
+
+// The project_meta keys a reused coupling outcome re-emits verbatim: the
+// copied graph's receipt must describe the rows it carries exactly the way the
+// parent's did, because nothing about them changed.
+var (
+	couplingCochangeMetaKeys = []string{
+		metaCochangeState, metaCochangePairs, metaCochangeCommitsScanned,
+		metaCochangeCommitsSkipped, metaCochangeShallow,
+		metaCochangeWindowStart, metaCochangeWindowEnd,
+	}
+	couplingCommunityMetaKeys = []string{
+		metaCommunityState, metaCommunityCount, metaCommunityMembers, metaCommunityCohesion,
+		metaCommunityCertifiedCallRows, metaCommunityExcludedCallRows, metaCommunityHoldoutCommits,
+		metaCommunityWindowStart, metaCommunityWindowEnd, metaCommunityCallDigest,
+	}
+)
+
+// couplingWindow is the amend's own coupling reuse key: the revision and the
+// commit boundaries of the two history windows the coupling layers walk,
+// measured WITHOUT the name-only enumeration those walks perform. One rev-list
+// of bare commit ids bounds both windows — the expensive part of the walk is
+// the per-commit tree diff, not the commit listing.
+type couplingWindow struct {
+	head    string
+	shallow bool
+	// windowStart/windowEnd bound the co-change window (DefaultMaxCommits).
+	windowStart string
+	windowEnd   string
+	// communityWindowStart/communityWindowEnd bound the community layer's
+	// deeper fit+holdout window (DefaultMaxCommits + DefaultHoldoutCommits).
+	communityWindowStart string
+	communityWindowEnd   string
+}
+
+// couplingReuse carries the parent's recorded coupling outcome — the receipt
+// values verbatim, the row counts for the summary line, and whether the
+// community layer's extra inputs matched — from the copied parent's
+// project_meta into the amend's publication path.
+type couplingReuse struct {
+	meta map[string]string
+	// pairs/communities/members are the parent's recorded row counts, kept for
+	// DerivedOutcome's summary line rather than re-derived from the tables.
+	pairs       int
+	communities int
+	members     int
+	// communityReusable records that the parent's community outcome is
+	// committable (a real state, not a failed/abstained write) and that the
+	// community layer's deeper window bounds match. The remaining half of the
+	// proof — the certified call-pair digest — can only be checked once the
+	// amended edges exist, inside the publication transaction.
+	communityReusable bool
+}
+
+// recordCochange re-emits the parent's co-change receipt verbatim. The state
+// goes through out.state so a parent-recorded abstention still degrades this
+// build's receipt exactly as a fresh abstention would.
+func (r *couplingReuse) recordCochange(out *DerivedOutcome) {
+	for _, key := range couplingCochangeMetaKeys {
+		if key == metaCochangeState {
+			out.state(layerCochange, key, r.meta[key])
+			continue
+		}
+		out.Metadata[key] = r.meta[key]
+	}
+	out.CochangePairs = r.pairs
+}
+
+// recordCommunity re-emits the parent's community receipt verbatim, under the
+// same state-through-out.state rule as recordCochange.
+func (r *couplingReuse) recordCommunity(out *DerivedOutcome) {
+	for _, key := range couplingCommunityMetaKeys {
+		if key == metaCommunityState {
+			out.state(layerCommunity, key, r.meta[key])
+			continue
+		}
+		out.Metadata[key] = r.meta[key]
+	}
+	out.Communities = r.communities
+	out.CommunityMembers = r.members
+}
+
+// gitRevParse runs `git rev-parse <arg>` in repoPath. repoCommit is the HEAD
+// instance of the same call; this exists for the flags it does not expose.
+func gitRevParse(repoPath, arg string) (string, bool) {
+	out, err := exec.Command("git", "-C", repoPath, "rev-parse", arg).Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// currentCouplingWindow measures the checkout's reuse key. `git rev-list
+// --no-merges` returns the same commit sequence `git log --no-merges` would —
+// both layers parse it with -n caps — so its first and Nth lines are the
+// window boundaries each layer would have recorded. No tree diffs are
+// computed; this is the boundary probe, not the walk.
+func currentCouplingWindow(repoPath string) (couplingWindow, bool) {
+	var w couplingWindow
+	head := repoCommit(repoPath)
+	if head == "" {
+		return w, false
+	}
+	w.head = head
+	if s, ok := gitRevParse(repoPath, "--is-shallow-repository"); ok {
+		w.shallow = strings.EqualFold(s, "true")
+	}
+	depth := cochange.DefaultMaxCommits + community.DefaultHoldoutCommits
+	out, err := exec.Command("git", "-C", repoPath,
+		"rev-list", "--no-merges", "-n", strconv.Itoa(depth), "HEAD").Output()
+	if err != nil {
+		return couplingWindow{}, false
+	}
+	var commits []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			commits = append(commits, line)
+		}
+	}
+	if len(commits) == 0 {
+		return couplingWindow{}, false
+	}
+	w.windowEnd = commits[0]
+	cut := cochange.DefaultMaxCommits
+	if cut > len(commits) {
+		cut = len(commits)
+	}
+	w.windowStart = commits[cut-1]
+	w.communityWindowEnd = commits[0]
+	w.communityWindowStart = commits[len(commits)-1]
+	return w, true
+}
+
+// resolveCouplingReuse decides whether a batch amend can carry the parent's
+// coupling tables untouched. It must run BEFORE ReplaceParsedStructure: that
+// call clears the staged copy's project_meta, and the copied receipt is the
+// only record of the window the parent's coupling was computed over.
+//
+// The reuse key is the four-tuple the parent recorded — the repository
+// revision it was built over (the core receipt's repository_revision, the one
+// revision field present on every amendable parent), the shallow flag, and the
+// co-change window's oldest and newest commits — compared against the same
+// boundary recomputed from the checkout. HEAD alone would not be sufficient:
+// two grafted checkouts can share HEAD and still hold different windows.
+//
+// A nil return means "recompute", the same outcome as today for a parent that
+// never recorded the key, a moved HEAD, or a different graft boundary.
+func resolveCouplingReuse(db *store.DB, repoPath string) *couplingReuse {
+	cur, ok := currentCouplingWindow(repoPath)
+	if !ok {
+		return nil
+	}
+	var receipt store.CorePhaseReceipt
+	if err := json.Unmarshal([]byte(db.MetaValue(store.CorePhaseReceiptKey)), &receipt); err != nil {
+		return nil
+	}
+	if receipt.RepositoryRevision == "" || receipt.RepositoryRevision == "unversioned" || receipt.RepositoryRevision != cur.head {
+		return nil
+	}
+	parent := make(map[string]string, len(couplingCochangeMetaKeys)+len(couplingCommunityMetaKeys))
+	for _, key := range couplingCochangeMetaKeys {
+		parent[key] = db.MetaValue(key)
+	}
+	for _, key := range couplingCommunityMetaKeys {
+		parent[key] = db.MetaValue(key)
+	}
+	// Only a committed co-change outcome is worth carrying: every other state
+	// is cheaper to reproduce than to second-guess, and a parent that abstained
+	// recorded an empty window this comparison would refuse anyway.
+	if parent[metaCochangeState] != StateOK ||
+		parent[metaCochangeShallow] != boolMeta(cur.shallow) ||
+		parent[metaCochangeWindowStart] == "" || parent[metaCochangeWindowEnd] == "" ||
+		parent[metaCochangeWindowStart] != cur.windowStart ||
+		parent[metaCochangeWindowEnd] != cur.windowEnd {
+		return nil
+	}
+	reuse := &couplingReuse{meta: parent}
+	reuse.pairs, _ = strconv.Atoi(parent[metaCochangePairs])
+	reuse.communities, _ = strconv.Atoi(parent[metaCommunityCount])
+	reuse.members, _ = strconv.Atoi(parent[metaCommunityMembers])
+	// The community partition is NOT a pure function of the history window:
+	// it clusters the certified call edges too. Reuse therefore additionally
+	// requires the parent's own (deeper) window bounds to match and a recorded
+	// call-pair digest to compare inside the publication transaction, once the
+	// amended edges exist. A parent without either key simply cannot prove the
+	// input is unchanged, so its communities are rebuilt — the same fallback
+	// any missing receipt field takes.
+	switch parent[metaCommunityState] {
+	case community.ReasonOK, community.ReasonNoEdges, community.ReasonNoCommunities:
+		reuse.communityReusable = parent[metaCommunityCallDigest] != "" &&
+			parent[metaCommunityWindowStart] != "" &&
+			parent[metaCommunityWindowStart] == cur.communityWindowStart &&
+			parent[metaCommunityWindowEnd] == cur.communityWindowEnd
+	}
+	return reuse
 }
 
 // runCouplingLayers extracts co-change and clusters communities, then publishes
-// both in one transaction.
+// both in one transaction. On a batch amend whose history window provably
+// matches the parent's, either table may instead be carried over untouched —
+// reuse decides that per layer, and publishCoupling skips the delete+rewrite
+// for whichever the receipt still vouches for.
 //
 // The analysis outcomes are recorded BEFORE the write is attempted, so a
 // failure of the write cannot erase what the analysis actually found; the write
 // failure is then recorded over them, which is the honest order because a
 // result that did not commit is a result the graph does not have.
-func runCouplingLayers(ctx context.Context, db *store.DB, repoPath string, out *DerivedOutcome) {
+func runCouplingLayers(ctx context.Context, db *store.DB, repoPath string, out *DerivedOutcome, reuse *couplingReuse) {
+	out.Metadata[metaCouplingReused] = ""
 	tx, err := db.BeginTx()
 	if err != nil {
 		out.state(layerCochange, metaCochangeState, stateTransactionFailed)
@@ -289,13 +507,44 @@ func runCouplingLayers(ctx context.Context, db *store.DB, repoPath string, out *
 		return
 	}
 
-	coupling, coErr := cochange.Extract(ctx, repoPath, cochange.Options{})
-	communities, commErr := community.Build(ctx, tx, repoPath, community.Options{})
+	// The co-change table is a pure function of the pinned window, so the
+	// matched four-tuple is the whole proof. The community table also clusters
+	// the certified call edges, so it is carried only when that second input
+	// is provably identical as well — the digest the parent recorded against
+	// the amended graph's own edges.
+	keepCochange := reuse != nil
+	keepCommunity := false
+	if keepCochange && reuse.communityReusable {
+		digest, derr := community.CertifiedCallGraphDigest(ctx, tx)
+		keepCommunity = derr == nil && digest == reuse.meta[metaCommunityCallDigest]
+	}
+	var reused []string
+	if keepCochange {
+		reused = append(reused, layerCochange)
+	}
+	if keepCommunity {
+		reused = append(reused, layerCommunity)
+	}
+	out.Metadata[metaCouplingReused] = strings.Join(reused, ",")
 
-	recordCochange(out, coupling, coErr == nil)
-	recordCommunity(out, communities, commErr == nil)
+	var coupling cochange.Result
+	var communities community.Result
+	if keepCochange {
+		reuse.recordCochange(out)
+	} else {
+		var coErr error
+		coupling, coErr = cochange.Extract(ctx, repoPath, cochange.Options{})
+		recordCochange(out, coupling, coErr == nil)
+	}
+	if keepCommunity {
+		reuse.recordCommunity(out)
+	} else {
+		var commErr error
+		communities, commErr = community.Build(ctx, tx, repoPath, community.Options{})
+		recordCommunity(out, communities, commErr == nil)
+	}
 
-	if err := publishCoupling(tx, coupling, communities, out); err != nil {
+	if err := publishCoupling(tx, coupling, communities, out, keepCochange, keepCommunity); err != nil {
 		_ = tx.Rollback()
 		failCoupling(out)
 		return
@@ -322,35 +571,49 @@ func failCoupling(out *DerivedOutcome) {
 // replacement rather than merge: both are pure functions of the repository at
 // this revision, so a row that survives from an earlier state would sit
 // indistinguishably beside a current one.
-func publishCoupling(tx *sql.Tx, coupling cochange.Result, communities community.Result, out *DerivedOutcome) error {
+//
+// A keep flag skips a population's delete+rewrite entirely: the caller has
+// already proved the carried rows are the rows this build would have written,
+// so deleting them only to reinsert identical content is churn, not safety.
+func publishCoupling(tx *sql.Tx, coupling cochange.Result, communities community.Result, out *DerivedOutcome, keepCochange, keepCommunity bool) error {
 	if err := community.EnsureSchema(tx); err != nil {
 		return err
 	}
-	for _, statement := range []string{
-		`DELETE FROM community_members`,
-		`DELETE FROM communities`,
-		`DELETE FROM cochanges`,
-	} {
+	var statements []string
+	if !keepCommunity {
+		statements = append(statements,
+			`DELETE FROM community_members`,
+			`DELETE FROM communities`)
+	}
+	if !keepCochange {
+		statements = append(statements, `DELETE FROM cochanges`)
+	}
+	for _, statement := range statements {
 		if _, err := tx.Exec(statement); err != nil {
 			return fmt.Errorf("clear derived coupling rows: %w", err)
 		}
 	}
-	pairs, err := cochange.Persist(tx, coupling)
-	if err != nil {
-		return err
+	if !keepCochange {
+		pairs, err := cochange.Persist(tx, coupling)
+		if err != nil {
+			return err
+		}
+		out.CochangePairs = pairs
+		out.put(metaCochangePairs, pairs)
 	}
-	written, err := community.Persist(tx, communities)
-	if err != nil {
-		return err
+	if !keepCommunity {
+		written, err := community.Persist(tx, communities)
+		if err != nil {
+			return err
+		}
+		out.Communities = written
+		out.CommunityMembers = 0
+		for _, c := range communities.Communities {
+			out.CommunityMembers += len(c.Members)
+		}
+		out.put(metaCommunityCount, written)
+		out.put(metaCommunityMembers, out.CommunityMembers)
 	}
-	out.CochangePairs = pairs
-	out.Communities = written
-	for _, c := range communities.Communities {
-		out.CommunityMembers += len(c.Members)
-	}
-	out.put(metaCochangePairs, pairs)
-	out.put(metaCommunityCount, written)
-	out.put(metaCommunityMembers, out.CommunityMembers)
 	return nil
 }
 
@@ -416,6 +679,9 @@ func recordCommunity(out *DerivedOutcome, result community.Result, ran bool) {
 	out.put(metaCommunityCertifiedCallRows, result.CertifiedCallRows)
 	out.put(metaCommunityExcludedCallRows, result.ExcludedCallRows)
 	out.put(metaCommunityHoldoutCommits, result.HoldoutCommitsUsed)
+	out.Metadata[metaCommunityWindowStart] = result.WindowStart
+	out.Metadata[metaCommunityWindowEnd] = result.WindowEnd
+	out.Metadata[metaCommunityCallDigest] = result.CallGraphDigest
 }
 
 func recordProcess(out *DerivedOutcome, result process.Result, ran bool) {

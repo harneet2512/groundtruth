@@ -344,6 +344,18 @@ type Result struct {
 	// Shallow records that the checkout is grafted, independently of whether
 	// that cost anything.
 	Shallow bool
+	// WindowStart and WindowEnd bound the whole history the build walked —
+	// fit window and holdout together — following cochange.Result's naming:
+	// oldest and newest commit SHA respectively, both empty when the walk
+	// abstained. The batch-amend path compares them against the checkout's
+	// current bounds to prove the partition was fitted over the same history.
+	WindowStart string
+	WindowEnd   string
+	// CallGraphDigest pins the certified call-edge multiset the partition was
+	// fitted over. Two runs that agree on it clustered the same structural
+	// input; the window bounds cover the evolutionary half. See
+	// CertifiedCallGraphDigest for the standalone read the amend path makes.
+	CallGraphDigest string
 
 	// OverallCohesion is the held-out prediction rate across the whole
 	// partition: of the held-out co-changed file pairs whose BOTH endpoints
@@ -387,6 +399,7 @@ func Build(ctx context.Context, q Queryer, repoRoot string, opts Options) (Resul
 	}
 	res.CertifiedCallRows = stats.certified
 	res.ExcludedCallRows = stats.excluded
+	res.CallGraphDigest = callGraphDigest(calls)
 
 	hist, err := loadHistory(ctx, repoRoot, effective)
 	if err != nil {
@@ -400,6 +413,8 @@ func Build(ctx context.Context, q Queryer, repoRoot string, opts Options) (Resul
 	res.HoldoutSkipped = hist.HoldoutSkipped
 	res.HoldoutOldest = hist.HoldoutOldest
 	res.HoldoutNewest = hist.HoldoutNewest
+	res.WindowStart = hist.WindowStart
+	res.WindowEnd = hist.WindowEnd
 
 	g := buildFileGraph(calls, hist.FitPairs, effective)
 	res.Files = len(g.files)

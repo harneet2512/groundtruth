@@ -12,7 +12,7 @@ func TestBatchStructureRejectsTamperedRowsAndRollsBack(t *testing.T) {
 	}
 	defer db.Close()
 	node := &Node{Label: "Function", Name: "work", FilePath: "work.py", Language: "python", FileHash: "source"}
-	ids, _, err := db.ReplaceParsedStructure([]*Node{node}, false, "")
+	ids, _, err := db.ReplaceParsedStructure([]*Node{node}, false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestBatchStructureRejectsTamperedRowsAndRollsBack(t *testing.T) {
 	if _, err := db.db.Exec(`UPDATE nodes SET signature='tampered' WHERE id=?`, ids[0]); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := db.ReplaceParsedStructure([]*Node{node}, true, receipt.ExecutableSHA256); err == nil {
+	if _, _, err := db.ReplaceParsedStructure([]*Node{node}, true, receipt.ExecutableSHA256, false); err == nil {
 		t.Fatal("tampered source row was retained")
 	}
 	if got := metaValueOrEmpty(db.db, CorePhaseReceiptSHA256Key); got != digest {
@@ -56,10 +56,10 @@ func TestBatchStructureRejectsMissingInventory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := db.ReplaceParsedStructure(nil, true, receipt.ExecutableSHA256); err == nil {
+	if _, _, err := db.ReplaceParsedStructure(nil, true, receipt.ExecutableSHA256, false); err == nil {
 		t.Fatal("legacy parent accepted without inventory")
 	}
-	if _, _, err := db.ReplaceParsedStructure(nil, true, "other-producer"); err == nil {
+	if _, _, err := db.ReplaceParsedStructure(nil, true, "other-producer", false); err == nil {
 		t.Fatal("foreign producer accepted")
 	}
 }

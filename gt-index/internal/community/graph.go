@@ -127,6 +127,35 @@ func loadCertifiedCallEdges(ctx context.Context, q Queryer) ([]callEdge, edgeSta
 	return out, stats, nil
 }
 
+// callGraphDigest hashes the clustered call input — the (FileA, FileB)
+// multiset the weight accumulation sees — so a caller can prove two certified
+// call populations are the same input without retaining the edge list. Edge
+// ids are deliberately absent: they are database-local rowids, renumbered on
+// every rebuild of the same logical graph, and the partition does not read
+// them.
+func callGraphDigest(calls []callEdge) string {
+	pairs := make([]string, 0, len(calls))
+	for _, e := range calls {
+		pairs = append(pairs, e.FileA+"\x00"+e.FileB)
+	}
+	sort.Strings(pairs)
+	sum := sha256.Sum256([]byte(strings.Join(pairs, "\x01")))
+	return hex.EncodeToString(sum[:])
+}
+
+// CertifiedCallGraphDigest returns the digest of the certified cross-file
+// CALLS edge multiset a Build over q would cluster. The batch-amend path uses
+// it to prove the parent's community partition still answers the amended
+// graph — the co-change window key covers the history half of the input, and
+// this digest covers the structural half.
+func CertifiedCallGraphDigest(ctx context.Context, q Queryer) (string, error) {
+	calls, _, err := loadCertifiedCallEdges(ctx, q)
+	if err != nil {
+		return "", err
+	}
+	return callGraphDigest(calls), nil
+}
+
 // arc is one weighted adjacency entry. Adjacency lists are kept sorted by to,
 // which is what makes the local-moving sweep order reproducible.
 type arc struct {
