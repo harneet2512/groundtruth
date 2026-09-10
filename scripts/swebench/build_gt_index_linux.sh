@@ -70,7 +70,10 @@ BUILD_TAGS="netgo,osusergo,sqlite_fts5"
 # Hash every checked-in compiler input, including C/C++ headers. Relative paths
 # are part of the digest so renames are identity changes while checkout location
 # is not. The toolchain and build tags are bound separately below.
-SOURCE_FINGERPRINT="$(cd "$SRC_DIR" && find . -type f \( -name '*.go' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.s' -o -name 'go.mod' -o -name 'go.sum' \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+# sha256sum emits `hash *path` on Windows/MSYS but `hash  path` on Linux, so the
+# outer digest differed by build host for identical content. Normalize the mode
+# marker to two spaces before the outer hash so the fingerprint is canonical.
+SOURCE_FINGERPRINT="$(cd "$SRC_DIR" && find . -type f \( -name '*.go' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.s' -o -name 'go.mod' -o -name 'go.sum' \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sed 's/^\([0-9a-f]\{64\}\) \*/\1  /' | sha256sum | awk '{print $1}')"
 
 LDFLAGS="-X main.commitSHA=${COMMIT_SHA} -X main.buildTimeUTC=${BUILD_TIME_UTC} -X main.sourceFingerprint=${SOURCE_FINGERPRINT} -X main.compiledBuildTags=${BUILD_TAGS}"
 
