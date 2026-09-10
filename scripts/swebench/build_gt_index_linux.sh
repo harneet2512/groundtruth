@@ -114,13 +114,17 @@ case "$mode" in
     # `go build` fails its VCS stamping with "error obtaining VCS status".
     # Trust the mount rather than passing -buildvcs=false: that stamping is
     # part of the binary identity this script exists to produce.
-    docker run --rm \
+    # MSYS_NO_PATHCONV/MSYS2_ARG_CONV_EXCL must scope to THIS call only: blanket
+    # env vars would also disable conversion for git -C "$REPO_DIR" above, and a
+    # POSIX path git cannot read fails --verify HEAD and silently falls back to
+    # the worktree fingerprint (measured: stamped 377487af instead of fb3af740).
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm \
       -e GIT_CONFIG_COUNT=1 \
       -e GIT_CONFIG_KEY_0=safe.directory \
       -e GIT_CONFIG_VALUE_0=/workspace \
       -e HOST_UID="$(id -u)" \
       -e HOST_GID="$(id -g)" \
-      -v "$REPO_DIR":/workspace \
+      -v "$(cygpath -w "$REPO_DIR" 2>/dev/null || printf '%s' "$REPO_DIR")":/workspace \
       -w /workspace/gt-index \
       "$GO_IMAGE" \
       bash -c "set -euo pipefail; \
