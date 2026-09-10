@@ -64,10 +64,13 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 		return nil, 0, err
 	}
 	rows.Close()
+	if err := ensureParsedFactInventoryTx(tx); err != nil {
+		return nil, 0, err
+	}
 	// Parent pointers are resolved from this revision's complete parser inputs
 	// after this transaction. Never carry an old resolution or analysis receipt.
 	if amend {
-		for _, table := range []string{"resolution_candidates", "resolution_callsites", "resolution_symbols", "closure", "community_members", "communities", "process_steps", "processes", "cochanges", "edges", "assertions", "properties", "file_hashes", "project_meta"} {
+		for _, table := range []string{"resolution_candidates", "resolution_callsites", "resolution_symbols", "closure", "community_members", "communities", "process_steps", "processes", "cochanges", "file_hashes", "project_meta"} {
 			var exists int
 			if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
 				return nil, 0, err
@@ -123,6 +126,20 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 		}
 	}
 	if amend {
+		// Only parser-owned facts on retained nodes survive into pass 4. That
+		// pass rechecks all values, including every assertion's new target.
+		for _, statement := range []string{
+			`DELETE FROM parser_edge_inventory WHERE edge_id IN (SELECT id FROM edges WHERE source_id NOT IN (SELECT node_id FROM parser_node_inventory) OR target_id NOT IN (SELECT node_id FROM parser_node_inventory))`,
+			`DELETE FROM edges WHERE id NOT IN (SELECT edge_id FROM parser_edge_inventory)`,
+			`DELETE FROM parser_property_inventory WHERE property_id IN (SELECT id FROM properties WHERE node_id NOT IN (SELECT node_id FROM parser_node_inventory))`,
+			`DELETE FROM properties WHERE id NOT IN (SELECT property_id FROM parser_property_inventory)`,
+			`DELETE FROM parser_assertion_inventory WHERE assertion_id IN (SELECT id FROM assertions WHERE test_node_id NOT IN (SELECT node_id FROM parser_node_inventory))`,
+			`DELETE FROM assertions WHERE id NOT IN (SELECT assertion_id FROM parser_assertion_inventory)`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				return nil, 0, err
+			}
+		}
 		if _, err := tx.Exec(`DELETE FROM nodes WHERE id NOT IN (SELECT node_id FROM parser_node_inventory)`); err != nil {
 			return nil, 0, err
 		}

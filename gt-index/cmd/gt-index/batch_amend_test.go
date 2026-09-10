@@ -28,6 +28,14 @@ func TestBatchAmendRetainsUnchangedStructureAndParent(t *testing.T) {
 	root := t.TempDir()
 	repo := filepath.Join(root, "repo")
 	writeDerivedFixtureRepo(t, repo)
+	callerPath := filepath.Join(repo, "caller.py")
+	callerSource, err := os.ReadFile(callerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(callerPath, append(callerSource, []byte("\nclass Stable:\n    def method(self):\n        return 1\n")...), 0600); err != nil {
+		t.Fatal(err)
+	}
 	parent := filepath.Join(root, "parent.db")
 	cmd := exec.Command(bin, "-root", repo, "-output", parent)
 	cmd.Env = append(os.Environ(), "GT_PARSE_CACHE_ROOT="+filepath.Join(root, "cache"))
@@ -39,6 +47,16 @@ func TestBatchAmendRetainsUnchangedStructureAndParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldCaller := batchNodeID(t, parent, "caller.py", "run")
+	propertyQuery := `SELECT p.id,p.kind,p.value,p.line FROM properties p JOIN nodes n ON n.id=p.node_id WHERE n.file_path='caller.py' AND p.kind='param'`
+	oldProperties := batchQueryRows(t, parent, propertyQuery)
+	edgeQuery := `SELECT e.id,e.source_id,e.target_id,e.type FROM edges e WHERE e.source_file='caller.py' AND e.type='CONTAINS'`
+	oldEdges := batchQueryRows(t, parent, edgeQuery)
+	if len(oldEdges) == 0 {
+		t.Fatal("fixture has no containment edges")
+	}
+	if len(oldProperties) == 0 {
+		t.Fatal("fixture has no unchanged parser properties")
+	}
 	oldLeaf := batchNodeID(t, parent, "mod.py", "leaf")
 	path := filepath.Join(repo, "mod.py")
 	data, err := os.ReadFile(path)
@@ -56,12 +74,14 @@ func TestBatchAmendRetainsUnchangedStructureAndParent(t *testing.T) {
 		t.Fatalf("amend: %v\n%s", err, out)
 	}
 	var summary struct {
-		Mode           string `json:"build_mode"`
-		Retained       int    `json:"parser_nodes_retained"`
-		Inserted       int    `json:"parser_nodes_inserted"`
-		CacheHits      int    `json:"parse_cache_hits"`
-		CacheMisses    int    `json:"parse_cache_misses"`
-		ResolverPasses int    `json:"resolver_passes"`
+		Mode               string `json:"build_mode"`
+		Retained           int    `json:"parser_nodes_retained"`
+		Inserted           int    `json:"parser_nodes_inserted"`
+		CacheHits          int    `json:"parse_cache_hits"`
+		CacheMisses        int    `json:"parse_cache_misses"`
+		ResolverPasses     int    `json:"resolver_passes"`
+		PropertiesRetained int    `json:"parser_properties_retained"`
+		EdgesRetained      int    `json:"parser_edges_retained"`
 	}
 	if err := json.Unmarshal(out, &summary); err != nil {
 		t.Fatalf("invalid producer summary: %v: %s", err, out)
@@ -69,8 +89,17 @@ func TestBatchAmendRetainsUnchangedStructureAndParent(t *testing.T) {
 	if summary.Mode != "batch" || summary.Retained < 1 || summary.Inserted < 1 || summary.CacheHits != 2 || summary.CacheMisses != 1 || summary.ResolverPasses != 1 {
 		t.Fatalf("missing or inaccurate batch work counters: %+v", summary)
 	}
+	if summary.PropertiesRetained < len(oldProperties) || summary.EdgesRetained < len(oldEdges) {
+		t.Fatalf("missing structural work counters: %+v", summary)
+	}
 	if got := batchNodeID(t, candidate, "caller.py", "run"); got != oldCaller {
 		t.Fatalf("unchanged node rebuilt: %d -> %d", oldCaller, got)
+	}
+	if got := batchQueryRows(t, candidate, propertyQuery); !reflect.DeepEqual(got, oldProperties) {
+		t.Fatalf("unchanged parser properties rebuilt: %v -> %v", oldProperties, got)
+	}
+	if got := batchQueryRows(t, candidate, edgeQuery); !reflect.DeepEqual(got, oldEdges) {
+		t.Fatalf("unchanged containment edges rebuilt: %v -> %v", oldEdges, got)
 	}
 	if got := batchNodeID(t, candidate, "mod.py", "leaf"); got == oldLeaf {
 		t.Fatal("changed structural row was not replaced")
