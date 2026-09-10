@@ -667,6 +667,8 @@ def _detect_runner(command: list[str]) -> str:
         base = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
         if base.endswith("pytest") or base == "tox":
             return "pytest"
+        if base == "unittest":
+            return "unittest"
         if base == "go":
             return "go"
         if base == "cargo":
@@ -720,6 +722,24 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
         for pattern, key in pattern_pairs:
             for match in re.findall(pattern, text):
                 counts[key] = max(counts[key], int(match))
+
+    if runner == "unittest":
+        for result in re.finditer(
+            r"(?m)^Ran\s+(\d+)\s+tests?\b[^\n]*\n\s*(OK|FAILED)(?:\s+\(([^)\n]*)\))?",
+            text,
+        ):
+            summary = dict(
+                (key.strip(), int(value))
+                for key, value in re.findall(r"([a-z ]+)=(\d+)", result.group(3) or "")
+            )
+            failed = summary.get("failures", 0) + summary.get("unexpected successes", 0)
+            errored = summary.get("errors", 0)
+            not_passed = (
+                failed + errored + summary.get("skipped", 0) + summary.get("expected failures", 0)
+            )
+            counts["failed"] += failed
+            counts["errored"] += errored
+            counts["passed"] += max(0, int(result.group(1)) - not_passed)
 
     # go test: "--- FAIL:" per failing test, "PASS" per package.
     if runner == "go":
@@ -782,29 +802,36 @@ def _parse_failing_test_names(text: str) -> list[str]:
     of the marker; never treat the progress bracket as a test name.
     """
     names: list[str] = []
+    seen: set[str] = set()
     text = _RE_ANSI_CSI.sub("", text)
     for pattern in (
         r"^(\S+::\S+)\s+FAILED(?:\s|$)",
         r"^FAILED\s+(\S+::\S+?)(?:\s+-|\s*$)",
         r"^--- FAIL:\s+([^\s(]+)",
+        r"^(?:FAIL|ERROR|UNEXPECTED SUCCESS):\s+\S+\s+\(([^)\n]+)\)",
     ):
         for match in re.findall(pattern, text, re.MULTILINE):
-            if match not in names:
+            if match not in seen:
+                seen.add(match)
                 names.append(match)
-    return names[:20]
+    return names
 
 
 def _parse_passing_test_names(text: str) -> list[str]:
-    """Return stable pytest node identities explicitly reported as passing."""
+    """Return all explicitly passing pytest/unittest identities, never a preview."""
     names: list[str] = []
+    seen: set[str] = set()
+    text = _RE_ANSI_CSI.sub("", text)
     for pattern in (
         r"^(\S+::\S+)\s+PASSED(?:\s|$)",
         r"^PASSED\s+(\S+::\S+?)(?:\s|$)",
+        r"^\S+\s+\(([^)\n]+)\)\s+\.\.\.\s+ok\s*$",
     ):
         for match in re.findall(pattern, text or "", re.MULTILINE):
-            if match not in names:
+            if match not in seen:
+                seen.add(match)
                 names.append(match)
-    return names[:20]
+    return names
 
 
 def _parse_requested_test_names(command: str) -> list[str]:
