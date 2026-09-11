@@ -22,6 +22,15 @@ commits are authoritative (latest corrections + verifier-found fixes).
 | `4280fe31` | L0.5 | Rust crate/src/module probe in resolveModulePath |
 | `571bda88` | L0.5 | Cargo.toml glob expansion + type_flow :: separator (verifier bugs) |
 
+## Session changes (derived MCP surfaces 2026-09-10)
+
+| Commit | Layer | What changed |
+|---|---|---|
+| `c4d4a54f` | L0.5/resolver | Renumbering-invariant cross-file picks — (file, start_line, id) order, not raw AUTOINCREMENT id; amend resolves the same logical targets as a rebuild |
+| `87d755a6` | L0/amend | Batch amends carry parent `cochanges`/`communities` when the recorded coupling receipt's history window matches |
+| `fceae84c` | 4.1/MCP | Six derived-table endpoints: `gt_trace`, `gt_detect_changes`, `gt_route_map`, `gt_api_impact`, `gt_closure`, `gt_community` — typed-abstention reads of `closure`, `processes`/`process_steps`, `communities`, `HANDLES_ROUTE`/`API_CALL` edges, git diff. Contract: `kernel/DERIVED_ENDPOINTS.md` |
+| `df9b983b` | 4.1/MCP | ruff format over the new modules (no behavior) |
+
 ---
 
 ## Layer Map
@@ -49,6 +58,7 @@ commits are authoritative (latest corrections + verifier-found fixes).
 | 2.9 | Grep Intercept | wrapper | Agent runs grep/rg | WORKING |
 | 3 | Consensus / Localization | wrapper | Agent views brief candidate | WORKING |
 | 4.1 | MCP Tools | `server.py` | Agent calls tool | WORKING (0% adoption) |
+| 4.1+ | Derived-table MCP endpoints | `composite.py` + `endpoints/` | Agent calls `gt_*` tool | WORKING — contract in `kernel/DERIVED_ENDPOINTS.md` |
 | 4.2 | L4b Tool-as-Hooks | wrapper via `classify_tool_event()` | OH native tool events | WORKING |
 | 4.3 | Stuck Detector Compat | wrapper | Repeated identical observations | WORKING |
 | 5.1 | Dedup | wrapper | Every evidence delivery | WORKING |

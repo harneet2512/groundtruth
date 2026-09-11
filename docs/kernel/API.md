@@ -257,6 +257,8 @@ class PullResult(BaseModel):
 
 The kernel routes `pull` to existing MCP tool handlers in `src/groundtruth/mcp/tools.py` (`handle_trace`, `handle_impact`, `handle_hotspots`, `handle_validate`, `handle_context`, `handle_symbols`). The kernel does not duplicate logic; it is a router with telemetry.
 
+The derived-table `gt_*` endpoints on the same surface (`gt_trace`, `gt_detect_changes`, `gt_route_map`, `gt_api_impact`, `gt_closure`, `gt_community`) are documented in `docs/kernel/DERIVED_ENDPOINTS.md`.
+
 ### `DriftSignals`
 
 ```python
