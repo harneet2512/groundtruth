@@ -1,7 +1,6 @@
 import sqlite3
 from types import SimpleNamespace
 
-import pytest
 
 import groundtruth.runtime.gateway as gateway
 from groundtruth.runtime.gateway import (

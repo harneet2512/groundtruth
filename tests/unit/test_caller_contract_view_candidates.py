@@ -1,6 +1,5 @@
 import sqlite3
 
-import pytest
 
 from groundtruth.runtime.gateway import (
     GatewayState,
