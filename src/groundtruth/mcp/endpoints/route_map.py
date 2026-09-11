@@ -171,7 +171,11 @@ def _collect_routes(
         for route in routes:
             if route["file_node"] != row["target_id"]:
                 continue
-            route_level = bool(meta_route) and route["name"] not in (_UNKNOWN_ROUTE,) and meta_route == route["name"]
+            route_level = (
+                bool(meta_route)
+                and route["name"] not in (_UNKNOWN_ROUTE,)
+                and meta_route == route["name"]
+            )
             if meta_route and route["name"] != _UNKNOWN_ROUTE and meta_route != route["name"]:
                 continue  # a different known route in the same file
             route["consumers"].append(

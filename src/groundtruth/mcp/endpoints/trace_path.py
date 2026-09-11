@@ -64,9 +64,7 @@ def _resolution_failure(endpoint: str, res: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _neighbors(
-    conn: Any, node_id: int
-) -> list[tuple[int, str, float]]:
+def _neighbors(conn: Any, node_id: int) -> list[tuple[int, str, float]]:
     """Forward adjacency for one node: (target_id, relation, confidence).
 
     Edge hops carry the stored edge confidence. Containment hops from
@@ -128,7 +126,9 @@ def run_trace(
     src = from_res["node"]
     dst = to_res["node"]
 
-    def _step(node: dict[str, Any], relation: str | None, confidence: float | None) -> dict[str, Any]:
+    def _step(
+        node: dict[str, Any], relation: str | None, confidence: float | None
+    ) -> dict[str, Any]:
         return {
             "symbol": node["symbol"],
             "file": node["file"],
@@ -164,11 +164,20 @@ def run_trace(
             "stable_id FROM nodes WHERE id = ?",
             (node_id,),
         ).fetchone()
-        info = _graph_db._node_dict(row) if row is not None else {
-            "id": node_id, "symbol": f"node#{node_id}", "qualified_name": None,
-            "file": "", "line": None, "end_line": None, "label": "unknown",
-            "stable_id": None,
-        }
+        info = (
+            _graph_db._node_dict(row)
+            if row is not None
+            else {
+                "id": node_id,
+                "symbol": f"node#{node_id}",
+                "qualified_name": None,
+                "file": "",
+                "line": None,
+                "end_line": None,
+                "label": "unknown",
+                "stable_id": None,
+            }
+        )
         node_cache[node_id] = info
         return info
 
@@ -267,8 +276,6 @@ async def handle_gt_trace(
         t.respond(
             response_type="trace_path",
             verdict=status.upper(),
-            output_summary=(
-                f"{from_symbol} -> {to_symbol}: {status}"
-            ),
+            output_summary=(f"{from_symbol} -> {to_symbol}: {status}"),
         )
         return result

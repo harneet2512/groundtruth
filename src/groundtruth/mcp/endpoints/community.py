@@ -39,8 +39,7 @@ def _top_members(conn: Any, community_id: str, limit: int) -> list[str]:
         return []
     try:
         rows = conn.execute(
-            "SELECT member FROM community_members WHERE community_id = ? "
-            "ORDER BY member LIMIT ?",
+            "SELECT member FROM community_members WHERE community_id = ? ORDER BY member LIMIT ?",
             (community_id, limit),
         ).fetchall()
     except Exception as exc:
@@ -61,9 +60,7 @@ def run_community(
     if conn is None or not _graph_db.has_tables(conn, "communities"):
         return {
             "status": "unavailable",
-            "reason": (
-                "graph_tables_absent" if conn is None else "communities_table_absent"
-            ),
+            "reason": ("graph_tables_absent" if conn is None else "communities_table_absent"),
             "communities": [],
             "truncated": False,
         }
@@ -86,9 +83,7 @@ def run_community(
         clauses.append("(label = ? OR heuristic_label = ? OR label LIKE ?)")
         params.extend([name, name, f"%{name}%"])
     if member is not None:
-        clauses.append(
-            "id IN (SELECT community_id FROM community_members WHERE member = ?)"
-        )
+        clauses.append("id IN (SELECT community_id FROM community_members WHERE member = ?)")
         params.append(member)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
@@ -153,9 +148,7 @@ async def handle_gt_community(
 
     with _tracer.trace("gt_community", input_summary="community decomposition") as t:
         conn = _graph_db.store_connection(store)
-        result = run_community(
-            conn, name=name, member=member, max_communities=limit
-        )
+        result = run_community(conn, name=name, member=member, max_communities=limit)
         status = result.get("status", "unavailable")
         t.log_component(
             "communities_table",

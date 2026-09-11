@@ -59,9 +59,7 @@ def open_connection(db_path: str) -> sqlite3.Connection | None:
 def has_tables(conn: sqlite3.Connection, *names: str) -> bool:
     """True iff every named table exists in the connected db."""
     try:
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     except sqlite3.Error:
         return False
     present = {r[0] for r in rows}
@@ -126,9 +124,7 @@ def resolve_symbol(
     return {"status": "ok", "node": nodes[0]}
 
 
-def stable_ids_for_nodes(
-    conn: sqlite3.Connection, node_ids: list[int]
-) -> dict[int, str]:
+def stable_ids_for_nodes(conn: sqlite3.Connection, node_ids: list[int]) -> dict[int, str]:
     """Map node ids to stable ids using the producer's two-source join.
 
     Mirrors ``gt-index/internal/process/process.go`` ``readStableIDs``:
@@ -164,9 +160,7 @@ def stable_ids_for_nodes(
     return out
 
 
-def symbol_names_for_stable_ids(
-    conn: sqlite3.Connection, stable_ids: list[str]
-) -> dict[str, str]:
+def symbol_names_for_stable_ids(conn: sqlite3.Connection, stable_ids: list[str]) -> dict[str, str]:
     """Map stable ids back to display names (qualified_name preferred).
 
     Reads ``resolution_symbols`` only; when the table or the row is absent the
@@ -218,22 +212,52 @@ def read_source_line(root_path: str, file_path: str, line: int | None) -> str:
 
 _ROUTE_LINE_PATTERNS: list[tuple[re.Pattern[str], int, int]] = [
     # Python: @app.get("/path") / @router.post("/path") / @app.route("/path")
-    (re.compile(r'^\s*@(?:app|router|api)\.(get|post|put|delete|patch|route)\s*\(\s*["\']([^"\']+)["\']'), 1, 2),
+    (
+        re.compile(
+            r'^\s*@(?:app|router|api)\.(get|post|put|delete|patch|route)\s*\(\s*["\']([^"\']+)["\']'
+        ),
+        1,
+        2,
+    ),
     # Java/Kotlin: @GetMapping("/path") / @RequestMapping(value="/path")
-    (re.compile(r'@(Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']'), 1, 2),
+    (
+        re.compile(
+            r'@(Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']'
+        ),
+        1,
+        2,
+    ),
     # TS NestJS: @Get("/path") / @Post("/path")
     (re.compile(r'^\s*@(Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*["\']([^"\']+)["\']'), 1, 2),
     # JS/TS: app.get("/path") / router.post("/path")
-    (re.compile(r'^\s*(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*["\']([^"\']+)["\']'), 1, 2),
+    (
+        re.compile(r'^\s*(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*["\']([^"\']+)["\']'),
+        1,
+        2,
+    ),
     # Go: r.HandleFunc("/path", h) / mux.Handle("/path", h) / r.GET("/path", h)
-    (re.compile(r'^\s*[\w.]+\.(HandleFunc|Handle|GET|POST|PUT|PATCH|DELETE)\s*\(\s*["\']([^"\']+)["\']'), 1, 2),
+    (
+        re.compile(
+            r'^\s*[\w.]+\.(HandleFunc|Handle|GET|POST|PUT|PATCH|DELETE)\s*\(\s*["\']([^"\']+)["\']'
+        ),
+        1,
+        2,
+    ),
 ]
 
 _VERB_MAP = {
-    "get": "GET", "post": "POST", "put": "PUT", "delete": "DELETE",
-    "patch": "PATCH", "options": "OPTIONS", "head": "HEAD",
-    "getmapping": "GET", "postmapping": "POST", "putmapping": "PUT",
-    "deletemapping": "DELETE", "patchmapping": "PATCH",
+    "get": "GET",
+    "post": "POST",
+    "put": "PUT",
+    "delete": "DELETE",
+    "patch": "PATCH",
+    "options": "OPTIONS",
+    "head": "HEAD",
+    "getmapping": "GET",
+    "postmapping": "POST",
+    "putmapping": "PUT",
+    "deletemapping": "DELETE",
+    "patchmapping": "PATCH",
 }
 
 
@@ -248,15 +272,11 @@ def normalize_route_path(raw: str) -> str:
     if "://" in p:
         rest = p.split("://", 1)[1]
         if "/" in rest:
-            p = rest[rest.index("/"):]
+            p = rest[rest.index("/") :]
         else:
             return "/"
     p = p.split("?", 1)[0].split("#", 1)[0]
-    cleaned = [
-        seg
-        for seg in p.split("/")
-        if seg and not seg.startswith(("{", ":", "<"))
-    ]
+    cleaned = [seg for seg in p.split("/") if seg and not seg.startswith(("{", ":", "<"))]
     return "/" + "/".join(cleaned) if cleaned else "/"
 
 

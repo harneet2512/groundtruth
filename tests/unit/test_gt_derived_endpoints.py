@@ -191,17 +191,108 @@ _NODE_ROWS = [
     (1, "Function", "entry_fn", "a.entry_fn", "src/a.py", 1, 10, 1, 0, "python", None, "sym.entry"),
     (2, "Function", "mid_fn", "b.mid_fn", "src/b.py", 1, 12, 1, 0, "python", None, "sym.mid"),
     (3, "Function", "leaf_fn", "c.leaf_fn", "src/c.py", 1, 8, 1, 0, "python", None, "sym.leaf"),
-    (4, "Function", "orphan_fn", "d.orphan_fn", "src/d.py", 1, 6, 1, 0, "python", None, "sym.orphan"),
+    (
+        4,
+        "Function",
+        "orphan_fn",
+        "d.orphan_fn",
+        "src/d.py",
+        1,
+        6,
+        1,
+        0,
+        "python",
+        None,
+        "sym.orphan",
+    ),
     (5, "Class", "Foo", "e.Foo", "src/e.py", 1, 20, 1, 0, "python", None, "sym.Foo"),
     (6, "Method", "bar", "e.Foo.bar", "src/e.py", 5, 10, 1, 0, "python", 5, "sym.Foo.bar"),
     (7, "Function", "dup", "d1.dup", "src/dup1.py", 1, 6, 1, 0, "python", None, "sym.dup1"),
     (8, "Function", "dup", "d2.dup", "src/dup2.py", 1, 6, 1, 0, "python", None, "sym.dup2"),
-    (9, "Function", "list_users", "api.list_users", "src/api.py", 5, 15, 1, 0, "python", None, "sym.list_users"),
-    (10, "File", "src/api.py", "src/api.py", "src/api.py", 1, 2, 0, 0, "python", None, "sym.file.api"),
-    (11, "File", "src/client.py", "src/client.py", "src/client.py", 1, 2, 0, 0, "python", None, "sym.file.client"),
-    (12, "Function", "test_leaf_flow", "tests.test_leaf_flow", "tests/test_flow.py", 1, 10, 0, 1, "python", None, "sym.testleaf"),
-    (13, "File", "src/api2.py", "src/api2.py", "src/api2.py", 1, 2, 0, 0, "python", None, "sym.file.api2"),
-    (14, "Function", "create_order", "api2.create_order", "src/api2.py", 5, 14, 1, 0, "python", None, "sym.create_order"),
+    (
+        9,
+        "Function",
+        "list_users",
+        "api.list_users",
+        "src/api.py",
+        5,
+        15,
+        1,
+        0,
+        "python",
+        None,
+        "sym.list_users",
+    ),
+    (
+        10,
+        "File",
+        "src/api.py",
+        "src/api.py",
+        "src/api.py",
+        1,
+        2,
+        0,
+        0,
+        "python",
+        None,
+        "sym.file.api",
+    ),
+    (
+        11,
+        "File",
+        "src/client.py",
+        "src/client.py",
+        "src/client.py",
+        1,
+        2,
+        0,
+        0,
+        "python",
+        None,
+        "sym.file.client",
+    ),
+    (
+        12,
+        "Function",
+        "test_leaf_flow",
+        "tests.test_leaf_flow",
+        "tests/test_flow.py",
+        1,
+        10,
+        0,
+        1,
+        "python",
+        None,
+        "sym.testleaf",
+    ),
+    (
+        13,
+        "File",
+        "src/api2.py",
+        "src/api2.py",
+        "src/api2.py",
+        1,
+        2,
+        0,
+        0,
+        "python",
+        None,
+        "sym.file.api2",
+    ),
+    (
+        14,
+        "Function",
+        "create_order",
+        "api2.create_order",
+        "src/api2.py",
+        5,
+        14,
+        1,
+        0,
+        "python",
+        None,
+        "sym.create_order",
+    ),
 ]
 
 _EDGE_ROWS = [
@@ -256,15 +347,70 @@ _EDGE_ROWS = [
 
 _RESOLUTION_SYMBOL_ROWS = [
     # stable_id, native_id (= nodes.id as str), native_kind, normalized_kind, language, path, qualified_name, start, end, export_status
-    ("sym.entry", "1", "function", "function", "python", "src/a.py", "a.entry_fn", 1, 10, "exported"),
+    (
+        "sym.entry",
+        "1",
+        "function",
+        "function",
+        "python",
+        "src/a.py",
+        "a.entry_fn",
+        1,
+        10,
+        "exported",
+    ),
     ("sym.mid", "2", "function", "function", "python", "src/b.py", "b.mid_fn", 1, 12, "exported"),
     ("sym.leaf", "3", "function", "function", "python", "src/c.py", "c.leaf_fn", 1, 8, "exported"),
-    ("sym.orphan", "4", "function", "function", "python", "src/d.py", "d.orphan_fn", 1, 6, "exported"),
+    (
+        "sym.orphan",
+        "4",
+        "function",
+        "function",
+        "python",
+        "src/d.py",
+        "d.orphan_fn",
+        1,
+        6,
+        "exported",
+    ),
     ("sym.Foo", "5", "class", "class", "python", "src/e.py", "e.Foo", 1, 20, "exported"),
     ("sym.Foo.bar", "6", "method", "method", "python", "src/e.py", "e.Foo.bar", 5, 10, "exported"),
-    ("sym.list_users", "9", "function", "function", "python", "src/api.py", "api.list_users", 5, 15, "exported"),
-    ("sym.testleaf", "12", "function", "function", "python", "tests/test_flow.py", "tests.test_leaf_flow", 1, 10, "exported"),
-    ("sym.create_order", "14", "function", "function", "python", "src/api2.py", "api2.create_order", 5, 14, "exported"),
+    (
+        "sym.list_users",
+        "9",
+        "function",
+        "function",
+        "python",
+        "src/api.py",
+        "api.list_users",
+        5,
+        15,
+        "exported",
+    ),
+    (
+        "sym.testleaf",
+        "12",
+        "function",
+        "function",
+        "python",
+        "tests/test_flow.py",
+        "tests.test_leaf_flow",
+        1,
+        10,
+        "exported",
+    ),
+    (
+        "sym.create_order",
+        "14",
+        "function",
+        "function",
+        "python",
+        "src/api2.py",
+        "api2.create_order",
+        5,
+        14,
+        "exported",
+    ),
 ]
 
 _ASSERTION_ROWS = [
@@ -325,23 +471,23 @@ _COMMUNITY_MEMBER_ROWS = [
     ("comm-1", "src/client.py", "file"),
 ]
 
-_API_PY = '''from fastapi import FastAPI
+_API_PY = """from fastapi import FastAPI
 
 app = FastAPI()
 
 @app.get("/api/users")
 def list_users():
     return []
-'''
+"""
 
-_API2_PY = '''from fastapi import FastAPI
+_API2_PY = """from fastapi import FastAPI
 
 app = FastAPI()
 
 @app.post("/api/orders")
 def create_order():
     return {}
-'''
+"""
 
 
 def _write_source_files(root: Path) -> None:
@@ -361,7 +507,9 @@ def _make_db(
 ) -> None:
     """Seed the fixture graph.db described in the module docstring."""
     conn = sqlite3.connect(path)
-    conn.executescript(_NODES_DDL + _EDGES_DDL + _RESOLUTION_SYMBOLS_DDL + _ASSERTIONS_DDL + _PROJECT_META_DDL)
+    conn.executescript(
+        _NODES_DDL + _EDGES_DDL + _RESOLUTION_SYMBOLS_DDL + _ASSERTIONS_DDL + _PROJECT_META_DDL
+    )
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path, start_line, "
         "end_line, is_exported, is_test, language, parent_id, stable_id) "
@@ -388,8 +536,7 @@ def _make_db(
     if with_closure:
         conn.executescript(_CLOSURE_DDL)
         conn.executemany(
-            "INSERT INTO closure (source_id, target_id, depth, min_confidence) "
-            "VALUES (?,?,?,?)",
+            "INSERT INTO closure (source_id, target_id, depth, min_confidence) VALUES (?,?,?,?)",
             _CLOSURE_ROWS,
         )
         conn.execute(
@@ -420,8 +567,7 @@ def _make_db(
             _COMMUNITY_ROWS,
         )
         conn.executemany(
-            "INSERT INTO community_members (community_id, member, member_kind) "
-            "VALUES (?,?,?)",
+            "INSERT INTO community_members (community_id, member, member_kind) VALUES (?,?,?)",
             _COMMUNITY_MEMBER_ROWS,
         )
     conn.commit()
@@ -454,8 +600,11 @@ class TestGtTrace:
         from groundtruth.mcp.endpoints.trace_path import handle_gt_trace
 
         result = await handle_gt_trace(
-            "entry_fn", "leaf_fn",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            "entry_fn",
+            "leaf_fn",
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         symbols = [step["symbol"] for step in result["path"]]
@@ -472,8 +621,11 @@ class TestGtTrace:
         from groundtruth.mcp.endpoints.trace_path import handle_gt_trace
 
         result = await handle_gt_trace(
-            "entry_fn", "bar",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            "entry_fn",
+            "bar",
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         symbols = [step["symbol"] for step in result["path"]]
@@ -485,8 +637,11 @@ class TestGtTrace:
         from groundtruth.mcp.endpoints.trace_path import handle_gt_trace
 
         result = await handle_gt_trace(
-            "leaf_fn", "entry_fn",  # directed: leaf never reaches entry
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            "leaf_fn",
+            "entry_fn",  # directed: leaf never reaches entry
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "no_path"
         assert result["path"] == []
@@ -495,8 +650,11 @@ class TestGtTrace:
         from groundtruth.mcp.endpoints.trace_path import handle_gt_trace
 
         result = await handle_gt_trace(
-            "missing_fn", "leaf_fn",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            "missing_fn",
+            "leaf_fn",
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "not_found"
         assert result["endpoint"] == "from"
@@ -505,8 +663,11 @@ class TestGtTrace:
         from groundtruth.mcp.endpoints.trace_path import handle_gt_trace
 
         result = await handle_gt_trace(
-            "entry_fn", "dup",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            "entry_fn",
+            "dup",
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ambiguous"
         assert result["endpoint"] == "to"
@@ -520,7 +681,11 @@ class TestGtTrace:
         store = SymbolStore(":memory:")
         store.initialize()
         result = await handle_gt_trace(
-            "a", "b", store=store, graph=ImportGraph(store), root_path="/tmp",
+            "a",
+            "b",
+            store=store,
+            graph=ImportGraph(store),
+            root_path="/tmp",
         )
         assert result["status"] == "unavailable"
         assert result["path"] == []
@@ -556,8 +721,10 @@ class TestGtDetectChanges:
         from groundtruth.mcp.endpoints.detect_changes import handle_gt_detect_changes
 
         result = await handle_gt_detect_changes(
-            store=seeded["store"], graph=seeded["graph"],
-            root_path=seeded["root"], diff=_DIFF_MID,
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
+            diff=_DIFF_MID,
         )
         assert result["changed_count"] == 1
         assert result["changed_symbols"][0]["name"] == "mid_fn"
@@ -573,8 +740,10 @@ class TestGtDetectChanges:
         from groundtruth.mcp.endpoints.detect_changes import handle_gt_detect_changes
 
         result = await handle_gt_detect_changes(
-            store=seeded["store"], graph=seeded["graph"],
-            root_path=seeded["root"], diff=_DIFF_UNMAPPED,
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
+            diff=_DIFF_UNMAPPED,
         )
         assert result["changed_count"] == 0
         assert result["affected_count"] == 0
@@ -586,8 +755,10 @@ class TestGtDetectChanges:
         from groundtruth.mcp.endpoints.detect_changes import handle_gt_detect_changes
 
         result = await handle_gt_detect_changes(
-            store=seeded["store"], graph=seeded["graph"],
-            root_path=seeded["root"], diff="this is not a unified diff at all",
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
+            diff="this is not a unified diff at all",
         )
         assert result["risk_level"] == "unknown"
         assert result["changed_symbols"] == []
@@ -596,8 +767,10 @@ class TestGtDetectChanges:
         from groundtruth.mcp.endpoints.detect_changes import handle_gt_detect_changes
 
         result = await handle_gt_detect_changes(
-            store=seeded["store"], graph=seeded["graph"],
-            root_path=seeded["root"], diff="",
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
+            diff="",
         )
         assert result["risk_level"] == "low"
         assert result["changed_count"] == 0
@@ -611,8 +784,10 @@ class TestGtDetectChanges:
         from groundtruth.mcp.endpoints.detect_changes import handle_gt_detect_changes
 
         result = await handle_gt_detect_changes(
-            store=store, graph=ImportGraph(store),
-            root_path=seeded["root"], diff=_DIFF_MID,
+            store=store,
+            graph=ImportGraph(store),
+            root_path=seeded["root"],
+            diff=_DIFF_MID,
         )
         assert result["changed_count"] == 1
         assert result["affected_processes"] == []
@@ -632,9 +807,20 @@ class TestGtDetectChanges:
         for args in (["init"], ["add", "."]):
             subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True)
         subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
-             "commit", "-m", "init"],
-            capture_output=True, check=True,
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init",
+            ],
+            capture_output=True,
+            check=True,
         )
         target.write_text("def mid_fn():\n    return 2\n", encoding="utf-8")
 
@@ -643,7 +829,9 @@ class TestGtDetectChanges:
         from groundtruth.mcp.endpoints.detect_changes import handle_gt_detect_changes
 
         result = await handle_gt_detect_changes(
-            store=seeded["store"], graph=seeded["graph"], root_path=str(repo),
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=str(repo),
         )
         assert result["changed_count"] == 1
         assert result["changed_symbols"][0]["file"] == "src/b.py"
@@ -658,7 +846,9 @@ class TestGtRouteMap:
         from groundtruth.mcp.endpoints.route_map import handle_gt_route_map
 
         result = await handle_gt_route_map(
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         assert len(result["routes"]) == 2
@@ -682,7 +872,9 @@ class TestGtRouteMap:
         store = SymbolStore(":memory:")
         store.initialize()
         result = await handle_gt_route_map(
-            store=store, graph=ImportGraph(store), root_path=seeded["root"],
+            store=store,
+            graph=ImportGraph(store),
+            root_path=seeded["root"],
         )
         assert result["status"] == "unavailable"
         assert result["routes"] == []
@@ -694,7 +886,9 @@ class TestGtApiImpact:
         from groundtruth.mcp.endpoints.route_map import handle_gt_api_impact
 
         result = await handle_gt_api_impact(
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         by_name = {r["name"]: r for r in result["routes"]}
@@ -709,7 +903,9 @@ class TestGtApiImpact:
 
         result = await handle_gt_api_impact(
             route="/api/users",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         assert [r["name"] for r in result["routes"]] == ["/api/users"]
@@ -719,7 +915,9 @@ class TestGtApiImpact:
 
         result = await handle_gt_api_impact(
             route="/nope",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "not_found"
 
@@ -734,7 +932,9 @@ class TestGtClosure:
 
         result = await handle_gt_closure(
             "leaf_fn",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         callers = {c["symbol"]: c["depth"] for c in result["callers"]}
@@ -749,7 +949,9 @@ class TestGtClosure:
 
         result = await handle_gt_closure(
             "entry_fn",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         callees = {c["symbol"]: c["depth"] for c in result["callees"]}
@@ -763,7 +965,10 @@ class TestGtClosure:
         from groundtruth.mcp.endpoints.closure import handle_gt_closure
 
         result = await handle_gt_closure(
-            "leaf_fn", store=store, graph=ImportGraph(store), root_path=seeded["root"],
+            "leaf_fn",
+            store=store,
+            graph=ImportGraph(store),
+            root_path=seeded["root"],
         )
         assert result["status"] == "unavailable"
         assert result["callers"] == []
@@ -774,7 +979,9 @@ class TestGtClosure:
 
         result = await handle_gt_closure(
             "missing_fn",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "not_found"
 
@@ -788,7 +995,9 @@ class TestGtCommunity:
         from groundtruth.mcp.endpoints.community import handle_gt_community
 
         result = await handle_gt_community(
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         assert len(result["communities"]) == 1
@@ -803,7 +1012,9 @@ class TestGtCommunity:
 
         result = await handle_gt_community(
             member="src/client.py",
-            store=seeded["store"], graph=seeded["graph"], root_path=seeded["root"],
+            store=seeded["store"],
+            graph=seeded["graph"],
+            root_path=seeded["root"],
         )
         assert result["status"] == "ok"
         assert len(result["communities"]) == 1
@@ -815,7 +1026,9 @@ class TestGtCommunity:
         from groundtruth.mcp.endpoints.community import handle_gt_community
 
         result = await handle_gt_community(
-            store=store, graph=ImportGraph(store), root_path=seeded["root"],
+            store=store,
+            graph=ImportGraph(store),
+            root_path=seeded["root"],
         )
         assert result["status"] == "unavailable"
         assert result["communities"] == []
@@ -829,8 +1042,10 @@ class TestCompositeWiring:
         from groundtruth.mcp.composite import gt_trace_impl
 
         out = gt_trace_impl(
-            "entry_fn", "leaf_fn",
-            db_path=seeded["db"], root_path=seeded["root"],
+            "entry_fn",
+            "leaf_fn",
+            db_path=seeded["db"],
+            root_path=seeded["root"],
         )
         assert out.startswith('<gt-evidence tool="gt_trace">')
         payload = json.loads(out.split("\n", 1)[1].rsplit("\n</gt-evidence>", 1)[0])
@@ -840,7 +1055,9 @@ class TestCompositeWiring:
         from groundtruth.mcp.composite import gt_detect_changes_impl
 
         out = gt_detect_changes_impl(
-            db_path=seeded["db"], root_path=seeded["root"], diff=_DIFF_MID,
+            db_path=seeded["db"],
+            root_path=seeded["root"],
+            diff=_DIFF_MID,
         )
         payload = json.loads(out.split("\n", 1)[1].rsplit("\n</gt-evidence>", 1)[0])
         assert payload["affected_count"] == 1
@@ -853,9 +1070,15 @@ class TestCompositeWiring:
         app = create_composite_server(seeded["root"], seeded["db"])
         names = {t.name for t in asyncio.run(app.list_tools())}
         for tool in (
-            "gt_lookup", "gt_impact", "gt_check",  # pre-existing
-            "gt_trace", "gt_detect_changes", "gt_route_map",
-            "gt_api_impact", "gt_closure", "gt_community",
+            "gt_lookup",
+            "gt_impact",
+            "gt_check",  # pre-existing
+            "gt_trace",
+            "gt_detect_changes",
+            "gt_route_map",
+            "gt_api_impact",
+            "gt_closure",
+            "gt_community",
         ):
             assert tool in names
 
@@ -863,12 +1086,20 @@ class TestCompositeWiring:
         from groundtruth.mcp import tools
 
         for name in (
-            "handle_gt_trace", "handle_gt_detect_changes", "handle_gt_route_map",
-            "handle_gt_api_impact", "handle_gt_closure", "handle_gt_community",
+            "handle_gt_trace",
+            "handle_gt_detect_changes",
+            "handle_gt_route_map",
+            "handle_gt_api_impact",
+            "handle_gt_closure",
+            "handle_gt_community",
         ):
             assert callable(getattr(tools, name, None)), name
         for step in (
-            "trace_path", "detect_changes", "route_map",
-            "api_impact", "closure", "community",
+            "trace_path",
+            "detect_changes",
+            "route_map",
+            "api_impact",
+            "closure",
+            "community",
         ):
             assert step in tools._VALID_STEPS

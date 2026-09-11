@@ -89,7 +89,12 @@ def _closure_side(
 
     out: list[dict[str, Any]] = []
     for row in rows:
-        info: dict[str, Any] = {"id": row["nid"], "symbol": f"node#{row['nid']}", "file": "", "line": None}
+        info: dict[str, Any] = {
+            "id": row["nid"],
+            "symbol": f"node#{row['nid']}",
+            "file": "",
+            "line": None,
+        }
         try:
             nrow = conn.execute(
                 "SELECT id, label, name, qualified_name, file_path, start_line, end_line, "

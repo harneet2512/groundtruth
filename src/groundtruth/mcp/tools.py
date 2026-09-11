@@ -1596,9 +1596,7 @@ async def handle_gt_trace(
     start = time.monotonic_ns()
     from groundtruth.mcp.endpoints.trace_path import handle_gt_trace as _handle
 
-    result = await _handle(
-        from_symbol, to_symbol, store, graph, root_path, max_depth=max_depth
-    )
+    result = await _handle(from_symbol, to_symbol, store, graph, root_path, max_depth=max_depth)
     elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
     tracker.record(tool="gt_trace", phase="trace_path", outcome="valid", latency_ms=elapsed_ms)
     status = result.get("status")
@@ -1654,9 +1652,7 @@ async def handle_gt_route_map(
 
     result = await _handle(store, graph, root_path)
     elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
-    tracker.record(
-        tool="gt_route_map", phase="route_map", outcome="valid", latency_ms=elapsed_ms
-    )
+    tracker.record(tool="gt_route_map", phase="route_map", outcome="valid", latency_ms=elapsed_ms)
     result["reasoning_guidance"] = (
         f"{len(result.get('routes', []))} route(s). Routes named 'unknown' had "
         "unreadable decorator lines; consumers flagged file_level are file-granular."
@@ -1678,9 +1674,7 @@ async def handle_gt_api_impact(
 
     result = await _handle(store, graph, root_path, route=route, handler=handler)
     elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
-    tracker.record(
-        tool="gt_api_impact", phase="api_impact", outcome="valid", latency_ms=elapsed_ms
-    )
+    tracker.record(tool="gt_api_impact", phase="api_impact", outcome="valid", latency_ms=elapsed_ms)
     result["reasoning_guidance"] = (
         f"{len(result.get('routes', []))} route(s) analyzed. "
         "attributionNote marks multi-fetch consumers whose impact is shared."
@@ -1701,9 +1695,7 @@ async def handle_gt_closure(
 
     result = await _handle(symbol, store, graph, root_path)
     elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
-    tracker.record(
-        tool="gt_closure", phase="closure", outcome="valid", latency_ms=elapsed_ms
-    )
+    tracker.record(tool="gt_closure", phase="closure", outcome="valid", latency_ms=elapsed_ms)
     result["reasoning_guidance"] = (
         f"{len(result.get('callers', []))} transitive caller(s), "
         f"{len(result.get('callees', []))} callee(s) (depth<=3, conf>=0.5)"
@@ -1726,9 +1718,7 @@ async def handle_gt_community(
 
     result = await _handle(store, graph, root_path, name=name, member=member)
     elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
-    tracker.record(
-        tool="gt_community", phase="community", outcome="valid", latency_ms=elapsed_ms
-    )
+    tracker.record(tool="gt_community", phase="community", outcome="valid", latency_ms=elapsed_ms)
     result["reasoning_guidance"] = (
         f"{len(result.get('communities', []))} communit(y/ies). "
         "cohesion null means unmeasurable — it is not zero."
@@ -1983,10 +1973,7 @@ def _summarize_step(step_name: str, data: dict[str, Any]) -> str | None:
     elif step_name == "api_impact":
         return f"{len(data.get('routes', []))} route(s) analyzed"
     elif step_name == "closure":
-        return (
-            f"{len(data.get('callers', []))} callers, "
-            f"{len(data.get('callees', []))} callees"
-        )
+        return f"{len(data.get('callers', []))} callers, {len(data.get('callees', []))} callees"
     elif step_name == "community":
         return f"{len(data.get('communities', []))} communit(y/ies)"
     return None

@@ -528,9 +528,7 @@ def gt_trace_impl(
         finally:
             conn.close()
     out = _format_json_block("gt_trace", payload)
-    _emit_endpoint_telemetry(
-        iid, "gt_trace", {"from": from_symbol, "to": to_symbol}, out, _t0
-    )
+    _emit_endpoint_telemetry(iid, "gt_trace", {"from": from_symbol, "to": to_symbol}, out, _t0)
     return out
 
 
@@ -577,9 +575,7 @@ def gt_detect_changes_impl(
         finally:
             conn.close()
     out = _format_json_block("gt_detect_changes", payload)
-    _emit_endpoint_telemetry(
-        iid, "gt_detect_changes", {"diff_passed": diff is not None}, out, _t0
-    )
+    _emit_endpoint_telemetry(iid, "gt_detect_changes", {"diff_passed": diff is not None}, out, _t0)
     return out
 
 
@@ -653,9 +649,7 @@ def gt_api_impact_impl(
         finally:
             conn.close()
     out = _format_json_block("gt_api_impact", payload)
-    _emit_endpoint_telemetry(
-        iid, "gt_api_impact", {"route": route, "handler": handler}, out, _t0
-    )
+    _emit_endpoint_telemetry(iid, "gt_api_impact", {"route": route, "handler": handler}, out, _t0)
     return out
 
 
@@ -734,7 +728,5 @@ def gt_community_impl(
         finally:
             conn.close()
     out = _format_json_block("gt_community", payload)
-    _emit_endpoint_telemetry(
-        iid, "gt_community", {"name": name, "member": member}, out, _t0
-    )
+    _emit_endpoint_telemetry(iid, "gt_community", {"name": name, "member": member}, out, _t0)
     return out

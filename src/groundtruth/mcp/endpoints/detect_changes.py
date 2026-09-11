@@ -58,8 +58,12 @@ def _get_working_tree_diff(root_path: str) -> str | None:
     try:
         head = subprocess.run(
             ["git", "diff", "HEAD"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", cwd=root_path, timeout=15,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=root_path,
+            timeout=15,
         )
         if head.returncode == 0:
             return head.stdout
@@ -72,8 +76,12 @@ def _get_working_tree_diff(root_path: str) -> str | None:
         try:
             result = subprocess.run(
                 ["git", *args],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", cwd=root_path, timeout=15,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=root_path,
+                timeout=15,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             continue
