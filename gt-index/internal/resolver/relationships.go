@@ -82,6 +82,19 @@ var (
 	namedReExportRe = regexp.MustCompile(`export\s*\{[^}]*\}\s*from\s*["']([^"']+)["']`)
 	// JS/TS: export * from "./module"
 	starReExportRe = regexp.MustCompile(`export\s*\*\s*from\s*["']([^"']+)["']`)
+
+	// Data-access / dependency-injection edges (parity target: GitNexus QUERIES
+	// and INJECTS). These resolve the *target* symbol — the model class a query
+	// reads, or the service type a constructor injects — so the edge lands only
+	// when the target is a graph node (never a bare annotation string).
+	pyDependsRe    = regexp.MustCompile(`Depends\(\s*([A-Z]\w*|get_\w+)\s*\)`)
+	injectAnnoRe   = regexp.MustCompile(`@(?:Inject|Autowired|Injectable)\s*(?:\(\s*([A-Z]\w*)\s*\))?`)
+	tsCtorInjectRe = regexp.MustCompile(`constructor\s*\([^)]*(?:private|protected|public|readonly)\s+\w+\s*:\s*([A-Z]\w*)`)
+	// ORM / query-builder reads: Django `M.objects.x(...)`, SQLAlchemy
+	// `session.query(M)`, ActiveRecord/Mongoose `M.find|where|create|...`.
+	ormQueryRe  = regexp.MustCompile(`\b([A-Z]\w*)\.objects\.(?:filter|get|all|create|exclude|annotate|values)\s*\(`)
+	ormQuery2Re = regexp.MustCompile(`\.query\(\s*([A-Z]\w*)\s*\)`)
+	ormARRe     = regexp.MustCompile(`\b([A-Z]\w*)\.(?:find|where|create|save|insert|update|delete|destroy)\s*\(`)
 )
 
 // ResolveRelationships runs 5 extraction passes over already-indexed source
@@ -455,6 +468,37 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						traitID := resolveInterfaceOrClassNode(traitName, sf.Path, interfaceIndex, classIndex)
 						if structID != 0 && traitID != 0 {
 							addEdge(structID, traitID, "IMPLEMENTS", sf.Path, lineNum, "implements", 1.0)
+						}
+					}
+				}
+			}
+
+			// Data-access + dependency-injection edges. Language-agnostic: the
+			// source is the enclosing function; the target resolves through the
+			// class index so the edge only lands when the symbol is a graph node.
+			if sf.Language != "markdown" && sf.Language != "toml" && sf.Language != "yaml" {
+				srcFunc := findEnclosingFunc(sf.Path, lineNum, funcRangeIndex)
+				if srcFunc != 0 {
+					if m := pyDependsRe.FindStringSubmatch(line); m != nil {
+						if tgt := resolveClassOrFuncNode(m[1], sf.Path, classIndex, funcFileIndex); tgt != 0 {
+							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "depends_injection", 0.85)
+						}
+					}
+					if m := injectAnnoRe.FindStringSubmatch(line); m != nil && m[1] != "" {
+						if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "annotation_injection", 0.8)
+						}
+					}
+					if m := tsCtorInjectRe.FindStringSubmatch(line); m != nil {
+						if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "ctor_injection", 0.85)
+						}
+					}
+					for _, re := range []*regexp.Regexp{ormQueryRe, ormQuery2Re, ormARRe} {
+						for _, m := range re.FindAllStringSubmatch(line, -1) {
+							if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+								addEdge(srcFunc, tgt, "QUERIES", sf.Path, lineNum, "orm_data_access", 0.85)
+							}
 						}
 					}
 				}
