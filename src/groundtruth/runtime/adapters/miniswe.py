@@ -970,7 +970,7 @@ def normalize_event(
             observed = ("test_executed_no_tests",)
         elif carrier == KIND_EDIT and (changed_files or edit_before_after):
             observed = ("edit_result",)
-        elif exact_viewed or carrier == KIND_VIEW:
+        elif exact_viewed:
             observed = ("file_view",)
         elif carrier == KIND_SUBMIT:
             observed = ("submit",)

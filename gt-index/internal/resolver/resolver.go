@@ -2954,6 +2954,7 @@ func candidateImportEvidence(call parser.CallRef, targetID int64, imports []pars
 	}
 	evidence := make([]string, 0)
 	seen := make(map[string]struct{})
+	importsByFile := groupImportsByFile(imports)
 	for _, imp := range imports {
 		if imp.File != call.File || (imp.ImportedName != call.CalleeName && imp.ImportedName != qualifier && imp.ImportedName != "*") {
 			continue
@@ -2965,7 +2966,7 @@ func candidateImportEvidence(call parser.CallRef, targetID int64, imports []pars
 		// minted "import" candidates with empty chains, and import_binding's
 		// chain requirement then aborted the atomic attach.
 		matched := false
-		for _, candidateFile := range resolveImportTargetFiles(imp.ModulePath, imp.ImportedName, call.File, fileMap) {
+		for _, candidateFile := range resolveImportTargetFiles(imp.ModulePath, imp.ImportedName, call.File, fileMap, importsByFile) {
 			if filepath.ToSlash(candidateFile) == filepath.ToSlash(target.File) {
 				matched = true
 				break
@@ -3023,6 +3024,7 @@ func dedupeResolvedCalls(calls []ResolvedCall) []ResolvedCall {
 // This tells us: "file X imports name Y, which could come from files [A, B, ...]"
 func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) map[string]map[string][]string {
 	index := make(map[string]map[string][]string)
+	importsByFile := groupImportsByFile(imports)
 
 	// Cache resolution results — the same (file, module path, name) triple is
 	// resolved for every import that repeats it.
@@ -3042,7 +3044,7 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 		cacheKey := imp.File + "\x00" + imp.ModulePath + "\x00" + imp.ImportedName
 		targetFiles, cached := moduleCache[cacheKey]
 		if !cached {
-			targetFiles = resolveImportTargetFiles(imp.ModulePath, imp.ImportedName, imp.File, fileMap)
+			targetFiles = resolveImportTargetFiles(imp.ModulePath, imp.ImportedName, imp.File, fileMap, importsByFile)
 			moduleCache[cacheKey] = targetFiles
 		}
 
@@ -3062,25 +3064,119 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 // and empty paths never take the member fallback, matching the index.
 // candidateImportEvidence calls this same helper so the per-candidate chain
 // covers exactly the import shapes the resolver's import mechanism accepts.
-func resolveImportTargetFiles(modulePath, importedName, importerFile string, fileMap map[string][]string) []string {
-	// JS/TS relative imports: resolve ./foo or ../bar relative to caller dir
+func resolveImportTargetFiles(modulePath, importedName, importerFile string, fileMap map[string][]string, importsByFile map[string][]parser.ImportRef) []string {
+	return resolveImportTargetFilesRec(modulePath, importedName, importerFile, fileMap, importsByFile, make(map[string]bool), 0)
+}
+
+func resolveImportTargetFilesRec(modulePath, importedName, importerFile string, fileMap map[string][]string, importsByFile map[string][]parser.ImportRef, seen map[string]bool, depth int) []string {
+	if depth >= 3 {
+		return nil
+	}
+	// Python relative imports: ".mod" / "..pkg.mod" resolve against the
+	// importer's package directory — not the absolute module registry. Must run
+	// before the JS/TS relative check so ".mod" isn't mistaken for "./mod".
 	effectivePath := modulePath
+	if strings.HasPrefix(effectivePath, ".") && !strings.HasPrefix(effectivePath, "./") && !strings.HasPrefix(effectivePath, "../") {
+		effectivePath = resolvePythonRelativeModule(effectivePath, importerFile)
+	}
+	// JS/TS relative imports: resolve ./foo or ../bar relative to caller dir
 	if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
 		callerDir := filepath.ToSlash(filepath.Dir(importerFile))
 		effectivePath = filepath.ToSlash(filepath.Join(callerDir, effectivePath))
 		effectivePath = filepath.ToSlash(filepath.Clean(effectivePath))
 	}
 
+	var direct []string
 	if targetFiles := resolveModulePath(effectivePath, fileMap); len(targetFiles) > 0 {
-		return targetFiles
+		direct = targetFiles
+	} else if importedName != "*" && effectivePath != "" {
+		if targetFiles := resolveModulePath(effectivePath+"."+importedName, fileMap); len(targetFiles) > 0 {
+			direct = targetFiles
+		} else {
+			direct = resolveModulePath(strings.ReplaceAll(effectivePath, ".", "/")+"/"+importedName, fileMap)
+		}
 	}
-	if importedName == "*" || effectivePath == "" {
+	// Re-export chase: when a resolved file itself imports the name (a package
+	// surface such as `pkg/__init__.py` doing `from .impl import X`), bind the
+	// transitively-defining file too so call sites resolve at import tier
+	// instead of falling back to name_match.
+	chased := chaseReExports(direct, importedName, fileMap, importsByFile, seen, depth)
+	return append(direct, chased...)
+}
+
+// groupImportsByFile indexes raw import statements by the file that issued them.
+func groupImportsByFile(imports []parser.ImportRef) map[string][]parser.ImportRef {
+	byFile := make(map[string][]parser.ImportRef)
+	for _, imp := range imports {
+		byFile[imp.File] = append(byFile[imp.File], imp)
+	}
+	return byFile
+}
+
+// resolvePythonRelativeModule converts a Python relative module path to its
+// absolute dotted form, anchored at the importer's package directory:
+//
+//	".monitor"      under "aiomonitor/__init__.py" → "aiomonitor.monitor"
+//	"..helpers.log" under "pkg/sub/mod.py"         → "pkg.helpers.log"
+//
+// One leading dot = the importer's own package; each extra dot ascends one
+// level. Returns "" when the climb escapes the repo root.
+func resolvePythonRelativeModule(modulePath, importerFile string) string {
+	dots := 0
+	for dots < len(modulePath) && modulePath[dots] == '.' {
+		dots++
+	}
+	rest := modulePath[dots:]
+	dir := filepath.Dir(importerFile)
+	for i := 1; i < dots; i++ {
+		parent := filepath.Dir(dir)
+		if parent == dir || (parent == "." && dir == ".") {
+			return ""
+		}
+		dir = parent
+	}
+	if dir == "." {
+		dir = ""
+	}
+	dottedPrefix := strings.ReplaceAll(filepath.ToSlash(dir), "/", ".")
+	switch {
+	case dottedPrefix == "":
+		return rest
+	case rest == "":
+		return dottedPrefix
+	default:
+		return dottedPrefix + "." + rest
+	}
+}
+
+// chaseReExports walks `targetFiles`; when a target file imports `importedName`
+// itself (re-export), it resolves that import's targets recursively and returns
+// the transitively-defining files. `seen` dedups visited (file, name) pairs so
+// re-export cycles (`a/__init__` ⇄ `b/__init__`) terminate.
+func chaseReExports(targetFiles []string, importedName string, fileMap map[string][]string, importsByFile map[string][]parser.ImportRef, seen map[string]bool, depth int) []string {
+	if importedName == "" || importedName == "*" || depth >= 3 {
 		return nil
 	}
-	if targetFiles := resolveModulePath(effectivePath+"."+importedName, fileMap); len(targetFiles) > 0 {
-		return targetFiles
+	var out []string
+	for _, targetFile := range targetFiles {
+		key := targetFile + "\x00" + importedName
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		for _, imp := range importsByFile[targetFile] {
+			if imp.ImportedName != importedName {
+				continue
+			}
+			sub := resolveImportTargetFilesRec(imp.ModulePath, imp.ImportedName, targetFile, fileMap, importsByFile, seen, depth+1)
+			for _, f := range sub {
+				if f != targetFile {
+					out = append(out, f)
+				}
+			}
+		}
 	}
-	return resolveModulePath(strings.ReplaceAll(effectivePath, ".", "/")+"/"+importedName, fileMap)
+	return out
 }
 
 // resolveModulePath maps a module path string to actual source file paths.

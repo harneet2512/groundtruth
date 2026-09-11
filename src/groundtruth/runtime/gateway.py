@@ -124,7 +124,7 @@ from groundtruth.runtime.fact_registry import (
     required_renderer as _fr_required_renderer,
 )
 from groundtruth.runtime.native_render import render_covering_failure_native
-from groundtruth.runtime.producer_audit import ProducerAudit
+from groundtruth.runtime.producer_audit import PRODUCER_AUDIT_SCHEMA, ProducerAudit
 from groundtruth.runtime.producer_inputs import (
     PRODUCER_INPUTS_SCHEMA,
     CallerEvidenceRow,
@@ -157,11 +157,17 @@ try:
     from groundtruth.runtime.patch_delta import analyze_patch_delta
 except Exception:  # noqa: BLE001
     analyze_patch_delta = None  # type: ignore[assignment]
-# The embedding-backed historical localizer is an isolated comparison control,
-# not a default deterministic producer. Keep the injection seam for comparison
-# fixtures, but never import/register it in the product runtime. Tests and an
-# explicitly constructed control may still replace this module attribute.
-_localize = None
+# The ranked-localization seam. ``graph_localizer.localize`` is the
+# deterministic FTS5+anchor+graph localizer (no embedder needed — it reads
+# nodes_fts inside graph.db). It was previously a comparison-only control held
+# at ``None``, which left the ``ranked_localization`` producer permanently
+# unavailable in product runs while the harness provisioned the index. Wire it
+# so search turns can deliver ranked candidate files; correct-or-quiet still
+# applies — an empty result abstains as ``localizer_no_candidates``.
+try:
+    from groundtruth.pretask.graph_localizer import localize as _localize
+except Exception:  # noqa: BLE001
+    _localize = None  # type: ignore[assignment]
 
 __all__ = [
     "ToolEvent",
@@ -391,6 +397,53 @@ def _producer_audit(
         context=state.producer_audit_context,
         delivered_keys=state.delivered_keys,
     )
+
+
+def _audit_dispatch_skip(
+    state: GatewayState,
+    event: ToolEvent,
+    *,
+    producer: str,
+    evidence_types: tuple[str, ...],
+    invocation_site: str,
+    reason: str,
+) -> None:
+    """Emit a dispatch-layer row when a producer's trigger event matched but a
+    gate (kill-switch, flag, or entry condition) kept the producer from running.
+
+    The invocation layer already separates "entered + abstained" from
+    "entered + produced"; without this row an audit cannot distinguish either
+    from "the producer was never entered at all". Behavior-neutral: recorder
+    faults are swallowed and nothing here feeds back into evidence selection.
+    """
+
+    recorder = state.producer_recorder if callable(state.producer_recorder) else None
+    if recorder is None:
+        return
+    try:
+        recorder(
+            {
+                "schema": PRODUCER_AUDIT_SCHEMA,
+                "layer": "producer.dispatch",
+                "outcome": "not_entered",
+                "producer": producer,
+                "evidence_types": list(evidence_types),
+                "invocation_site": invocation_site,
+                "event_type": str(
+                    event.primary_boundary
+                    or (event.semantic_events[0] if event.semantic_events else "")
+                ),
+                "action_index": int(event.action_index),
+                "observation_id": str(
+                    (state.producer_audit_context or {}).get("observation_id", "")
+                    if isinstance(state.producer_audit_context, dict)
+                    else getattr(state.producer_audit_context, "observation_id", "")
+                ),
+                "skip_reason": reason,
+            }
+        )
+    except Exception:  # noqa: BLE001 — telemetry may never change behavior
+        return
 
 
 # --------------------------------------------------------------------------- #
@@ -1958,6 +2011,106 @@ def _fact_callers(con, def_ids: list[int]) -> tuple[list[dict], list[str]]:
                     receivers.add(rt)
     callers.sort(key=lambda c: (c["file"], c["line"], c["name"]))
     return callers, sorted(receivers)
+
+
+_CANDIDATE_CONF_FLOOR = 0.5
+
+
+def _candidate_callers(con, def_ids: list[int]) -> list[dict]:
+    """Candidate-tier callers: edges that FAIL the FACT gate (non-deterministic
+    resolution or conf<0.7) but clear the documented unverified floor
+    (conf>=0.5 — below it name_match is suppressed entirely). NON-test callers
+    only; same row shape as :func:`_fact_callers`. These are leads the graph
+    holds but cannot certify — deliverable ONLY as explicitly-unverified
+    WARNING context, never as FACT."""
+    cols = _edge_columns(con)
+    if not {"resolution_method"}.issubset(cols):
+        return []
+    has_conf = "confidence" in cols
+    conf_gate = (
+        f"AND COALESCE(e.confidence,0) >= {_CANDIDATE_CONF_FLOOR} "
+        f"AND NOT (COALESCE(e.confidence,0) >= {_FACT_CONF_FLOOR} "
+        f"AND LOWER(TRIM(e.resolution_method)) IN ('{_det_in_sql()}')) "
+        if has_conf
+        else f"AND LOWER(TRIM(e.resolution_method)) NOT IN ('{_det_in_sql()}') "
+    )
+    conf_sel = "COALESCE(e.confidence,1.0)" if has_conf else "1.0"
+    qmarks = ",".join("?" * len(def_ids))
+    sql = (
+        f"SELECT ns.name, ns.file_path, e.source_line, "
+        f"{conf_sel}, LOWER(TRIM(e.resolution_method)), e.id, e.target_id, e.source_id "
+        f"FROM edges e JOIN nodes ns ON ns.id=e.source_id "
+        f"WHERE e.target_id IN ({qmarks}) AND e.type='CALLS' "
+        f"AND COALESCE(ns.is_test,0)=0 {conf_gate}"
+    )
+    try:
+        rows = con.execute(sql, def_ids).fetchall()
+    except sqlite3.Error:
+        return []
+    callers: list[dict] = []
+    for name, fp, line, confidence, resolution_method, edge_id, target_id, source_id in rows:
+        callers.append(
+            {
+                "name": name or "",
+                "file": fp or "",
+                "line": int(line or 0),
+                "confidence": float(confidence),
+                "resolution_method": str(resolution_method or ""),
+                "edge_id": int(edge_id) if edge_id is not None else None,
+                "definition_id": int(target_id) if target_id is not None else None,
+                "caller_node_id": int(source_id) if source_id is not None else None,
+            }
+        )
+    callers.sort(key=lambda c: (-c["confidence"], c["file"], c["line"], c["name"]))
+    return callers
+
+
+def _candidate_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> list[dict]:
+    """Candidate-tier cross-file callers of ``sym`` defined in ``rel`` — the
+    fallback rows for when no FACT-tier contract exists. Same cross-file +
+    leak law as the FACT variant; conf floor is the documented unverified
+    band (>=0.5)."""
+    labels_sql = ",".join("?" * len(_DEF_LABELS))
+    try:
+        drows = con.execute(
+            f"SELECT id FROM nodes WHERE name=? AND file_path=? "
+            f"AND COALESCE(is_test,0)=0 AND COALESCE(start_line,0)>0 "
+            f"AND label IN ({labels_sql})",
+            (sym, rel, *_DEF_LABELS),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    def_ids = [r[0] for r in drows]
+    if not def_ids:
+        return []
+    callers = _candidate_callers(con, def_ids)
+    nrel = _norm_fp(rel)
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for c in callers:
+        cf = _norm_fp(_to_repo_rel(c.get("file") or "", root))
+        if not cf or cf == nrel:
+            continue
+        if _is_leaky(cf):
+            continue
+        key = (c.get("name") or "", cf)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "identity": c.get("name") or "",
+                "file": cf,
+                "line": int(c.get("line") or 0),
+                "confidence": c.get("confidence"),
+                "resolution_method": c.get("resolution_method") or None,
+                "edge_id": c.get("edge_id"),
+                "definition_id": c.get("definition_id"),
+                "caller_node_id": c.get("caller_node_id"),
+            }
+        )
+    out.sort(key=lambda row: (-float(row["confidence"] or 0.0), row["file"], row["line"], row["identity"]))
+    return out
 
 
 def _test_ref_count(con, def_ids: list[int]) -> int:
@@ -4126,10 +4279,144 @@ def _produce_caller_contract_view(
                 if sites:
                     contracts.append((symbol, sites))
             if not contracts:
-                audit.note(
-                    "no_verified_caller_contract",
-                    category="correct_quiet",
-                    detail={"file": rel, "definitions": len(definitions)},
+                # Candidate-tier fallback: the graph holds callers it cannot
+                # certify (name_match / impl_method / sub-0.7). Deliver them as
+                # explicitly-unverified WARNING leads — bounded, leak-filtered,
+                # marked — instead of silence. Below the 0.5 suppression floor
+                # or test/vendored callers never appear even as candidates.
+                candidate_contracts: list[tuple[str, list[dict]]] = []
+                for symbol, definition_line in definitions:
+                    if (
+                        _validated_repository_witness_state(
+                            event, state, rel, definition_line, symbol,
+                        )
+                        is None
+                    ):
+                        continue
+                    csites: list[dict] = []
+                    for csite in _candidate_callers_of_symbol_in_file(
+                        con, symbol, rel, state.repo_root
+                    ):
+                        caller_file = confined_repo_file(csite.get("file"))
+                        cconf = csite.get("confidence")
+                        if (
+                            not caller_file
+                            or not isinstance(csite.get("identity"), str)
+                            or not csite["identity"]
+                            or not isinstance(csite.get("line"), int)
+                            or csite["line"] <= 0
+                            or not isinstance(cconf, (int, float))
+                            or not _CANDIDATE_CONF_FLOOR <= float(cconf) <= 1.0
+                        ):
+                            continue
+                        cstate = _source_state_for_file(event, state, caller_file)
+                        if cstate is None:
+                            continue
+                        csites.append({**csite, "file": caller_file,
+                                       "source_state": cstate})
+                    if csites:
+                        candidate_contracts.append((symbol, csites))
+                if not candidate_contracts:
+                    audit.note(
+                        "no_verified_caller_contract",
+                        category="correct_quiet",
+                        detail={"file": rel, "definitions": len(definitions)},
+                    )
+                    continue
+                all_csites = [
+                    (s, c) for s, cs in candidate_contracts for c in cs
+                ]
+                all_csites.sort(
+                    key=lambda sc: (-float(sc[1]["confidence"]),
+                                    sc[1]["file"], sc[1]["line"])
+                )
+                total_candidates = len(all_csites)
+                all_csites = all_csites[:8]
+                graph_revision, _valid_until = _revisions_for(
+                    state, "caller_contract_view",
+                )
+                c_caller_rows = tuple(
+                    CallerEvidenceRow(
+                        identity=str(c["identity"]),
+                        file=str(c["file"]),
+                        line=int(c["line"]),
+                        confidence=float(c["confidence"]),
+                        resolution_method=str(c.get("resolution_method") or ""),
+                        source_state=c["source_state"],
+                        edge_id=int(c["edge_id"]) if c.get("edge_id") else 0,
+                        definition_id=int(c["definition_id"]) if c.get("definition_id") else 0,
+                    )
+                    for _s, c in all_csites
+                )
+                c_symbols = tuple(s for s, _cs in candidate_contracts)
+                c_n_files = len({str(c["file"]) for _s, c in all_csites})
+                trunc = (
+                    f" (top {len(all_csites)} of {total_candidates})"
+                    if total_candidates > len(all_csites) else ""
+                )
+                delivered_per_symbol: dict[str, int] = {}
+                for _s, _c in all_csites:
+                    delivered_per_symbol[_s] = delivered_per_symbol.get(_s, 0) + 1
+                c_body = [
+                    (
+                        f"{symbol}() has {delivered_per_symbol[symbol]} candidate "
+                        f"caller(s) (unverified){trunc}"
+                    )
+                    for symbol, _cs in candidate_contracts
+                    if delivered_per_symbol.get(symbol)
+                ]
+                c_min_conf = min(float(c["confidence"]) for _s, c in all_csites)
+                out.append(
+                    _mk_add(
+                        state,
+                        event,
+                        fact_kind="caller_contract_view",
+                        target=rel,
+                        body_lines=c_body,
+                        evidence=[
+                            (str(c["file"]), int(c["line"])) for _s, c in all_csites
+                        ],
+                        tier=WARNING,
+                        producer="caller_contract",
+                        symbol=(
+                            c_symbols[0] if len(c_symbols) == 1
+                            else "viewed_file_contract"
+                        ),
+                        confidence=c_min_conf,
+                        native_args={
+                            "caller_rows": tuple(
+                                (
+                                    str(c["file"]),
+                                    int(c["line"]),
+                                    str(c["identity"]),
+                                )
+                                for _s, c in all_csites
+                            ),
+                            "caller_usage_rows": (),
+                            "unverified_candidates": True,
+                        },
+                        producer_inputs=ProducerInputs(
+                            schema=PRODUCER_INPUTS_SCHEMA,
+                            evidence_type="caller_contract_view",
+                            candidate_id="",
+                            before_state=None,
+                            after_state=viewed_state,
+                            caller_rows=c_caller_rows,
+                            graph_revision=graph_revision,
+                            caller_usage_rows=(),
+                        ),
+                        observed_substrates=("graph",),
+                        canonical_subject=rel,
+                        canonical_claim=(
+                            f"{rel} has {len(all_csites)} candidate cross-file "
+                            f"caller(s) across {c_n_files} file(s) — resolution "
+                            "unverified (name/impl match, not import-proven)."
+                        ),
+                        canonical_consequence=(
+                            "These are unverified leads, not a caller contract — "
+                            "confirm each before relying on it for the edit."
+                        ),
+                    )
                 )
                 continue
             all_sites = [(symbol, site) for symbol, sites in contracts for site in sites]
@@ -4768,6 +5055,15 @@ def _produce_raw_candidates(
             additions += produced
             if event.edit_before_after:
                 edit_bridge_candidates += produced
+        else:
+            _audit_dispatch_skip(
+                state,
+                event,
+                producer="patch_delta",
+                evidence_types=("signature_delta", "patch_delta"),
+                invocation_site="gateway.edit.patch_delta",
+                reason="kill_switch_off",
+            )
         # SM-2b: the CROSS-LANGUAGE caller-contract break — the graph-based replacement for
         # the legacy l3.contract/l3b.evidence caller-break patch_delta (ast-only) cannot
         # produce on a non-Python edit. Both are caller-break families; arbitration keeps the
@@ -4798,16 +5094,43 @@ def _produce_raw_candidates(
             additions += produced
             if event.edit_before_after:
                 edit_bridge_candidates += produced
+        else:
+            _audit_dispatch_skip(
+                state,
+                event,
+                producer="change_surface",
+                evidence_types=("newfile_precedent", "change_surface"),
+                invocation_site="gateway.edit.change_surface",
+                reason=(
+                    "kill_switch_off"
+                    if not _change_surface_producer_on()
+                    else (
+                        "cs_edit_trigger_off"
+                        if not _cs_edit_trigger_on()
+                        else "not_file_creation"
+                    )
+                ),
+            )
     if "test_result" in event.semantic_events:
         additions += _produce_covering(event, state)
-    if {"search_result", "failed_search"} & set(event.semantic_events) and _loc_reslot_on():
-        # T0->T2 re-slot (2026-07-12, GT_LOC_RESLOT, default OFF -> byte-identical): GT's
-        # ranked localization ANSWER, delivered reactively at the D2/post-search boundary
-        # (issue-keyed, INDEPENDENT of the search-outcome lattice below — fires even on a
-        # behavior-PHRASE grep where the outcome producers abstain). Competes for the single
-        # per-turn dose via arbitration (rank 37 > def_ref_partition 35); fire-once via the
-        # delivery dedup chain (the issue-fixed answer re-offers with a stable dedup_key).
-        additions += _produce_ranked_localization(event, state)
+    if {"search_result", "failed_search"} & set(event.semantic_events):
+        if _loc_reslot_on():
+            # T0->T2 re-slot (2026-07-12, GT_LOC_RESLOT, default OFF -> byte-identical): GT's
+            # ranked localization ANSWER, delivered reactively at the D2/post-search boundary
+            # (issue-keyed, INDEPENDENT of the search-outcome lattice below — fires even on a
+            # behavior-PHRASE grep where the outcome producers abstain). Competes for the single
+            # per-turn dose via arbitration (rank 37 > def_ref_partition 35); fire-once via the
+            # delivery dedup chain (the issue-fixed answer re-offers with a stable dedup_key).
+            additions += _produce_ranked_localization(event, state)
+        else:
+            _audit_dispatch_skip(
+                state,
+                event,
+                producer="ranked_localization",
+                evidence_types=("ranked_localization",),
+                invocation_site="gateway.search.ranked_localization",
+                reason="loc_reslot_off",
+            )
 
     # outcome-dispatched producers
     if outcome == TRACE_HIT:
@@ -4815,6 +5138,15 @@ def _produce_raw_candidates(
     elif outcome == ZERO_ABSENT:
         if _change_surface_producer_on():  # kill-switch; see _change_surface_producer_on docstring
             additions += _produce_change_surface(event, state)
+        else:
+            _audit_dispatch_skip(
+                state,
+                event,
+                producer="change_surface",
+                evidence_types=("newfile_precedent", "change_surface"),
+                invocation_site="gateway.search.change_surface",
+                reason="kill_switch_off",
+            )
     elif outcome == ZERO_NAME:
         additions += _produce_name_fold(event, state)
     elif outcome == ZERO_BEHAVIOR:
