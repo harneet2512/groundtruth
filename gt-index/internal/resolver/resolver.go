@@ -2943,9 +2943,14 @@ func candidateImportEvidence(call parser.CallRef, targetID int64, imports []pars
 	if !ok || target.File == "" {
 		return []string{}
 	}
+	// The name lookups mirror the three ways Strategy 1.5 admits an import
+	// candidate: the bare callee name, the package qualifier of a qualified
+	// call (the same LastIndex(".") split the mint path uses), and "*".
 	qualifier := ""
-	if idx := strings.IndexAny(call.CalleeQualified, ".:"); idx > 0 {
-		qualifier = call.CalleeQualified[:idx]
+	if call.CalleeQualified != "" && call.CalleeQualified != call.CalleeName {
+		if dotIdx := strings.LastIndex(call.CalleeQualified, "."); dotIdx > 0 {
+			qualifier = call.CalleeQualified[:dotIdx]
+		}
 	}
 	evidence := make([]string, 0)
 	seen := make(map[string]struct{})
@@ -2953,12 +2958,14 @@ func candidateImportEvidence(call parser.CallRef, targetID int64, imports []pars
 		if imp.File != call.File || (imp.ImportedName != call.CalleeName && imp.ImportedName != qualifier && imp.ImportedName != "*") {
 			continue
 		}
-		effectivePath := imp.ModulePath
-		if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
-			effectivePath = filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(call.File), effectivePath)))
-		}
+		// resolveImportTargetFiles is the exact chain buildImportIndex ran to
+		// admit this import, so a candidate the index bound through the
+		// module+name fallback (a submodule or a fileMap that names no bare
+		// package) still carries the import that produced it. Diverging here
+		// minted "import" candidates with empty chains, and import_binding's
+		// chain requirement then aborted the atomic attach.
 		matched := false
-		for _, candidateFile := range resolveModulePath(effectivePath, fileMap) {
+		for _, candidateFile := range resolveImportTargetFiles(imp.ModulePath, imp.ImportedName, call.File, fileMap) {
 			if filepath.ToSlash(candidateFile) == filepath.ToSlash(target.File) {
 				matched = true
 				break
@@ -3017,7 +3024,8 @@ func dedupeResolvedCalls(calls []ResolvedCall) []ResolvedCall {
 func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) map[string]map[string][]string {
 	index := make(map[string]map[string][]string)
 
-	// Cache resolveModulePath results — same module path resolved many times
+	// Cache resolution results — the same (file, module path, name) triple is
+	// resolved for every import that repeats it.
 	moduleCache := make(map[string][]string)
 
 	for _, imp := range imports {
@@ -3031,40 +3039,11 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 			index[imp.File] = fileEntry
 		}
 
-		// JS/TS relative imports: resolve ./foo or ../bar relative to caller dir
-		effectivePath := imp.ModulePath
-		if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
-			callerDir := filepath.ToSlash(filepath.Dir(imp.File))
-			effectivePath = filepath.ToSlash(filepath.Join(callerDir, effectivePath))
-			effectivePath = filepath.ToSlash(filepath.Clean(effectivePath))
-		}
-
-		// Resolve the module path to actual files (cached)
-		cacheKey := effectivePath
+		cacheKey := imp.File + "\x00" + imp.ModulePath + "\x00" + imp.ImportedName
 		targetFiles, cached := moduleCache[cacheKey]
 		if !cached {
-			targetFiles = resolveModulePath(effectivePath, fileMap)
+			targetFiles = resolveImportTargetFiles(imp.ModulePath, imp.ImportedName, imp.File, fileMap)
 			moduleCache[cacheKey] = targetFiles
-		}
-
-		// If module path didn't resolve, try module_path + imported_name (cached)
-		if len(targetFiles) == 0 && imp.ImportedName != "*" && effectivePath != "" {
-			combined := effectivePath + "." + imp.ImportedName
-			if cached, ok := moduleCache[combined]; ok {
-				targetFiles = cached
-			} else {
-				targetFiles = resolveModulePath(combined, fileMap)
-				moduleCache[combined] = targetFiles
-			}
-			if len(targetFiles) == 0 {
-				combinedSlash := strings.ReplaceAll(effectivePath, ".", "/") + "/" + imp.ImportedName
-				if cached, ok := moduleCache[combinedSlash]; ok {
-					targetFiles = cached
-				} else {
-					targetFiles = resolveModulePath(combinedSlash, fileMap)
-					moduleCache[combinedSlash] = targetFiles
-				}
-			}
 		}
 
 		if len(targetFiles) > 0 {
@@ -3073,6 +3052,35 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 	}
 
 	return index
+}
+
+// resolveImportTargetFiles maps one import statement to the source files it
+// can bind. The probe order is the contract every consumer of the import
+// index must reproduce: the module path itself first, then -- only when the
+// bare path names no file -- the imported name as a member of that module
+// ("pkg.mod" for `from pkg import mod`, then the slash form). Wildcard "*"
+// and empty paths never take the member fallback, matching the index.
+// candidateImportEvidence calls this same helper so the per-candidate chain
+// covers exactly the import shapes the resolver's import mechanism accepts.
+func resolveImportTargetFiles(modulePath, importedName, importerFile string, fileMap map[string][]string) []string {
+	// JS/TS relative imports: resolve ./foo or ../bar relative to caller dir
+	effectivePath := modulePath
+	if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
+		callerDir := filepath.ToSlash(filepath.Dir(importerFile))
+		effectivePath = filepath.ToSlash(filepath.Join(callerDir, effectivePath))
+		effectivePath = filepath.ToSlash(filepath.Clean(effectivePath))
+	}
+
+	if targetFiles := resolveModulePath(effectivePath, fileMap); len(targetFiles) > 0 {
+		return targetFiles
+	}
+	if importedName == "*" || effectivePath == "" {
+		return nil
+	}
+	if targetFiles := resolveModulePath(effectivePath+"."+importedName, fileMap); len(targetFiles) > 0 {
+		return targetFiles
+	}
+	return resolveModulePath(strings.ReplaceAll(effectivePath, ".", "/")+"/"+importedName, fileMap)
 }
 
 // resolveModulePath maps a module path string to actual source file paths.

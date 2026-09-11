@@ -240,6 +240,17 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 			if hierarchy, ok := hierarchyByOrdinal[c.CallsiteOrdinal]; ok && (c.DispatchForm == "interface" || c.DispatchForm == "virtual") && (len(hierarchy.CHACandidateNodeIDs) > 0 || (hierarchy.ReceiverScoped && hierarchy.CHACompleteness == "closed")) {
 				candidateNodeIDs = append([]int64(nil), hierarchy.CHACandidateNodeIDs...)
 				selectedNodeID = nil
+				// The hierarchy pass owns this callsite's published set now:
+				// these candidates are the conservative implementor boundary,
+				// which is what impl_method names -- the same attribution
+				// vtaCallsiteMechanism gives a merged flow+hierarchy set.
+				// Keeping the resolver's mechanism over the substituted set
+				// claims a derivation the published candidates did not come
+				// from, and for "import" the mis-attribution is fatal: the
+				// store holds import_binding candidates to a per-candidate
+				// import chain that only resolver-bound targets carry, so the
+				// atomic attach aborted and rolled the whole analysis back.
+				publishedMechanism = "impl_method"
 				if len(candidateNodeIDs) == 0 {
 					publishedDispatchState = string(resolver.DispatchZero)
 				} else if len(candidateNodeIDs) > 1 {
