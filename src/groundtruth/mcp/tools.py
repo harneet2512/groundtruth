@@ -1575,6 +1575,167 @@ def _find_pattern_example(sibling_contents: dict[str, list[str]], pattern: str) 
     return ""
 
 
+# ── gt_* composite surfaces (graph.db derived tables) ──────────────────────
+# Thin wrappers over src/groundtruth/mcp/endpoints/* — the endpoint modules
+# hold the logic and the typed-abstention envelope; these handlers register
+# them on the tools surface (and below, on the `do` pipeline) like every
+# other handler. Each requires a graph.db-backed store; on any other store
+# the endpoint returns its typed "unavailable" result, never an exception.
+
+
+async def handle_gt_trace(
+    from_symbol: str,
+    to_symbol: str,
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+    root_path: str = "",
+    max_depth: int = 6,
+) -> dict[str, Any]:
+    """Directed path between two symbols over the call graph."""
+    start = time.monotonic_ns()
+    from groundtruth.mcp.endpoints.trace_path import handle_gt_trace as _handle
+
+    result = await _handle(
+        from_symbol, to_symbol, store, graph, root_path, max_depth=max_depth
+    )
+    elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
+    tracker.record(tool="gt_trace", phase="trace_path", outcome="valid", latency_ms=elapsed_ms)
+    status = result.get("status")
+    guidance = {
+        "ok": f"Path found: {result.get('hops', 0)} hop(s). Each hop shows relation/confidence.",
+        "no_path": "No directed path within the search bound. Try a different pair or direction.",
+        "ambiguous": "Ambiguous name — disambiguate via the returned candidates' qualified_name.",
+        "not_found": "Symbol not indexed. Check the name or run gt-index first.",
+    }.get(status, "Graph tables unavailable — index this repo with gt-index.")
+    result["reasoning_guidance"] = guidance
+    return result
+
+
+async def handle_gt_detect_changes(
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+    root_path: str = "",
+    diff: str | None = None,
+) -> dict[str, Any]:
+    """What breaks if I commit this — changed symbols + witnessed processes."""
+    start = time.monotonic_ns()
+    from groundtruth.mcp.endpoints.detect_changes import (
+        handle_gt_detect_changes as _handle,
+    )
+
+    result = await _handle(store, graph, root_path, diff=diff)
+    elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
+    tracker.record(
+        tool="gt_detect_changes",
+        phase="detect_changes",
+        outcome="valid",
+        latency_ms=elapsed_ms,
+    )
+    result["reasoning_guidance"] = (
+        f"{result.get('changed_count', 0)} changed symbol(s), "
+        f"{result.get('affected_count', 0)} affected process(es), "
+        f"risk={result.get('risk_level', 'unknown')}. "
+        "affected_processes are test-witnessed flows crossing the change."
+    )
+    return result
+
+
+async def handle_gt_route_map(
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+    root_path: str = "",
+) -> dict[str, Any]:
+    """Service-boundary routes: handler, consumers, downstream flows."""
+    start = time.monotonic_ns()
+    from groundtruth.mcp.endpoints.route_map import handle_gt_route_map as _handle
+
+    result = await _handle(store, graph, root_path)
+    elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
+    tracker.record(
+        tool="gt_route_map", phase="route_map", outcome="valid", latency_ms=elapsed_ms
+    )
+    result["reasoning_guidance"] = (
+        f"{len(result.get('routes', []))} route(s). Routes named 'unknown' had "
+        "unreadable decorator lines; consumers flagged file_level are file-granular."
+    )
+    return result
+
+
+async def handle_gt_api_impact(
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+    root_path: str = "",
+    route: str | None = None,
+    handler: str | None = None,
+) -> dict[str, Any]:
+    """Consumer-key impact analysis for API routes."""
+    start = time.monotonic_ns()
+    from groundtruth.mcp.endpoints.route_map import handle_gt_api_impact as _handle
+
+    result = await _handle(store, graph, root_path, route=route, handler=handler)
+    elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
+    tracker.record(
+        tool="gt_api_impact", phase="api_impact", outcome="valid", latency_ms=elapsed_ms
+    )
+    result["reasoning_guidance"] = (
+        f"{len(result.get('routes', []))} route(s) analyzed. "
+        "attributionNote marks multi-fetch consumers whose impact is shared."
+    )
+    return result
+
+
+async def handle_gt_closure(
+    symbol: str,
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+    root_path: str = "",
+) -> dict[str, Any]:
+    """Transitive callers/callees from the precomputed closure table."""
+    start = time.monotonic_ns()
+    from groundtruth.mcp.endpoints.closure import handle_gt_closure as _handle
+
+    result = await _handle(symbol, store, graph, root_path)
+    elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
+    tracker.record(
+        tool="gt_closure", phase="closure", outcome="valid", latency_ms=elapsed_ms
+    )
+    result["reasoning_guidance"] = (
+        f"{len(result.get('callers', []))} transitive caller(s), "
+        f"{len(result.get('callees', []))} callee(s) (depth<=3, conf>=0.5)"
+        f"{'; closure flagged stale' if result.get('stale') else ''}."
+    )
+    return result
+
+
+async def handle_gt_community(
+    store: SymbolStore,
+    graph: ImportGraph,
+    tracker: InterventionTracker,
+    root_path: str = "",
+    name: str | None = None,
+    member: str | None = None,
+) -> dict[str, Any]:
+    """Community decomposition: cohesive regions with members and cohesion."""
+    start = time.monotonic_ns()
+    from groundtruth.mcp.endpoints.community import handle_gt_community as _handle
+
+    result = await _handle(store, graph, root_path, name=name, member=member)
+    elapsed_ms = (time.monotonic_ns() - start) // 1_000_000
+    tracker.record(
+        tool="gt_community", phase="community", outcome="valid", latency_ms=elapsed_ms
+    )
+    result["reasoning_guidance"] = (
+        f"{len(result.get('communities', []))} communit(y/ies). "
+        "cohesion null means unmeasurable — it is not zero."
+    )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Meta-tool: groundtruth_do
 # ---------------------------------------------------------------------------
@@ -1635,6 +1796,14 @@ _VALID_STEPS: set[str] = {
     "symbols",
     "context",
     "patterns",
+    # gt_* composite surfaces — explicit-steps only; auto pipelines never
+    # emit them (they are not in _DEPTH_PIPELINES / _INTENT_PIPELINE_OVERRIDES).
+    "trace_path",
+    "detect_changes",
+    "route_map",
+    "api_impact",
+    "closure",
+    "community",
 }
 
 
@@ -1801,6 +1970,25 @@ def _summarize_step(step_name: str, data: dict[str, Any]) -> str | None:
         return f"{len(usages)} usage(s)"
     elif step_name == "patterns":
         return "patterns detected"
+    elif step_name == "trace_path":
+        hops = data.get("hops")
+        return f"path {data.get('status', '?')}" + (f" ({hops} hops)" if hops is not None else "")
+    elif step_name == "detect_changes":
+        return (
+            f"{data.get('changed_count', 0)} changed, "
+            f"{data.get('affected_count', 0)} affected, risk={data.get('risk_level', '?')}"
+        )
+    elif step_name == "route_map":
+        return f"{len(data.get('routes', []))} route(s)"
+    elif step_name == "api_impact":
+        return f"{len(data.get('routes', []))} route(s) analyzed"
+    elif step_name == "closure":
+        return (
+            f"{len(data.get('callers', []))} callers, "
+            f"{len(data.get('callees', []))} callees"
+        )
+    elif step_name == "community":
+        return f"{len(data.get('communities', []))} communit(y/ies)"
     return None
 
 
@@ -2119,6 +2307,65 @@ async def _execute_step(
             store=store,
             tracker=tracker,
             root_path=root_path or "",
+        )
+
+    # ── gt_* composite surfaces (explicit-steps only) ─────────────────────
+    elif step_name == "trace_path":
+        from_sym = _arg("from_symbol") or _arg("from")
+        to_sym = _arg("to_symbol") or _arg("to")
+        if not from_sym or not to_sym:
+            return {"error": "trace_path requires from_symbol and to_symbol"}
+        return await handle_gt_trace(
+            from_sym,
+            to_sym,
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=root_path or "",
+        )
+    elif step_name == "detect_changes":
+        return await handle_gt_detect_changes(
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=root_path or "",
+            diff=_arg("diff"),
+        )
+    elif step_name == "route_map":
+        return await handle_gt_route_map(
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=root_path or "",
+        )
+    elif step_name == "api_impact":
+        return await handle_gt_api_impact(
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=root_path or "",
+            route=_arg("route"),
+            handler=_arg("handler"),
+        )
+    elif step_name == "closure":
+        sym = _arg("symbol")
+        if not sym:
+            return {"error": "closure requires a symbol"}
+        return await handle_gt_closure(
+            sym,
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=root_path or "",
+        )
+    elif step_name == "community":
+        return await handle_gt_community(
+            store=store,
+            graph=graph,
+            tracker=tracker,
+            root_path=root_path or "",
+            name=_arg("name"),
+            member=_arg("member"),
         )
 
     return {"error": f"Unknown step: {step_name}"}

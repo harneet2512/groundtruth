@@ -9,6 +9,14 @@ Tools registered:
   gt_impact(target, file_path="")
   gt_check(file_path)
 
+Derived-table surfaces (read graph.db directly — no gt_intel, no caps):
+  gt_trace(from_symbol, to_symbol, max_depth=6)
+  gt_detect_changes(diff=None)
+  gt_route_map()
+  gt_api_impact(route=None, handler=None)
+  gt_closure(symbol)
+  gt_community(name=None, member=None)
+
 The implementations live in ``groundtruth.mcp.composite``; this module is
 just the FastMCP transport wrapper. ``GT_INSTANCE_ID`` env (set by the OH
 wrapper before launching this server) is consumed by the budget counter
@@ -60,6 +68,77 @@ def create_composite_server(root_path: str, db_path: str) -> FastMCP:
             file_path,
             db_path=db_path,
             root_path=root_path,
+        )
+
+    # ── derived-table surfaces ─────────────────────────────────────────────
+
+    @app.tool()
+    async def gt_trace(from_symbol: str, to_symbol: str, max_depth: int = 6) -> str:
+        """Directed path between two symbols over the call graph."""
+        from groundtruth.mcp.composite import gt_trace_impl
+
+        return gt_trace_impl(
+            from_symbol,
+            to_symbol,
+            db_path=db_path,
+            root_path=root_path,
+            max_depth=max_depth,
+        )
+
+    @app.tool()
+    async def gt_detect_changes(diff: str | None = None) -> str:
+        """What breaks if I commit this — changed symbols + witnessed processes."""
+        from groundtruth.mcp.composite import gt_detect_changes_impl
+
+        return gt_detect_changes_impl(
+            db_path=db_path,
+            root_path=root_path,
+            diff=diff,
+        )
+
+    @app.tool()
+    async def gt_route_map() -> str:
+        """Service-boundary routes: handler, consumers, downstream flows."""
+        from groundtruth.mcp.composite import gt_route_map_impl
+
+        return gt_route_map_impl(
+            db_path=db_path,
+            root_path=root_path,
+        )
+
+    @app.tool()
+    async def gt_api_impact(route: str | None = None, handler: str | None = None) -> str:
+        """Consumer-key impact analysis for API routes."""
+        from groundtruth.mcp.composite import gt_api_impact_impl
+
+        return gt_api_impact_impl(
+            db_path=db_path,
+            root_path=root_path,
+            route=route,
+            handler=handler,
+        )
+
+    @app.tool()
+    async def gt_closure(symbol: str) -> str:
+        """Transitive callers/callees from the precomputed closure table."""
+        from groundtruth.mcp.composite import gt_closure_impl
+
+        return gt_closure_impl(
+            symbol,
+            db_path=db_path,
+            root_path=root_path,
+        )
+
+    @app.tool()
+    async def gt_community(name: str | None = None, member: str | None = None) -> str:
+        """Community decomposition: cohesive regions with members and cohesion."""
+        from groundtruth.mcp.composite import gt_community_impl
+
+        return gt_community_impl(
+            db_path=db_path,
+            root_path=root_path,
+            name=name,
+            member=member,
         )
 
     return app

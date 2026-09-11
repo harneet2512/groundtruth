@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from typing import Any
 
 _DEFAULT_COUNTER_DIR = "/tmp"
@@ -458,3 +459,282 @@ def _record_check_coverage(instance_id: str, file_path: str) -> None:
             fh.write(json.dumps({"instance_id": instance_id, "file": file_path}) + "\n")
     except OSError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# gt_* derived-table surfaces
+#
+# These impls read the graph.db derived schema DIRECTLY (nodes/edges/closure/
+# processes/process_steps/communities/community_members via
+# endpoints/_graph_db + the endpoints' sync cores) — no gt_intel involvement.
+# The endpoint cores already return the typed-abstention envelope
+# (unavailable / not_found / ambiguous / degraded flags), so each impl is a
+# thin open-conn -> run-core -> serialize inside <gt-evidence> (the same
+# serialization precedent as server.py's gt_replan). Uncapped: these are
+# read-only graph lookups, not gt_intel evidence pulls.
+# ---------------------------------------------------------------------------
+
+
+def _format_json_block(tool: str, payload: dict[str, Any]) -> str:
+    """Serialize a typed endpoint result inside a <gt-evidence> block."""
+    body = json.dumps(payload, sort_keys=True, default=str)
+    return f'<gt-evidence tool="{tool}">\n{body}\n</gt-evidence>'
+
+
+def _graph_conn(db_path: str) -> sqlite3.Connection | None:
+    """Open graph.db for a derived-surface impl (None = file missing/unreadable)."""
+    if not db_path or not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error:
+        return None
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def gt_trace_impl(
+    from_symbol: str,
+    to_symbol: str,
+    *,
+    db_path: str,
+    root_path: str,
+    max_depth: int = 6,
+    instance_id: str | None = None,
+) -> str:
+    """gt_trace — directed path between two symbols over the call graph."""
+    _t0 = time.monotonic()
+    iid = _resolve_instance_id(instance_id)
+    conn = _graph_conn(db_path)
+    if conn is None:
+        payload: dict[str, Any] = {
+            "status": "unavailable",
+            "reason": "graph_db_missing",
+            "path": [],
+            "truncated": False,
+        }
+    else:
+        try:
+            from groundtruth.mcp.endpoints.trace_path import run_trace
+
+            payload = run_trace(conn, from_symbol, to_symbol, max_depth=max_depth)
+        except Exception as exc:
+            payload = {
+                "status": "unavailable",
+                "reason": f"trace_failed: {exc}",
+                "path": [],
+                "truncated": False,
+            }
+        finally:
+            conn.close()
+    out = _format_json_block("gt_trace", payload)
+    _emit_endpoint_telemetry(
+        iid, "gt_trace", {"from": from_symbol, "to": to_symbol}, out, _t0
+    )
+    return out
+
+
+def gt_detect_changes_impl(
+    *,
+    db_path: str,
+    root_path: str,
+    diff: str | None = None,
+    instance_id: str | None = None,
+) -> str:
+    """gt_detect_changes — what breaks if I commit this (diff -> symbols -> processes)."""
+    _t0 = time.monotonic()
+    iid = _resolve_instance_id(instance_id)
+    conn = _graph_conn(db_path)
+    if conn is None:
+        payload = {
+            "changed_count": 0,
+            "affected_count": 0,
+            "risk_level": "unknown",
+            "changed_symbols": [],
+            "affected_processes": [],
+            "partial": True,
+            "truncated": False,
+            "unmapped_files": [],
+            "degraded": ["graph_db_missing"],
+        }
+    else:
+        try:
+            from groundtruth.mcp.endpoints.detect_changes import run_detect_changes
+
+            payload = run_detect_changes(conn, root_path, diff=diff)
+        except Exception as exc:
+            payload = {
+                "changed_count": 0,
+                "affected_count": 0,
+                "risk_level": "unknown",
+                "changed_symbols": [],
+                "affected_processes": [],
+                "partial": True,
+                "truncated": False,
+                "unmapped_files": [],
+                "degraded": [f"detect_changes_failed: {exc}"],
+            }
+        finally:
+            conn.close()
+    out = _format_json_block("gt_detect_changes", payload)
+    _emit_endpoint_telemetry(
+        iid, "gt_detect_changes", {"diff_passed": diff is not None}, out, _t0
+    )
+    return out
+
+
+def gt_route_map_impl(
+    *,
+    db_path: str,
+    root_path: str,
+    instance_id: str | None = None,
+) -> str:
+    """gt_route_map — service-boundary routes with consumers and flows."""
+    _t0 = time.monotonic()
+    iid = _resolve_instance_id(instance_id)
+    conn = _graph_conn(db_path)
+    if conn is None:
+        payload = {
+            "status": "unavailable",
+            "reason": "graph_db_missing",
+            "routes": [],
+            "truncated": False,
+        }
+    else:
+        try:
+            from groundtruth.mcp.endpoints.route_map import run_route_map
+
+            payload = run_route_map(conn, root_path)
+        except Exception as exc:
+            payload = {
+                "status": "unavailable",
+                "reason": f"route_map_failed: {exc}",
+                "routes": [],
+                "truncated": False,
+            }
+        finally:
+            conn.close()
+    out = _format_json_block("gt_route_map", payload)
+    _emit_endpoint_telemetry(iid, "gt_route_map", {}, out, _t0)
+    return out
+
+
+def gt_api_impact_impl(
+    *,
+    db_path: str,
+    root_path: str,
+    route: str | None = None,
+    handler: str | None = None,
+    instance_id: str | None = None,
+) -> str:
+    """gt_api_impact — route map plus consumer-key attribution analysis."""
+    _t0 = time.monotonic()
+    iid = _resolve_instance_id(instance_id)
+    conn = _graph_conn(db_path)
+    if conn is None:
+        payload = {
+            "status": "unavailable",
+            "reason": "graph_db_missing",
+            "routes": [],
+            "truncated": False,
+        }
+    else:
+        try:
+            from groundtruth.mcp.endpoints.route_map import run_api_impact
+
+            payload = run_api_impact(conn, root_path, route=route, handler=handler)
+        except Exception as exc:
+            payload = {
+                "status": "unavailable",
+                "reason": f"api_impact_failed: {exc}",
+                "routes": [],
+                "truncated": False,
+            }
+        finally:
+            conn.close()
+    out = _format_json_block("gt_api_impact", payload)
+    _emit_endpoint_telemetry(
+        iid, "gt_api_impact", {"route": route, "handler": handler}, out, _t0
+    )
+    return out
+
+
+def gt_closure_impl(
+    symbol: str,
+    *,
+    db_path: str,
+    root_path: str,
+    instance_id: str | None = None,
+) -> str:
+    """gt_closure — transitive callers/callees from the precomputed closure table."""
+    _t0 = time.monotonic()
+    iid = _resolve_instance_id(instance_id)
+    conn = _graph_conn(db_path)
+    if conn is None:
+        payload = {
+            "status": "unavailable",
+            "reason": "graph_db_missing",
+            "symbol": symbol,
+            "callers": [],
+            "callees": [],
+            "truncated": False,
+        }
+    else:
+        try:
+            from groundtruth.mcp.endpoints.closure import run_closure
+
+            payload = run_closure(conn, symbol)
+        except Exception as exc:
+            payload = {
+                "status": "unavailable",
+                "reason": f"closure_failed: {exc}",
+                "symbol": symbol,
+                "callers": [],
+                "callees": [],
+                "truncated": False,
+            }
+        finally:
+            conn.close()
+    out = _format_json_block("gt_closure", payload)
+    _emit_endpoint_telemetry(iid, "gt_closure", {"symbol": symbol}, out, _t0)
+    return out
+
+
+def gt_community_impl(
+    *,
+    db_path: str,
+    root_path: str,
+    name: str | None = None,
+    member: str | None = None,
+    instance_id: str | None = None,
+) -> str:
+    """gt_community — the producer's community decomposition surface."""
+    _t0 = time.monotonic()
+    iid = _resolve_instance_id(instance_id)
+    conn = _graph_conn(db_path)
+    if conn is None:
+        payload = {
+            "status": "unavailable",
+            "reason": "graph_db_missing",
+            "communities": [],
+            "truncated": False,
+        }
+    else:
+        try:
+            from groundtruth.mcp.endpoints.community import run_community
+
+            payload = run_community(conn, name=name, member=member)
+        except Exception as exc:
+            payload = {
+                "status": "unavailable",
+                "reason": f"community_failed: {exc}",
+                "communities": [],
+                "truncated": False,
+            }
+        finally:
+            conn.close()
+    out = _format_json_block("gt_community", payload)
+    _emit_endpoint_telemetry(
+        iid, "gt_community", {"name": name, "member": member}, out, _t0
+    )
+    return out
