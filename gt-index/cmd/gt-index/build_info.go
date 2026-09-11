@@ -33,7 +33,7 @@ func declaredBuildIdentity() buildIdentity {
 	if toolchain == "" || toolchain == "unknown" {
 		toolchain = runtime.Version()
 	}
-	capabilities := []string{"atomic_graph_publication", "batch_parser_node_reuse_v1", "call_resolution_v2", "framework_surface_resolution_v1", "incremental_stale_suppression", "parse_failure_accounting", "parser_inspection_v1", "retained_call_candidates", "versioned_query_policy"}
+	capabilities := []string{"atomic_graph_publication", "batch_parser_node_reuse_v1", "call_resolution_v2", "data_access_edges_v1", "framework_surface_resolution_v1", "incremental_stale_suppression", "parse_failure_accounting", "parser_inspection_v1", "retained_call_candidates", "versioned_query_policy"}
 	sort.Strings(capabilities)
 	identityMaterial := strings.Join([]string{commitSHA, buildTimeUTC, sourceFingerprint, toolchain, compiledBuildTags, schemaVersion, strings.Join(capabilities, ",")}, "\x00")
 	buildSum := sha256.Sum256([]byte(identityMaterial))
