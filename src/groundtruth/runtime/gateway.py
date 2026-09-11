@@ -2109,7 +2109,14 @@ def _candidate_callers_of_symbol_in_file(con, sym: str, rel: str, root: str) -> 
                 "caller_node_id": c.get("caller_node_id"),
             }
         )
-    out.sort(key=lambda row: (-float(row["confidence"] or 0.0), row["file"], row["line"], row["identity"]))
+    out.sort(
+        key=lambda row: (
+            -float(row["confidence"] or 0.0),
+            row["file"],
+            row["line"],
+            row["identity"],
+        )
+    )
     return out
 
 
@@ -4288,7 +4295,11 @@ def _produce_caller_contract_view(
                 for symbol, definition_line in definitions:
                     if (
                         _validated_repository_witness_state(
-                            event, state, rel, definition_line, symbol,
+                            event,
+                            state,
+                            rel,
+                            definition_line,
+                            symbol,
                         )
                         is None
                     ):
@@ -4312,8 +4323,7 @@ def _produce_caller_contract_view(
                         cstate = _source_state_for_file(event, state, caller_file)
                         if cstate is None:
                             continue
-                        csites.append({**csite, "file": caller_file,
-                                       "source_state": cstate})
+                        csites.append({**csite, "file": caller_file, "source_state": cstate})
                     if csites:
                         candidate_contracts.append((symbol, csites))
                 if not candidate_contracts:
@@ -4323,17 +4333,15 @@ def _produce_caller_contract_view(
                         detail={"file": rel, "definitions": len(definitions)},
                     )
                     continue
-                all_csites = [
-                    (s, c) for s, cs in candidate_contracts for c in cs
-                ]
+                all_csites = [(s, c) for s, cs in candidate_contracts for c in cs]
                 all_csites.sort(
-                    key=lambda sc: (-float(sc[1]["confidence"]),
-                                    sc[1]["file"], sc[1]["line"])
+                    key=lambda sc: (-float(sc[1]["confidence"]), sc[1]["file"], sc[1]["line"])
                 )
                 total_candidates = len(all_csites)
                 all_csites = all_csites[:8]
                 graph_revision, _valid_until = _revisions_for(
-                    state, "caller_contract_view",
+                    state,
+                    "caller_contract_view",
                 )
                 c_caller_rows = tuple(
                     CallerEvidenceRow(
@@ -4352,7 +4360,8 @@ def _produce_caller_contract_view(
                 c_n_files = len({str(c["file"]) for _s, c in all_csites})
                 trunc = (
                     f" (top {len(all_csites)} of {total_candidates})"
-                    if total_candidates > len(all_csites) else ""
+                    if total_candidates > len(all_csites)
+                    else ""
                 )
                 delivered_per_symbol: dict[str, int] = {}
                 for _s, _c in all_csites:
@@ -4373,15 +4382,10 @@ def _produce_caller_contract_view(
                         fact_kind="caller_contract_view",
                         target=rel,
                         body_lines=c_body,
-                        evidence=[
-                            (str(c["file"]), int(c["line"])) for _s, c in all_csites
-                        ],
+                        evidence=[(str(c["file"]), int(c["line"])) for _s, c in all_csites],
                         tier=WARNING,
                         producer="caller_contract",
-                        symbol=(
-                            c_symbols[0] if len(c_symbols) == 1
-                            else "viewed_file_contract"
-                        ),
+                        symbol=(c_symbols[0] if len(c_symbols) == 1 else "viewed_file_contract"),
                         confidence=c_min_conf,
                         native_args={
                             "caller_rows": tuple(
@@ -5105,9 +5109,7 @@ def _produce_raw_candidates(
                     "kill_switch_off"
                     if not _change_surface_producer_on()
                     else (
-                        "cs_edit_trigger_off"
-                        if not _cs_edit_trigger_on()
-                        else "not_file_creation"
+                        "cs_edit_trigger_off" if not _cs_edit_trigger_on() else "not_file_creation"
                     )
                 ),
             )

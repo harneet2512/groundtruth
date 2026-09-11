@@ -39,10 +39,7 @@ def _mk_graph(path):
         "'pkg/other.py',1,5,'def use_it()','',1,0,'python',NULL)"
     )
     # candidate-tier edge: name_match at 0.6 — below the FACT gate
-    con.execute(
-        "INSERT INTO edges VALUES (1,2,1,'CALLS',3,'pkg/other.py',"
-        "'name_match',0.6,NULL)"
-    )
+    con.execute("INSERT INTO edges VALUES (1,2,1,'CALLS',3,'pkg/other.py','name_match',0.6,NULL)")
     con.commit()
     con.close()
 
@@ -51,7 +48,9 @@ def test_candidate_tier_caller_view_delivers_warning_envelope(tmp_path, monkeypa
     monkeypatch.setenv("GT_GATEWAY", "1")
     pkg = tmp_path / "pkg"
     pkg.mkdir()
-    (pkg / "mod.py").write_text("def outer():\n    def helper():\n        return 1\n", encoding="utf-8")
+    (pkg / "mod.py").write_text(
+        "def outer():\n    def helper():\n        return 1\n", encoding="utf-8"
+    )
     (pkg / "other.py").write_text("def use_it():\n    x = 1\n    helper()\n", encoding="utf-8")
     db = tmp_path / "graph.db"
     _mk_graph(str(db))

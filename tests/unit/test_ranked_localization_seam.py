@@ -46,16 +46,12 @@ def test_localizer_seam_is_wired():
     assert callable(gateway._localize)
 
 
-def test_ranked_localization_emits_rows_when_localizer_has_candidates(
-    tmp_path, monkeypatch
-):
+def test_ranked_localization_emits_rows_when_localizer_has_candidates(tmp_path, monkeypatch):
     monkeypatch.setenv("GT_GATEWAY", "1")
     monkeypatch.setenv("GT_LOC_RESLOT", "1")
     pkg = tmp_path / "pkg"
     pkg.mkdir()
-    (pkg / "snap.py").write_text(
-        "def snapshot():\n    return 1\n", encoding="utf-8"
-    )
+    (pkg / "snap.py").write_text("def snapshot():\n    return 1\n", encoding="utf-8")
     db = tmp_path / "graph.db"
     _mk_graph(str(db))
 

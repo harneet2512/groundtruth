@@ -6,7 +6,6 @@ These tests drive produce_raw with the gates OFF and assert the
 ``producer.dispatch`` / ``not_entered`` row carries the right skip reason.
 """
 
-
 from groundtruth.runtime.gateway import (
     GatewayState,
     ToolEvent,
