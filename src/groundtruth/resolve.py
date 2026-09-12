@@ -553,7 +553,70 @@ def _get_ambiguous_edges(
     query += " ORDER BY e.confidence ASC, e.source_file, e.source_line, e.id LIMIT ?"
     params.append(int(limit))
 
-    return [dict(row) for row in conn.execute(query, params).fetchall()]
+    rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    if not has_primary:
+        return rows
+
+    # The edge-driven join above can only reach ambiguous callsites that own a
+    # uniquely-bound legacy CALLS row at their (caller, file, line, lexeme)
+    # tuple. Same-line same-lexeme clusters (minified bundles pack dozens of
+    # same-named callsites onto one line, distinguished only by column) and
+    # callsites that produced no CALLS edge at all are invisible to it — the
+    # receipt then reports selection_bounded even though every callsite's
+    # CANDIDATE_TARGET edges exist. The callsite is the promotion unit: it
+    # carries its own column for the definition request and its own candidate
+    # edges, so enumerate the uncovered remainder directly. These rows carry
+    # id/target_id NULL: the resolver records the selection canonically
+    # (SELECTED_TARGET + callsite state) and does not touch a legacy edge it
+    # cannot honestly attribute.
+    covered = {str(row.get("callsite_stable_id") or "") for row in rows}
+    covered.discard("")
+    remaining = int(limit) - len(rows)
+    if remaining <= 0:
+        return rows
+
+    cs_query = """
+        SELECT NULL AS id, NULL AS target_id, NULL AS resolution_method,
+               NULL AS confidence,
+               cs.file_path AS source_file, cs.line_start AS source_line,
+               src.name AS caller_name, cs.language,
+               cs.callee_lexeme AS target_name, NULL AS target_file,
+               cs.id AS callsite_node_id, cs.stable_id AS callsite_stable_id,
+               cs.column_start AS callsite_column,
+               (cs.byte_end - cs.byte_start) AS callsite_byte_length,
+               (SELECT ct.id FROM edges ct
+                 WHERE ct.type='CANDIDATE_TARGET' AND ct.source_id=cs.id
+                   AND ct.callsite_stable_id=cs.stable_id
+                   AND ct.viability='viable'
+                 ORDER BY ct.ordinal, ct.id LIMIT 1) AS candidate_edge_id,
+               src.id AS source_id
+        FROM nodes cs
+        JOIN resolution_symbols caller
+          ON caller.stable_id = cs.caller_symbol_id
+        JOIN nodes src ON src.id = CAST(caller.native_id AS INTEGER)
+        WHERE cs.node_type='callsite' AND cs.candidate_state='ambiguous'
+    """
+    cs_params: list = []
+    if language:
+        cs_query += " AND cs.language = ?"
+        cs_params.append(language)
+    if source_files:
+        placeholders = ",".join("?" for _ in source_files)
+        cs_query += f" AND cs.file_path IN ({placeholders})"
+        cs_params.extend(source_files)
+    cs_query += " ORDER BY cs.file_path, cs.line_start, cs.column_start, cs.stable_id"
+
+    for row in conn.execute(cs_query, cs_params):
+        item = dict(row)
+        if item["callsite_stable_id"] in covered or item["candidate_edge_id"] is None:
+            continue
+        covered.add(item["callsite_stable_id"])
+        rows.append(item)
+        remaining -= 1
+        if remaining <= 0:
+            break
+    return rows
 
 
 def _print_summary(
@@ -940,6 +1003,18 @@ def _apply_lsp_resolution(
             stats["skipped"] += 1
             stats["skipped_primary_identity"] = stats.get("skipped_primary_identity", 0) + 1
             return "skipped"
+        if edge.get("id") is None:
+            # Callsite-driven row: the callsite's selection was just certified
+            # canonically (candidates excluded, SELECTED_TARGET emitted,
+            # candidate_state -> 'selected'), but there is no uniquely-bound
+            # legacy CALLS row to mirror it onto — legacy edges carry no
+            # column, so pairing inside a same-line same-lexeme cluster would
+            # be a guess. The resolution is real; the legacy mirror is
+            # honestly absent, and the outcome is "selected", not
+            # verified/corrected (there was no prior edge to confirm or fix).
+            conn.execute("RELEASE lsp_primary_projection")
+            stats["selected"] = stats.get("selected", 0) + 1
+            return "selected"
         _tier_clause = ", trust_tier = 'CERTIFIED'" if has_trust_tier else ""
         try:
             if lsp_target_id == current_target_id:
@@ -971,10 +1046,13 @@ def _apply_lsp_resolution(
         # from traversal AND from the name_match% residual (previously it stayed a 0.5-0.6
         # name_match and inflated the residual → a false `degraded` verdict).
         _ext_clause = ", trust_tier = 'SPECULATIVE'" if has_trust_tier else ""
-        conn.execute(
-            f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_external'{_ext_clause} WHERE id = ?",
-            (edge["id"],),
-        )
+        if edge.get("id") is not None:
+            conn.execute(
+                f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_external'{_ext_clause} WHERE id = ?",
+                (edge["id"],),
+            )
+        # Callsite-driven rows carry no legacy edge to tombstone; the callsite
+        # honestly stays 'ambiguous' — external resolution selected nothing.
         stats["skipped_external"] = stats.get("skipped_external", 0) + 1
         stats["skipped"] += 1
         return "skipped"
@@ -992,10 +1070,18 @@ def _apply_lsp_resolution(
         # auditable, excluded from traversal and the name_match% residual, but never destroyed —
         # correct-or-quiet, because a window miss under partial coverage is not proof of an FP.
         _miss_clause = ", trust_tier = 'SPECULATIVE'" if has_trust_tier else ""
-        conn.execute(
-            f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_window_miss'{_miss_clause} WHERE id = ?",
-            (edge["id"],),
-        )
+        if edge.get("id") is not None:
+            conn.execute(
+                f"UPDATE edges SET confidence = 0.0, resolution_method = 'lsp_window_miss'{_miss_clause} WHERE id = ?",
+                (edge["id"],),
+            )
+        else:
+            # No bound legacy edge exists to tombstone — counting `deleted`
+            # would report a mutation that never happened. The callsite stays
+            # 'ambiguous', which is true: no window match certified a target.
+            stats["skipped"] += 1
+            stats["skipped_window_miss_no_edge"] = stats.get("skipped_window_miss_no_edge", 0) + 1
+            return "skipped"
         # C-Finding5 (Fable LIPI): a window-miss is a non-destructive TOMBSTONE (edge KEPT at
         # conf=0.0), NOT a real deletion. `stats["deleted"]` continues to drive the liveness /
         # effective_work / verdict_hint chain UNCHANGED (this tombstone IS work the LSP did), but we
@@ -1341,6 +1427,11 @@ async def _resolve_edges_impl(
     stats: dict = {
         "verified": 0,
         "corrected": 0,
+        # Callsite-certified selections with no uniquely-bindable legacy CALLS
+        # row (same-line same-lexeme clusters, or callsites that never emitted
+        # one). Distinct from verified/corrected: no prior edge existed to
+        # confirm or fix.
+        "selected": 0,
         "deleted": 0,
         "window_miss": 0,
         "failed": 0,

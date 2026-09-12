@@ -81,7 +81,13 @@ def test_lsp_correction_updates_exact_primary_callsite_and_consumer() -> None:
     conn.execute("UPDATE edges SET target_id=2 WHERE id=100")
 
     eligible = _get_ambiguous_edges(conn, limit=10)
-    assert [item["id"] for item in eligible] == [100]
+    # callsite-one binds edge 100 uniquely (its candidate targets the edge's
+    # symbol); callsite-other shares the legacy tuple but owns no CALLS row —
+    # it is still enumerated edge-less for callsite-driven selection.
+    assert [(item["id"], item["callsite_stable_id"]) for item in eligible] == [
+        (100, "callsite-one"),
+        (None, "callsite-other"),
+    ]
     edge = dict(eligible[0])
     assert (edge["callsite_stable_id"], edge["callsite_column"]) == ("callsite-one", 4)
     edge["lsp_source_character"] = 13
@@ -133,11 +139,20 @@ def test_lsp_correction_updates_exact_primary_callsite_and_consumer() -> None:
     assert viable == 1
 
 
-def test_primary_scope_abstains_when_legacy_row_has_no_exact_callsite() -> None:
+def test_legacy_row_abstains_but_callsites_enumerate_when_no_exact_binding() -> None:
     conn = _graph()
     # Make the second exact callsite a candidate for the same legacy endpoint.
     conn.execute("UPDATE edges SET target_id=2,target_symbol_id='sym-old' WHERE id=102")
-    assert _get_ambiguous_edges(conn, limit=10) == []
+    rows = _get_ambiguous_edges(conn, limit=10)
+    # The legacy edge still abstains — no CALLS row can be honestly bound to
+    # one callsite — but both callsites are enumerated edge-less (id=None) so
+    # callsite-driven selection can still resolve each at its own column.
+    assert [row["id"] for row in rows] == [None, None]
+    assert {row["callsite_stable_id"] for row in rows} == {
+        "callsite-one",
+        "callsite-other",
+    }
+    assert all(row["candidate_edge_id"] is not None for row in rows)
 
 
 def test_multiple_lsp_definitions_do_not_promote_first_result() -> None:

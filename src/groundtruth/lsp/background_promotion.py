@@ -332,6 +332,7 @@ class LSPPromotionScheduler:
             "language_receipts": {},
             "verified": 0,
             "corrected": 0,
+            "selected": 0,
             "deleted": 0,
             "failed": 0,
             "closure_rebuilt": False,
@@ -383,7 +384,7 @@ class LSPPromotionScheduler:
                 receipt["selection_limitation"] = "bounded_or_primary_identity_unavailable"
             terminal["language_receipts"][language] = receipt
             terminal["languages_completed"].append(language)
-            for key in ("verified", "corrected", "deleted", "failed"):
+            for key in ("verified", "corrected", "selected", "deleted", "failed"):
                 terminal[key] += int(result.get(key, 0) or 0)
             if handle.cancellation_requested:
                 raise asyncio.CancelledError
@@ -433,7 +434,9 @@ class LSPPromotionScheduler:
             asyncio.run(self._run_languages(handle, candidate, attempted, receipt))
             if handle.cancellation_requested:
                 raise asyncio.CancelledError
-            edge_mutations = sum(int(receipt[key]) for key in ("verified", "corrected", "deleted"))
+            edge_mutations = sum(
+                int(receipt[key]) for key in ("verified", "corrected", "selected", "deleted")
+            )
             if edge_mutations:
                 receipt["closure_rebuilt"] = bool(self._closure_rebuilder(str(candidate)))
                 if not receipt["closure_rebuilt"]:
@@ -532,6 +535,7 @@ async def _promote_edges_progressive(
         "languages": languages,
         "verified": 0,
         "corrected": 0,
+        "selected": 0,
         "deleted": 0,
         "failed": 0,
     }
@@ -550,6 +554,7 @@ async def _promote_edges_progressive(
 
         _stats["verified"] += lang_stats.get("verified", 0)
         _stats["corrected"] += lang_stats.get("corrected", 0)
+        _stats["selected"] += lang_stats.get("selected", 0)
         _stats["deleted"] += lang_stats.get("deleted", 0)
         _stats["failed"] += lang_stats.get("failed", 0)
 
