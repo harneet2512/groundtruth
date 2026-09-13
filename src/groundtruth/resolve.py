@@ -1913,8 +1913,7 @@ async def _resolve_edges_impl(
         # the inventory from scratch anyway).
         _enrich_has_inventory = (
             _enrich_conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='parser_node_inventory'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='parser_node_inventory'"
             ).fetchone()
             is not None
         )
