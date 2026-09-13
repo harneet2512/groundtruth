@@ -1903,6 +1903,21 @@ async def _resolve_edges_impl(
         _enrich_conn.row_factory = sqlite3.Row
         _enrich_conn.execute("PRAGMA journal_mode=WAL")
         _enrich_conn.execute("PRAGMA busy_timeout=5000")
+        # parser_node_inventory records "a parse produced this row" (keyed by
+        # sha256 of the node AS PARSED; the Go producer's batch amend retains a
+        # stored row only when it reflect.DeepEqual's the fresh parse output).
+        # A hover-enriched row is no longer parse-faithful, so each UPDATE below
+        # must also evict the row from the inventory — otherwise every later
+        # batch amend refuses on the DeepEqual check. Older graphs may lack the
+        # table; probe once and skip the eviction there (a full rebuild creates
+        # the inventory from scratch anyway).
+        _enrich_has_inventory = (
+            _enrich_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='parser_node_inventory'"
+            ).fetchone()
+            is not None
+        )
         # Demand-scope the enrichment to the issue subgraph + 1-hop callers/callees.
         # Whole-repo hover (no scope) didOpen'd every file into the LSP server -> the
         # entire monorepo loaded into the (uncapped) server RSS -> OOM on large repos.
@@ -2118,6 +2133,16 @@ async def _resolve_edges_impl(
                         f"UPDATE nodes SET {', '.join(_updates)} WHERE id = ?",
                         tuple(_params),
                     )
+                    # The mutation above makes this row diverge from parser
+                    # output; evict it from parser_node_inventory IN THE SAME
+                    # TRANSACTION so the next batch amend inserts the node
+                    # fresh (no DeepEqual on it) and the inventory sweep drops
+                    # this stale row. See _enrich_has_inventory note above.
+                    if _enrich_has_inventory:
+                        _enrich_conn.execute(
+                            "DELETE FROM parser_node_inventory WHERE node_id = ?",
+                            (node_id,),
+                        )
                     _enriched += 1
 
                 enrich_stats["hover_ok"] += 1
