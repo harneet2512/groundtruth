@@ -30,7 +30,7 @@ func parsedEdgeKinds() []string {
 	return append([]string{"CONTAINS"}, specs.AllTaxonomyEdgeKinds...)
 }
 
-func (d *DB) ReconcileParsedEdges(edges []*Edge) (int, error) {
+func (d *DB) ReconcileParsedEdges(edges []*Edge) (int, int, error) {
 	values := make([][]any, 0, len(edges))
 	for _, e := range edges {
 		allowed := false
@@ -38,7 +38,7 @@ func (d *DB) ReconcileParsedEdges(edges []*Edge) (int, error) {
 			allowed = allowed || e.Type == kind
 		}
 		if !allowed {
-			return 0, fmt.Errorf("non-parser edge kind: %s", e.Type)
+			return 0, 0, fmt.Errorf("non-parser edge kind: %s", e.Type)
 		}
 		values = append(values, []any{e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
 			e.ResolutionMethod, e.Confidence, e.Metadata, e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus})
@@ -49,7 +49,7 @@ func (d *DB) ReconcileParsedEdges(edges []*Edge) (int, error) {
 
 // ReconcileParsedProperties retains exact parser-owned facts. Derived properties
 // are not in this inventory and continue to be rebuilt by their existing owner.
-func (d *DB) ReconcileParsedProperties(props []*Property) (int, error) {
+func (d *DB) ReconcileParsedProperties(props []*Property) (int, int, error) {
 	values := make([][]any, 0, len(props))
 	for _, p := range props {
 		values = append(values, []any{p.NodeID, p.Kind, p.Value, p.Line, p.Confidence})
@@ -60,7 +60,7 @@ func (d *DB) ReconcileParsedProperties(props []*Property) (int, error) {
 
 // Assertions include the freshly resolved target and score in their identity.
 // Unchanged test source alone cannot preserve an obsolete target resolution.
-func (d *DB) ReconcileParsedAssertions(assertions []*Assertion) (int, error) {
+func (d *DB) ReconcileParsedAssertions(assertions []*Assertion) (int, int, error) {
 	values := make([][]any, 0, len(assertions))
 	for _, a := range assertions {
 		values = append(values, []any{a.TestNodeID, a.TargetNodeID, a.ResolutionScore,
@@ -82,14 +82,14 @@ func factValuesDigest(values []any) (string, error) {
 // SQL identifiers here are private constants supplied by the two typed owners
 // above, not repository text. The whole replacement and its inventory commit
 // together; an invalid parent fact leaves the staged transaction unchanged.
-func (d *DB) reconcileParsedFacts(table, inventory, idColumn string, columns []string, desired [][]any) (int, error) {
+func (d *DB) reconcileParsedFacts(table, inventory, idColumn string, columns []string, desired [][]any) (int, int, error) {
 	tx, err := d.db.Begin()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer tx.Rollback()
 	if err := ensureParsedFactInventoryTx(tx); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	selected := make([]string, len(columns))
 	for i, column := range columns {
@@ -98,9 +98,10 @@ func (d *DB) reconcileParsedFacts(table, inventory, idColumn string, columns []s
 	rows, err := tx.Query("SELECT p.id,i.content_sha256," + strings.Join(selected, ",") +
 		" FROM " + table + " p JOIN " + inventory + " i ON i." + idColumn + "=p.id ORDER BY p.id")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	old := make(map[string][]int64)
+	diverged := 0
 	for rows.Next() {
 		var id int64
 		var expected string
@@ -111,39 +112,48 @@ func (d *DB) reconcileParsedFacts(table, inventory, idColumn string, columns []s
 		}
 		if err := rows.Scan(targets...); err != nil {
 			rows.Close()
-			return 0, err
+			return 0, 0, err
 		}
 		actual, err := factValuesDigest(values)
-		if err != nil || actual != expected {
+		if err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("batch parent %s row differs from parser inventory: %d", table, id)
+			return 0, 0, err
+		}
+		if actual != expected {
+			// The minted digest no longer describes this row: the parent was
+			// mutated underneath the inventory (an LSP-merge UPDATE or a
+			// reused rowid). Exclude it from retention — it is not the fact
+			// the entry claims, so it is swept below and the desired row is
+			// inserted fresh rather than aliasing stale content.
+			diverged++
+			continue
 		}
 		old[actual] = append(old[actual], id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, err
+		return 0, 0, err
 	}
 	rows.Close()
 	if _, err := tx.Exec("DELETE FROM " + inventory); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(columns)), ",")
 	insert, err := tx.Prepare("INSERT INTO " + table + " (" + strings.Join(columns, ",") + ") VALUES(" + placeholders + ")")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer insert.Close()
 	mark, err := tx.Prepare("INSERT INTO " + inventory + "(" + idColumn + ",content_sha256) VALUES(?,?)")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer mark.Close()
 	retained := 0
 	for _, values := range desired {
 		digest, err := factValuesDigest(values)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		var id int64
 		if available := old[digest]; len(available) > 0 {
@@ -153,15 +163,15 @@ func (d *DB) reconcileParsedFacts(table, inventory, idColumn string, columns []s
 		} else {
 			result, err := insert.Exec(values...)
 			if err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 			id, err = result.LastInsertId()
 			if err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 		}
 		if _, err := mark.Exec(id, digest); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	scope := ""
@@ -174,15 +184,15 @@ func (d *DB) reconcileParsedFacts(table, inventory, idColumn string, columns []s
 		}
 	}
 	if _, err := tx.Exec("DELETE FROM "+table+" WHERE "+scope+"id NOT IN (SELECT "+idColumn+" FROM "+inventory+")", scopeArgs...); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if table == "properties" {
 		if err := PopulatePropertiesFTS5Tx(tx); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return retained, nil
+	return retained, diverged, nil
 }

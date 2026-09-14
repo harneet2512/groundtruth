@@ -543,12 +543,12 @@ func main() {
 			couplingReusePlan = resolveCouplingReuse(db, *root)
 		}
 	}
-	nodeDBIDs, retainedNodes, err := db.ReplaceParsedStructure(allNodePtrs, *amendParent != "", batchIdentity.ExecutableSHA256, couplingReusePlan != nil)
+	nodeDBIDs, retainedNodes, divergedNodes, err := db.ReplaceParsedStructure(allNodePtrs, *amendParent != "", batchIdentity.ExecutableSHA256, couplingReusePlan != nil)
 	if err != nil {
 		abortStagedBuild(db, stagedOutput, "batch insert nodes: %v", err)
 	}
 	if *amendParent != "" {
-		fmt.Fprintf(os.Stderr, "  Batch structure: %d retained, %d inserted; one full resolver pass\n", retainedNodes, len(nodeDBIDs)-retainedNodes)
+		fmt.Fprintf(os.Stderr, "  Batch structure: %d retained, %d inserted, %d inventory-diverged; one full resolver pass\n", retainedNodes, len(nodeDBIDs)-retainedNodes, divergedNodes)
 	}
 
 	// Fix up parent IDs: map global index → DB ID
@@ -894,7 +894,7 @@ func main() {
 	// the nodes, their assigned ids and the property rows, which is what keeps
 	// this call site short.
 	taxonomyPtrs := taxonomy.DeriveEdges(allNodePtrs, nodeDBIDs, allProps)
-	retainedStructuralEdges, err := db.ReconcileParsedEdges(append(containsPtrs, taxonomyPtrs...))
+	retainedStructuralEdges, divergedEdges, err := db.ReconcileParsedEdges(append(containsPtrs, taxonomyPtrs...))
 	if err != nil {
 		abortStagedBuild(db, stagedOutput, "reconcile parser edges: %v", err)
 	}
@@ -921,7 +921,7 @@ func main() {
 			})
 		}
 	}
-	retainedProperties, err := db.ReconcileParsedProperties(propPtrs)
+	retainedProperties, divergedProperties, err := db.ReconcileParsedProperties(propPtrs)
 	if err != nil {
 		abortStagedBuild(db, stagedOutput, "reconcile parser properties: %v", err)
 	}
@@ -997,7 +997,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  Assertion targets resolved: %d/%d (%.0f%%)\n",
 			resolvedCount, len(assertPtrs), 100.0*float64(resolvedCount)/float64(len(assertPtrs)))
 	}
-	retainedAssertions, err := db.ReconcileParsedAssertions(assertPtrs)
+	retainedAssertions, divergedAssertions, err := db.ReconcileParsedAssertions(assertPtrs)
 	if err != nil {
 		abortStagedBuild(db, stagedOutput, "reconcile parser assertions: %v", err)
 	}
@@ -1295,13 +1295,19 @@ func main() {
 	if *amendParent != "" {
 		buildMode = "batch"
 	}
-	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d,"build_mode":%q,"parser_nodes_retained":%d,"parser_nodes_inserted":%d,"parse_cache_hits":%d,"parse_cache_misses":%d,"resolver_passes":1,"parser_properties_retained":%d,"parser_assertions_retained":%d,"parser_edges_retained":%d}`,
+	inventoryDiverged := divergedNodes + divergedEdges + divergedProperties + divergedAssertions
+	if inventoryDiverged > 0 {
+		fmt.Fprintf(os.Stderr, "  Parser inventory diverged entries healed: %d nodes, %d edges, %d properties, %d assertions\n",
+			divergedNodes, divergedEdges, divergedProperties, divergedAssertions)
+	}
+	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d,"build_mode":%q,"parser_nodes_retained":%d,"parser_nodes_inserted":%d,"parse_cache_hits":%d,"parse_cache_misses":%d,"resolver_passes":1,"parser_properties_retained":%d,"parser_assertions_retained":%d,"parser_edges_retained":%d,"inventory_diverged":%d}`,
 		len(files), nodeCount, edgeCount, len(allImports),
 		propertyCount, assertionCount,
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers, buildMode, retainedNodes,
 		len(nodeDBIDs)-retainedNodes, cacheHits, len(files)-cacheHits,
-		retainedProperties, retainedAssertions, retainedStructuralEdges)
+		retainedProperties, retainedAssertions, retainedStructuralEdges,
+		inventoryDiverged)
 	fmt.Println()
 
 	// Fail-closed stays fail-closed: an operator who requires the analysis layer

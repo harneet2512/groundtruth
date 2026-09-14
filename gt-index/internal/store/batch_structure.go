@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,61 +19,61 @@ import (
 // the amend re-walks the parent's recorded history window — see
 // resolveCouplingReuse in cmd/gt-index/derived.go — and the publication path
 // still decides per table whether the carried rows stand or are rebuilt.
-func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA string, preserveCoupling bool) ([]int64, int, error) {
+func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA string, preserveCoupling bool) ([]int64, int, int, error) {
 	tx, err := d.db.Begin()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer tx.Rollback()
 	if amend {
 		var payload, digest string
 		if err := tx.QueryRow(`SELECT value FROM project_meta WHERE key=?`, CorePhaseReceiptKey).Scan(&payload); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		if err := tx.QueryRow(`SELECT value FROM project_meta WHERE key=?`, CorePhaseReceiptSHA256Key).Scan(&digest); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		var receipt CorePhaseReceipt
 		if err := json.Unmarshal([]byte(payload), &receipt); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		sealed, actual, err := receipt.Seal()
 		if err != nil || sealed != payload || actual != digest || executableSHA == "" || receipt.ExecutableSHA256 != executableSHA {
-			return nil, 0, fmt.Errorf("batch parent core identity does not match producer")
+			return nil, 0, 0, fmt.Errorf("batch parent core identity does not match producer")
 		}
 		var inventory int
 		if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='parser_node_inventory'`).Scan(&inventory); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		if inventory != 1 {
-			return nil, 0, fmt.Errorf("batch parent has no parser inventory; full build required")
+			return nil, 0, 0, fmt.Errorf("batch parent has no parser inventory; full build required")
 		}
 	}
 	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS parser_node_inventory (
 		identity TEXT PRIMARY KEY, node_id INTEGER NOT NULL UNIQUE REFERENCES nodes(id))`); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	old := make(map[string]int64)
 	rows, err := tx.Query(`SELECT identity,node_id FROM parser_node_inventory`)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	for rows.Next() {
 		var key string
 		var id int64
 		if err := rows.Scan(&key, &id); err != nil {
 			rows.Close()
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		old[key] = id
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	rows.Close()
 	if err := ensureParsedFactInventoryTx(tx); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	// Parent pointers are resolved from this revision's complete parser inputs
 	// after this transaction. Never carry an old resolution or analysis receipt.
@@ -94,25 +95,26 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 		for _, table := range tables {
 			var exists int
 			if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
-				return nil, 0, err
+				return nil, 0, 0, err
 			}
 			if exists != 0 {
 				if _, err := tx.Exec(`DELETE FROM "` + table + `"`); err != nil {
-					return nil, 0, fmt.Errorf("clear %s: %w", table, err)
+					return nil, 0, 0, fmt.Errorf("clear %s: %w", table, err)
 				}
 			}
 		}
 		if _, err := tx.Exec(`UPDATE nodes SET parent_id=NULL`); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 	}
 	if _, err := tx.Exec(`DELETE FROM parser_node_inventory`); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	ids := make([]int64, len(nodes))
 	keys := make([]string, len(nodes))
 	ordinals := make(map[string]int)
 	retained := 0
+	diverged := 0
 	for i, node := range nodes {
 		// Parent indexes have already been zeroed; file-local ordinal distinguishes
 		// identical declarations. FileHash invalidates every node in an edited file.
@@ -121,7 +123,7 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 			Ordinal int
 		}{node, ordinals[node.FilePath]})
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		ordinals[node.FilePath]++
 		sum := sha256.Sum256(material)
@@ -137,12 +139,23 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 				FROM nodes WHERE id=?`, ids[i]).Scan(&actual.Label, &actual.Name, &actual.QualifiedName, &actual.FilePath,
 				&actual.StartLine, &actual.EndLine, &actual.Signature, &actual.ReturnType, &actual.IsExported, &actual.IsTest,
 				&actual.Language, &actual.FileHash, &actual.ByteStart, &actual.ByteEnd)
+			if err != nil && err != sql.ErrNoRows {
+				return nil, 0, 0, err
+			}
 			if err != nil || !reflect.DeepEqual(actual, *node) {
-				return nil, 0, fmt.Errorf("batch parent parser row differs from its inventory: %s", node.FilePath)
+				// The entry aliases a row that is not this parse: the parent
+				// was mutated underneath the inventory (an LSP-merge UPDATE
+				// over an enriched row, or a rowid reused after delete).
+				// Treat it as absent — the fresh parse is inserted under a
+				// new id and the stale row dies in the non-inventoried sweep
+				// below, so tampered or orphaned content never survives.
+				ids[i] = 0
+				diverged++
+				continue
 			}
 			retained++
 			if _, err := tx.Exec(`INSERT INTO parser_node_inventory(identity,node_id) VALUES(?,?)`, keys[i], ids[i]); err != nil {
-				return nil, 0, err
+				return nil, 0, 0, err
 			}
 		}
 	}
@@ -158,11 +171,11 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 			`DELETE FROM assertions WHERE id NOT IN (SELECT assertion_id FROM parser_assertion_inventory)`,
 		} {
 			if _, err := tx.Exec(statement); err != nil {
-				return nil, 0, err
+				return nil, 0, 0, err
 			}
 		}
 		if _, err := tx.Exec(`DELETE FROM nodes WHERE id NOT IN (SELECT node_id FROM parser_node_inventory)`); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 	}
 	var missing []*Node
@@ -175,17 +188,17 @@ func (d *DB) ReplaceParsedStructure(nodes []*Node, amend bool, executableSHA str
 	}
 	inserted, err := BatchInsertNodesTx(tx, missing)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	for j, id := range inserted {
 		i := positions[j]
 		ids[i] = id
 		if _, err := tx.Exec(`INSERT INTO parser_node_inventory(identity,node_id) VALUES(?,?)`, keys[i], id); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	return ids, retained, nil
+	return ids, retained, diverged, nil
 }
