@@ -1185,6 +1185,14 @@ _READY_BUDGET_S_BY_SERVER = {
     # is a WAIT with early-exit on the first real answer, so warm servers are NOT slowed). 150s:
     # heavier than gopls metadata (60), lighter than a full rust/java index (180).
     "typescript-language-server": 150.0,
+    # pyright-langserver (.py): parses + analyzes the workspace AND site-packages stubs on the
+    # first didOpen; each promotion leg spawns a fresh server, so the 20s default expired
+    # mid-index on EVERY probing leg — smoke20 bandit-taint (run 34801009507): all 23 probing
+    # legs project_ready=false@20s/8 attempts -> zero resolved calls ever, while the receipts
+    # mislabeled it "succeeded". 150s matches the TLS class (project-scale load on first
+    # request); the early-exit keeps warm legs cheap.
+    "pyright-langserver": 150.0,
+    "pyright": 150.0,
 }
 
 
@@ -1913,7 +1921,8 @@ async def _resolve_edges_impl(
         # the inventory from scratch anyway).
         _enrich_has_inventory = (
             _enrich_conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='parser_node_inventory'"
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='parser_node_inventory'"
             ).fetchone()
             is not None
         )

@@ -33,20 +33,39 @@ _PYTHON_EXECUTABLE = (
     r"|'(?:[^'\r\n;&|]*[/\\])?python[\d.]*(?:\.exe)?'"
     r"""|(?:[^\s"';&|]+[/\\])?python[\d.]*(?:\.exe)?)"""
 )
+# Command wrappers that may precede any real command — one shared list so the
+# runner, static-check, compiler-check, probe, and repro classifiers can never
+# drift on what counts as a prefix (they did: _SEGMENT_HEAD lacked sudo and
+# bundle exec while TEST_RUNNER_RE had them).
+_WRAPPER_ALTERNATIVES = (
+    r"timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
+    r"|sudo\s+(?:-\S+\s+)*|nice\s+(?:-\S+\s+)*|command\s+"
+    r"|(?:npx|bunx?)\s+|(?:yarn|pnpm)\s+(?:dlx\s+)?"
+    r"|bundle\s+exec\s+|poetry\s+run\s+|uv\s+run\s+"
+)
 TEST_RUNNER_RE = re.compile(
-    r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
-    r"|(?:npx|bunx?)\s+|(?:yarn|pnpm)\s+(?:dlx\s+)?"  # JS package-runner wrappers: `npx jest`, `yarn jest`, `pnpm dlx vitest`
-    rf"|{_PYTHON_EXECUTABLE}\s+(?=\S*\.py\b))*(?:"
+    r"(?:^|[|&;]\s*)(?:" + _WRAPPER_ALTERNATIVES
+    + rf"|{_PYTHON_EXECUTABLE}\s+(?=\S*\.py\b))*(?:"
     # Interpreter switches are case-sensitive; -V/-h stop before running -m.
     rf"{_PYTHON_EXECUTABLE}\s+(?:(?-i:-[bBdEIOPqRsSuv]+)\s+)*-m\s+(?:pytest|unittest|nose2?|tox)\b"
     r"|pytest\b|py\.test\b|tox\b|nose2?\b"
     r"|(?:\S*/)?(?:runtests?|run_tests?)\.py\b"
     r"|(?:\S*/)?manage\.py\s+test\b"
-    r"|go\s+test\b|cargo\s+test\b"
+    r"|go\s+test\b|cargo\s+test\b|cargo\s+nextest\s+\w+\b"
     r"|npm\s+(?:run\s+)?test\b|yarn\s+(?:run\s+)?test\b|pnpm\s+(?:run\s+)?test\b"
     r"|bun\s+test\b|deno\s+test\b|node\s+--test\b"  # JS-native test runners
-    r"|jest\b|mocha\b|vitest\b|rspec\b|rake\s+test\b|phpunit\b|ctest\b"
-    r"|mvn\s+\S*\s*test\b|gradlew?\s+\S*\s*test\b|make\s+(?:check|test)\b"
+    # Script-path binaries: `vendor/bin/phpunit`, `node_modules/.bin/jest`,
+    # `./vendor/bin/phpunit` — the (?:\./|\S+/)? prefix is how repo-local and
+    # vendor-installed runners are actually invoked.
+    r"|(?:\./|\S+/)?(?:jest|mocha|vitest|rspec|phpunit|ctest)\b"
+    r"|rake\s+test\b|make\s+(?:check|test)\b"
+    # JVM build-tool wrappers AND their repo-local scripts — the Java
+    # adapter emits ./mvnw and ./gradlew verbatim.
+    r"|(?:\./|\S+/)?mvnw?\s+\S*\s*test\b|(?:\./|\S+/)?gradlew?\s+\S*\s*test\b"
+    # Scala / Elixir / .NET / Bazel / monorepo runners the governor already
+    # recognises; the binder must not dead-check the same commands.
+    r"|sbt\s+['\"]?test\w*|mix\s+test\b|dotnet\s+test\b|bazel\s+test\b"
+    r"|nx\s+test\b|turbo\s+(?:run\s+)?test\b|composer\s+(?:run\s+)?test\b"
     r")",
     re.I,
 )
@@ -59,6 +78,10 @@ TEST_PASS_RE = re.compile(
     r"(test result: ok\b|\b[1-9]\d* passed\b|\b[1-9]\d* passing\b|\bPASSED\b"
     r"|^OK\b|^ok\s+\S+\s+[\d.]+s|^PASS$|^PASS\b|BUILD SUCCESS"
     r"|OK \([1-9]\d* tests?\)|Tests:\s+[1-9]\d* passed"
+    r"|\bPassed:\s*[1-9]\d*"  # dotnet test: "Passed: 5"
+    r"|\b[1-9]\d* examples?,\s*0\s*failures?\b"  # rspec: "5 examples, 0 failures"
+    r"|\b[1-9]\d* pass\b"  # bun test: "5 pass"
+    r"|\[success\]"  # sbt green line, lowercase by protocol
     r"|\b[1-9]\d* passed\b.*\b0 failed\b)",
     re.M,
 )
@@ -67,6 +90,10 @@ TEST_FAIL_RE = re.compile(
     r"(\bFAILED\b|\bAssertionError\b|\b[1-9]\d* failed\b|\bFAIL: "
     r"|FAILED \(failures=|--- FAIL:|test result: FAILED"
     r"|\b[1-9]\d* failing\b|Tests:\s+[1-9]\d* failed"
+    r"|\b[1-9]\d* errors?\b"  # pytest summary: "5 passed, 2 errors"
+    r"|\b[1-9]\d* failures?\b|\b[1-9]\d* fails?\b"  # rspec "1 failure", bun "2 fail"
+    r"|Failed:\s*[1-9]\d*"  # dotnet test: "Failed: 3"
+    r"|\bFAIL\b"  # go package summary: "FAIL\tpkg/name\t0.012s" or a bare "FAIL" line
     r"|Failures:\s*[1-9]\d*|Errors:\s*[1-9]\d*)"
 )
 
@@ -507,7 +534,23 @@ ENV_FAIL_RE = re.compile(
     r"|error while loading shared libraries|cannot open shared object"
     r"|ImproperlyConfigured"
     r"|AttributeError: module '[\w.]+' has no attribute"  # py-version shims
-    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error)",
+    r"|errors? during collection|ERROR collecting|Interrupted: \d+ error"
+    # Missing-dependency / toolchain truth per language ecosystem — a dep the
+    # environment never installed is not evidence the agent's hypothesis is
+    # wrong. Misclassifying these as `fail` steers the governor against the
+    # agent for an environment it cannot fix.
+    r"|cannot find package|no required module provides package"
+    r"|missing go\.sum entry|is not in GOROOT"
+    r"|Cannot find module|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND|code ETARGET"
+    r"|can't find crate|no matching package named|failed to select a version"
+    r"|could not find ['\"]?[\w.-]+['\"]? in (?:the )?['\"]?[\w.-]+['\"]? registry"
+    r"|ClassNotFoundException|NoClassDefFoundError"
+    r"|Could not resolve (?:all )?dependencies|Could not find artifact"
+    r"|Non-resolvable (?:import|parent|dependency)"
+    r"|LoadError|cannot load such file|Could not find gem|Bundler::\w+"
+    r"|Failed opening required|Uncaught Error: Class"
+    r"|error NU\d+|NETSDK\d+|error MSB3644|compatible framework version"
+    r"|no such module|could not compile dependency|Mix\.Error)",
     re.I,
 )
 
@@ -515,8 +558,26 @@ ENV_FAIL_RE = re.compile(
 # COMPILE FAILURE — a build/compile error (actionable feedback, not blindness).
 # ---------------------------------------------------------------------------
 COMPILE_FAIL_RE = re.compile(
-    r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b"
+    r"(error\[E\d+\]|error: could not compile|\bSyntaxError\b|\bCompileError\b"
     r"|cannot find (?:value|function|type|module|symbol)"
+    # A code-attributed diagnostic: `file.ext:line[:col]: error` from gcc/
+    # clang/javac/swiftc/kotlinc/scalac. `fatal error:` can never match this
+    # shape (`fatal ` sits between the colon and `error`), so ENV_FAIL_RE
+    # keeps owning missing-header/linker truth, and a bare `error:` printed
+    # by a script cannot steal ASSERTION_SCRIPT's kind.
+    r"|\b\w[\w./\\-]*\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|java|kt|kts|scala|sc"
+    r"|swift|m|mm|cs|fs|go|rs|dart|cu|cuh|zig|nim|d|di|vala|f|f90|f95"
+    r"|pas|ml|mli|ex|exs|erl|hrl|hs|lua|php|rb|py|js|jsx|ts|tsx|mjs|cjs"
+    r"|proto|sbt|gradle|groovy|bzl|cmake|txt|mk|mak|sh|bash|zsh|pl|pm|r|jl"
+    r"|vb|v|sv|vhd|asm|s|ccm|ixx|mpp|tcc|ipp|cabal|vim|el|clj|cljs|edn"
+    r"|cr|nimble|json|yaml|yml|toml|xml|xsd|xsl|sql|graphql|gql|proto3?"
+    r"):\d+(?::\d+)?:\s*error\b(?!\s+MSB\d)"
+    # Coded compiler errors: MSVC `error C2143`, C# `error CS0246`,
+    # linker `error LNK2019`, tsc `error TS2304`. MSB* stays OUT — MSBuild
+    # errors are SDK/toolchain truth (missing packs, bad SDK) and ENV_FAIL_RE
+    # owns them.
+    r"|error\s+(?:CS|C|LNK|TS|E)\d+"
+    r"|\bFAILURE:\s+Build failed\b|\bBUILD FAILED\b"
     r"|undefined:\s|\bTS\d{4,}:|compilation error)"
 )
 
@@ -628,12 +689,8 @@ def is_infra_noise(text: str) -> bool:
 #     FOCUSED_TEST: file scope is not a node-id/`-k` selector.
 # ===========================================================================
 
-# Shell-segment head + the same wrapper prefixes TEST_RUNNER_RE accepts.
-_SEGMENT_HEAD = (
-    r"(?:^|[|&;]\s*)(?:timeout\s+(?:-\S+\s+|\d+\S*\s+)+|time\s+|env\s+(?:\S+=\S+\s+)+"
-    r"|(?:npx|bunx?)\s+|(?:yarn|pnpm)\s+(?:dlx\s+)?"
-    r"|poetry\s+run\s+|uv\s+run\s+)*"
-)
+# Shell-segment head + the shared wrapper prefixes (single source above).
+_SEGMENT_HEAD = r"(?:^|[|&;]\s*)(?:" + _WRAPPER_ALTERNATIVES + r")*"
 
 # RUNTIME PROBE — an inline interpreter body: `python -c '<expr>'`, `node -e`.
 # Requires a non-empty body token; a bare `python` REPL launch does not match.
@@ -669,19 +726,33 @@ _NON_REPRO_SCRIPTS = frozenset(
 
 # STATIC CHECK — type checkers and linters. `ruff format` is excluded (a
 # formatter says nothing about behaviour); `ruff check` / `ruff <path>` is not.
+# `dotnet format`/`prettier`/`black`/`isort` only count with their --check or
+# --verify flags; unqualified they rewrite files, which is not a check.
 STATIC_CHECK_RE = re.compile(
-    _SEGMENT_HEAD + r"(?:mypy\b|pyright\b|pytype\b|flake8\b|pylint\b"
-    r"|ruff\s+(?!format\b)\S|eslint\b|tslint\b|biome\s+lint\b"
-    r"|golangci-lint\b|go\s+vet\b|staticcheck\b|cargo\s+clippy\b)",
+    _SEGMENT_HEAD + r"(?:(?:\./|\S+/)?mypy\b|(?:\./|\S+/)?pyright\b|pytype\b"
+    r"|flake8\b|pylint\b|ruff\s+(?!format\b)\S|(?:\./|\S+/)?eslint\b|tslint\b"
+    r"|biome\s+lint\b|golangci-lint\b|go\s+vet\b|staticcheck\b|cargo\s+clippy\b"
+    r"|(?:\./|\S+/)?rubocop\b|(?:\./|\S+/)?phpstan\b|(?:\./|\S+/)?psalm\b"
+    r"|(?:\./|\S+/)?phpcs\b|mix\s+credo\b|hlint\b|luacheck\b"
+    r"|checkstyle\b|pmd\b|spotbugs\S*\b|detekt\b|ktlint\b|swiftlint\b"
+    r"|shellcheck\b|clang-tidy\b|cppcheck\b|scalafmt\s+\S*test\b"
+    r"|black\s+\S*\s*--check\b|isort\s+\S*\s*--check\b"
+    r"|prettier\s+\S*\s*--check\b|dotnet\s+format\s+\S*--?verify\S*)",
     re.I,
 )
 
 # COMPILER CHECK — a build/typecheck invocation. `make` is intentionally absent:
-# it is classified only when its OUTPUT carries a compiler diagnostic.
+# it is classified only when its OUTPUT carries a compiler diagnostic. The
+# (?:\./|\S+/)? path prefix mirrors TEST_RUNNER_RE: `./mvnw compile` and
+# `./gradlew assemble` are how repo-local wrappers are actually invoked.
 COMPILER_CHECK_RE = re.compile(
     _SEGMENT_HEAD + r"(?:go\s+build\b|cargo\s+(?:check|build)\b|tsc\b"
-    r"|mvn\s+\S*\s*compile\b|gradlew?\s+\S*\s*(?:compile|assemble)\w*\b"
-    r"|javac\b|g\+\+\b|gcc\b|clang\+*\b|cmake\s+--build\b)",
+    r"|(?:\./|\S+/)?mvnw?\s+\S*\s*compile\b"
+    r"|(?:\./|\S+/)?gradlew?\s+\S*\s*(?:compile|assemble)\w*\b"
+    r"|javac\b|g\++(?=\s|$)|gcc\b|clang\+*(?=\s|$)|cmake\s+--build\b"
+    r"|dotnet\s+(?:build|publish|pack)\b|msbuild\b|xcodebuild\b"
+    r"|sbt\s+\S*\s*compile\b|mix\s+compile\b|bazel\s+build\b"
+    r"|swift\s+build\b|kotlinc\b|scalac\b|nvcc\b)",
     re.I,
 )
 

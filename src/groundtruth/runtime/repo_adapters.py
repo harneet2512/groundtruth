@@ -118,14 +118,64 @@ class JavaScriptRepoAdapter(RepoAdapter):
     manifests = ("package.json", "pnpm-lock.yaml", "yarn.lock", "tsconfig.json")
     source_exts = (".js", ".jsx", ".ts", ".tsx")
 
+    # Per-manager flag that scopes the test lifecycle to a subpackage.
+    _SUBDIR_FLAG = {"npm": "--prefix", "pnpm": "--dir", "yarn": "--cwd"}
+
+    def _package_manager(self, directory: Path, root: Path) -> str:
+        if (directory / "pnpm-lock.yaml").exists() or (
+            root / "pnpm-lock.yaml"
+        ).exists():
+            return "pnpm"
+        if (directory / "yarn.lock").exists() or (root / "yarn.lock").exists():
+            return "yarn"
+        return "npm"
+
+    @staticmethod
+    def _has_test_script(manifest: Path) -> bool:
+        """scripts.test present, non-empty, and not the npm-init placeholder.
+
+        The config probe in ``verification_plan._cfg_package_json`` treats a
+        missing or placeholder ``scripts.test`` as evidence of NO test
+        command; this adapter must not then re-emit ``npm test`` for the same
+        manifest - smoke20 claude-code's root package.json had no test script,
+        so the fallback produced ``npm test`` -> "Missing script: test" ->
+        ``no_tests_observed`` while the real suites sat one directory down.
+        """
+        try:
+            import json
+
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        scripts = data.get("scripts") if isinstance(data, dict) else None
+        test = scripts.get("test") if isinstance(scripts, dict) else None
+        if not isinstance(test, str) or not test.strip():
+            return False
+        return "no test specified" not in test.strip().lower()
+
     def test_commands(self, root: Path) -> list[list[str]]:
-        if (root / "pnpm-lock.yaml").exists():
-            return [["pnpm", "test"]]
-        if (root / "yarn.lock").exists():
-            return [["yarn", "test"]]
-        if (root / "package.json").exists():
-            return [["npm", "test"]]
-        return []
+        commands: list[list[str]] = []
+        manager = self._package_manager(root, root)
+        if self._has_test_script(root / "package.json"):
+            commands.append([manager, "test"])
+        # Workspaces whose root declares no test script keep their suites in
+        # immediate subpackages (backend/, frontend/): scope the same
+        # lifecycle command to each manifest that actually declares one.
+        if not commands and root.is_dir():
+            for child in sorted(root.iterdir()):
+                if (
+                    not child.is_dir()
+                    or child.name.startswith(".")
+                    or child.name == "node_modules"
+                ):
+                    continue
+                manifest = child / "package.json"
+                if manifest.is_file() and self._has_test_script(manifest):
+                    pm = self._package_manager(child, root)
+                    commands.append(
+                        [pm, self._SUBDIR_FLAG[pm], child.name, "test"]
+                    )
+        return commands
 
 
 class GoRepoAdapter(RepoAdapter):

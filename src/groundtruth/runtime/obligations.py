@@ -293,14 +293,15 @@ def _has_checked_result_matrix(command: str, output: str, subjects: frozenset[st
     )
 
 
-_TEST_RUNNER_RE = re.compile(
-    r"(?:^|\s)(?:python(?:3)?\s+-m\s+)?pytest\b|(?:^|\s)go\s+test\b"
-    r"|(?:^|\s)cargo\s+test\b|(?:^|\s)(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b",
-    re.IGNORECASE,
-)
-_FORMAL_GREEN_RE = re.compile(r"\b\d+\s+passed\b", re.IGNORECASE)
-_FORMAL_RED_RE = re.compile(
-    r"\b(?:\d+\s+failed|\d+\s+errors?|failures?|traceback)\b", re.IGNORECASE
+# The canonical runner/pass/fail sets live in runtime.patterns; the
+# obligations copies drifted narrower (python/go/cargo/npm only), so a
+# passing `mvn test`, `vitest`, `dotnet test`, or `go test` line could never
+# produce a subject_bound_test_runner proof on Java/TS/.NET tasks, and the
+# bare `failures?` red word misfired on Maven's "Failures: 0" green line.
+from groundtruth.runtime.patterns import (
+    TEST_FAIL_RE as _FORMAL_RED_RE,
+    TEST_PASS_RE as _FORMAL_GREEN_RE,
+    TEST_RUNNER_RE as _TEST_RUNNER_RE,
 )
 
 

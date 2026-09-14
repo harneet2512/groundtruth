@@ -692,6 +692,16 @@ def _detect_runner(command: list[str]) -> str:
             return "mvn"
         if base in {"ruby", "rake", "rspec", "bundle", "minitest"}:
             return "ruby"
+        if base in {"dotnet", "msbuild"}:
+            return "dotnet"
+        if base == "sbt":
+            return "sbt"
+        if base == "mix":
+            return "mix"
+        if base in {"phpunit", "composer"}:
+            return "phpunit"
+        if base == "bazel":
+            return "bazel"
     return command[0] if command else ""
 
 
@@ -753,13 +763,16 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
             counts["passed"] += int(p)
             counts["failed"] += int(f)
 
-    # npm/jest/vitest: "Tests: X failed, Y passed"; mocha: "X passing / Y failing".
+    # npm/jest/vitest: "Tests: X failed, Y passed"; mocha: "X passing / Y failing";
+    # bun prints "N pass" / "N fail"; deno prints "ok | N passed | M failed".
     if runner == "jsnode":
         for pattern, key in (
             (r"(\d+)\s+failed", "failed"),
             (r"(\d+)\s+passed", "passed"),
             (r"(\d+)\s+failing", "failed"),
             (r"(\d+)\s+passing", "passed"),
+            (r"(\d+)\s+pass\b", "passed"),
+            (r"(\d+)\s+fail\b", "failed"),
         ):
             match = re.search(pattern, text)
             if match:
@@ -791,6 +804,55 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
             counts["failed"] = max(counts["failed"], fail_n)
             counts["passed"] = max(counts["passed"], ex_n - fail_n)
 
+    # dotnet test: "Passed! - Failed: X, Passed: Y" / summary "Passed: N / Failed: N".
+    if runner == "dotnet":
+        m = re.search(r"Failed:\s*(\d+),\s*Passed:\s*(\d+)", text)
+        if m:
+            counts["failed"] = max(counts["failed"], int(m.group(1)))
+            counts["passed"] = max(counts["passed"], int(m.group(2)))
+        else:
+            p = re.search(r"(?m)^\s*Passed:\s*(\d+)\b", text)
+            f = re.search(r"(?m)^\s*Failed:\s*(\d+)\b", text)
+            if p:
+                counts["passed"] = int(p.group(1))
+            if f:
+                counts["failed"] = int(f.group(1))
+
+    # sbt: "Tests: succeeded N, failed M" or a bare [success] (success only
+    # counts when a test total is also printed — [success] alone proves a
+    # green build, not that tests ran).
+    if runner == "sbt":
+        for m in re.finditer(
+            r"Tests:\s*succeeded\s*(\d+)(?:,\s*failed\s*(\d+))?", text
+        ):
+            counts["passed"] += int(m.group(1))
+            if m.group(2):
+                counts["failed"] += int(m.group(2))
+
+    # mix test: "N tests, M failures".
+    if runner == "mix":
+        m = re.search(r"(\d+)\s+tests?,\s*(\d+)\s+failures?", text)
+        if m:
+            run_n, fail_n = int(m.group(1)), int(m.group(2))
+            counts["failed"] = max(counts["failed"], fail_n)
+            counts["passed"] = max(counts["passed"], run_n - fail_n)
+
+    # phpunit: "OK (N tests)" green, or "Tests: N, Assertions: M, Failures: K".
+    if runner == "phpunit":
+        m = re.search(r"OK\s*\((\d+)\s+tests?", text)
+        if m:
+            counts["passed"] = int(m.group(1))
+        for m2 in re.finditer(
+            r"Tests:\s*(\d+),\s*Assertions:\s*\d+,\s*Failures:\s*(\d+)", text
+        ):
+            counts["failed"] += int(m2.group(2))
+            counts["passed"] += max(0, int(m2.group(1)) - int(m2.group(2)))
+
+    # bazel: per-target "//path:name PASSED/FAILED in Xs" lines.
+    if runner == "bazel":
+        counts["passed"] += len(re.findall(r"(?m)^//\S+\s+PASSED\b", text))
+        counts["failed"] += len(re.findall(r"(?m)^//\S+\s+FAILED\b", text))
+
     return counts
 
 
@@ -809,6 +871,17 @@ def _parse_failing_test_names(text: str) -> list[str]:
         r"^FAILED\s+(\S+::\S+?)(?:\s+-|\s*$)",
         r"^--- FAIL:\s+([^\s(]+)",
         r"^(?:FAIL|ERROR|UNEXPECTED SUCCESS):\s+\S+\s+\(([^)\n]+)\)",
+        # cargo / deno: `test path::name ... FAILED`
+        r"^test\s+(\S+)\s+\.\.\.\s+FAILED\b",
+        # jest / vitest / bun per-test fail marks
+        r"^\s*[✕✗×]\s+(.+?)\s*$",
+        # dotnet: `Failed Namespace.Class.Test [15 ms]` — the name is
+        # fully-qualified, so `Failed to compile` prose can never match.
+        r"(?m)^\s*Failed\s+((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*)",
+        # maven surefire: `testFoo(com.x.BarTest)  Time elapsed: 0.01 s  <<< FAILURE!`
+        r"^(\S+\([^)]*\))\s+.*?<<<\s+(?:FAILURE|ERROR)",
+        # rspec rerun lines: `rspec ./spec/x_spec.rb:12 # description`
+        r"^rspec\s+(\./?\S+)",
     ):
         for match in re.findall(pattern, text, re.MULTILINE):
             if match not in seen:
@@ -826,11 +899,26 @@ def _parse_passing_test_names(text: str) -> list[str]:
         r"^(\S+::\S+)\s+PASSED(?:\s|$)",
         r"^PASSED\s+(\S+::\S+?)(?:\s|$)",
         r"^\S+\s+\(([^)\n]+)\)\s+\.\.\.\s+ok\s*$",
+        # cargo / deno: `test path::name ... ok` — the smoke20 fd run's
+        # baseline captured counts without names because this shape was absent.
+        r"^test\s+(\S+)\s+\.\.\.\s+ok\b",
+        # go: `--- PASS: TestName`
+        r"^--- PASS:\s+(\S+)",
+        # jest / vitest / bun check-mark rows
+        r"^\s*[✓✔]\s+(.+?)\s*(?:\(\d+[^\n)]*\))?\s*$",
+        # dotnet: `Passed Namespace.Class.Test [15 ms]` — fully-qualified, so
+        # `Passed the test` prose can never match.
+        r"(?m)^\s*Passed\s+((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*)",
+        # sbt per-test rows: `[info] + TestSuite.testName`
+        r"^\[info\]\s+\+\s+(\S+)",
     ):
         for match in re.findall(pattern, text or "", re.MULTILINE):
-            if match not in seen:
-                seen.add(match)
-                names.append(match)
+            name = match.strip()
+            if not name or name.endswith(":"):
+                continue
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
     return names
 
 
