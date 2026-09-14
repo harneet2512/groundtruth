@@ -822,9 +822,7 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
     # counts when a test total is also printed — [success] alone proves a
     # green build, not that tests ran).
     if runner == "sbt":
-        for m in re.finditer(
-            r"Tests:\s*succeeded\s*(\d+)(?:,\s*failed\s*(\d+))?", text
-        ):
+        for m in re.finditer(r"Tests:\s*succeeded\s*(\d+)(?:,\s*failed\s*(\d+))?", text):
             counts["passed"] += int(m.group(1))
             if m.group(2):
                 counts["failed"] += int(m.group(2))
@@ -842,9 +840,7 @@ def _parse_test_output(text: str, command: list[str]) -> dict[str, int]:
         m = re.search(r"OK\s*\((\d+)\s+tests?", text)
         if m:
             counts["passed"] = int(m.group(1))
-        for m2 in re.finditer(
-            r"Tests:\s*(\d+),\s*Assertions:\s*\d+,\s*Failures:\s*(\d+)", text
-        ):
+        for m2 in re.finditer(r"Tests:\s*(\d+),\s*Assertions:\s*\d+,\s*Failures:\s*(\d+)", text):
             counts["failed"] += int(m2.group(2))
             counts["passed"] += max(0, int(m2.group(1)) - int(m2.group(2)))
 

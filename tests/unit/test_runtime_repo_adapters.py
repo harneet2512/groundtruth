@@ -22,9 +22,7 @@ def test_repo_profile_detects_python_without_locking_control_plane(tmp_path) -> 
 
 
 def test_repo_profile_detects_non_python_stacks(tmp_path) -> None:
-    (tmp_path / "package.json").write_text(
-        '{"scripts": {"test": "vitest run"}}', encoding="utf-8"
-    )
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
     (tmp_path / "go.mod").write_text("module example.com/x\n", encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n", encoding="utf-8")
 
@@ -64,19 +62,13 @@ def test_subpackage_test_scripts_are_reached(tmp_path) -> None:
     """The monorepo shape: root package.json declares no test script; the
     suites live one level down. The command scopes the manager lifecycle to
     the subpackage rather than failing at the root."""
-    (tmp_path / "package.json").write_text(
-        '{"name": "root", "private": true}', encoding="utf-8"
-    )
+    (tmp_path / "package.json").write_text('{"name": "root", "private": true}', encoding="utf-8")
     backend = tmp_path / "backend"
     backend.mkdir()
-    (backend / "package.json").write_text(
-        '{"scripts": {"test": "vitest run"}}', encoding="utf-8"
-    )
+    (backend / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
     frontend = tmp_path / "frontend"
     frontend.mkdir()
-    (frontend / "package.json").write_text(
-        '{"scripts": {"test": "jest"}}', encoding="utf-8"
-    )
+    (frontend / "package.json").write_text('{"scripts": {"test": "jest"}}', encoding="utf-8")
 
     command, reason = select_repo_test_command(str(tmp_path))
 
@@ -89,9 +81,7 @@ def test_subpackage_respects_lockfile_package_manager(tmp_path) -> None:
     (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
     backend = tmp_path / "backend"
     backend.mkdir()
-    (backend / "package.json").write_text(
-        '{"scripts": {"test": "vitest run"}}', encoding="utf-8"
-    )
+    (backend / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
 
     command, _reason = select_repo_test_command(str(tmp_path))
 
@@ -185,9 +175,7 @@ def test_every_adapter_emitted_command_binds_as_test_runner(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
-    (repo / "package.json").write_text(
-        '{"scripts": {"test": "vitest run"}}', encoding="utf-8"
-    )
+    (repo / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
     (repo / "go.mod").write_text("module example.com/x\n", encoding="utf-8")
     (repo / "Cargo.toml").write_text("[package]\nname='x'\n", encoding="utf-8")
     (repo / "mvnw").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -212,9 +200,7 @@ def test_every_adapter_emitted_command_binds_as_test_runner(tmp_path) -> None:
 
 
 def test_select_repo_test_command_prefers_detected_adapter_order(tmp_path) -> None:
-    (tmp_path / "package.json").write_text(
-        '{"scripts": {"test": "vitest run"}}', encoding="utf-8"
-    )
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}', encoding="utf-8")
 
     command, reason = select_repo_test_command(str(tmp_path))
 

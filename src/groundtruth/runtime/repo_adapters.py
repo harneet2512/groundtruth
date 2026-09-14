@@ -122,9 +122,7 @@ class JavaScriptRepoAdapter(RepoAdapter):
     _SUBDIR_FLAG = {"npm": "--prefix", "pnpm": "--dir", "yarn": "--cwd"}
 
     def _package_manager(self, directory: Path, root: Path) -> str:
-        if (directory / "pnpm-lock.yaml").exists() or (
-            root / "pnpm-lock.yaml"
-        ).exists():
+        if (directory / "pnpm-lock.yaml").exists() or (root / "pnpm-lock.yaml").exists():
             return "pnpm"
         if (directory / "yarn.lock").exists() or (root / "yarn.lock").exists():
             return "yarn"
@@ -163,18 +161,12 @@ class JavaScriptRepoAdapter(RepoAdapter):
         # lifecycle command to each manifest that actually declares one.
         if not commands and root.is_dir():
             for child in sorted(root.iterdir()):
-                if (
-                    not child.is_dir()
-                    or child.name.startswith(".")
-                    or child.name == "node_modules"
-                ):
+                if not child.is_dir() or child.name.startswith(".") or child.name == "node_modules":
                     continue
                 manifest = child / "package.json"
                 if manifest.is_file() and self._has_test_script(manifest):
                     pm = self._package_manager(child, root)
-                    commands.append(
-                        [pm, self._SUBDIR_FLAG[pm], child.name, "test"]
-                    )
+                    commands.append([pm, self._SUBDIR_FLAG[pm], child.name, "test"])
         return commands
 
 

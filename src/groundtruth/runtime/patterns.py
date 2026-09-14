@@ -44,8 +44,7 @@ _WRAPPER_ALTERNATIVES = (
     r"|bundle\s+exec\s+|poetry\s+run\s+|uv\s+run\s+"
 )
 TEST_RUNNER_RE = re.compile(
-    r"(?:^|[|&;]\s*)(?:" + _WRAPPER_ALTERNATIVES
-    + rf"|{_PYTHON_EXECUTABLE}\s+(?=\S*\.py\b))*(?:"
+    r"(?:^|[|&;]\s*)(?:" + _WRAPPER_ALTERNATIVES + rf"|{_PYTHON_EXECUTABLE}\s+(?=\S*\.py\b))*(?:"
     # Interpreter switches are case-sensitive; -V/-h stop before running -m.
     rf"{_PYTHON_EXECUTABLE}\s+(?:(?-i:-[bBdEIOPqRsSuv]+)\s+)*-m\s+(?:pytest|unittest|nose2?|tox)\b"
     r"|pytest\b|py\.test\b|tox\b|nose2?\b"

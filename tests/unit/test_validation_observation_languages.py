@@ -6,6 +6,7 @@ evidence — the same defect class as the dead-check gap, one layer deeper.
 Every language family GT claims to serve must classify here, and every
 non-check shape must stay NONE so prose can never counterfeit validation.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -66,12 +67,12 @@ def test_static_checkers_classify_per_language(command, out, rc):
 @pytest.mark.parametrize(
     "command",
     [
-        "black src/",               # formatter without --check rewrites files
-        "ruff format src/",         # explicitly excluded
-        "prettier --write src/",    # write mode is not a check
-        "dotnet format",            # no --verify flag: mutates
-        "cat mypy_report.txt",      # viewing output is not running a check
-        "isort src/",               # no --check flag
+        "black src/",  # formatter without --check rewrites files
+        "ruff format src/",  # explicitly excluded
+        "prettier --write src/",  # write mode is not a check
+        "dotnet format",  # no --verify flag: mutates
+        "cat mypy_report.txt",  # viewing output is not running a check
+        "isort src/",  # no --check flag
     ],
 )
 def test_non_check_shapes_never_read_as_static_check(command):
@@ -93,7 +94,7 @@ _COMPILER_CASES = [
     ("g++ -O2 x.cpp", "", 0),
     ("cmake --build build/", "", 0),
     ("mvn compile", "", 0),
-    ("./mvnw compile", "", 0),           # path-prefixed wrapper — was invisible
+    ("./mvnw compile", "", 0),  # path-prefixed wrapper — was invisible
     ("mvn -q compile", "", 0),
     ("gradle compileJava", "", 0),
     ("./gradlew assembleDebug", "", 0),  # path-prefixed wrapper — was invisible
@@ -156,9 +157,7 @@ def test_clean_compiler_exit_is_a_pass_observation():
 
 
 def test_unknown_returncode_compiler_output_still_classifies():
-    obs = classify_validation_observation(
-        "cargo build", "error[E0308]: mismatched types", None
-    )
+    obs = classify_validation_observation("cargo build", "error[E0308]: mismatched types", None)
     assert obs.kind is ValidationKind.COMPILER_CHECK
     assert obs.outcome == "fail"
 
@@ -207,9 +206,7 @@ def test_formal_test_takes_precedence_over_static_and_compiler():
     obs = classify_validation_observation("pytest -q", "5 passed", 0)
     assert obs.kind is ValidationKind.FORMAL_TEST
 
-    obs = classify_validation_observation(
-        "pytest tests/test_x.py::test_y", "1 passed", 0
-    )
+    obs = classify_validation_observation("pytest tests/test_x.py::test_y", "1 passed", 0)
     assert obs.kind is ValidationKind.FOCUSED_TEST
 
 
@@ -217,14 +214,10 @@ def test_viewing_output_never_counts_as_validation():
     """cat/grep of a log carrying a diagnostic is not a validation act —
     output-driven kinds require a known non-zero exit AND a real command."""
     for cmd in ("cat build.log", "grep error app.log", "tail -f out.txt"):
-        obs = classify_validation_observation(
-            cmd, "error[E0308]: mismatched types", 1
-        )
+        obs = classify_validation_observation(cmd, "error[E0308]: mismatched types", 1)
         assert obs.kind is ValidationKind.NONE, cmd
 
 
 def test_zero_exit_with_output_driven_shape_stays_none():
-    obs = classify_validation_observation(
-        "cat build.log", "error: something failed", 0
-    )
+    obs = classify_validation_observation("cat build.log", "error: something failed", 0)
     assert obs.kind is ValidationKind.NONE
