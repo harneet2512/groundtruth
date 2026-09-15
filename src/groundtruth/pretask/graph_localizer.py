@@ -2793,6 +2793,13 @@ def _semantic_score_by_file(
             v = vec_by_hash.get(hash_of[p])
             if v is None:
                 continue  # over-budget passage — score the file on what IS available
+            if np.asarray(v).shape != q.shape:
+                # A foreign-model vector can only reach here through a keyed
+                # collision (model_identity must make that impossible); if one
+                # ever does, skip it — a wrong-width dot would raise and the
+                # caller's `except: _loc = None` would kill the whole witness
+                # path over a single poisoned passage.
+                continue
             c = float(np.dot(q, v))
             if np.isfinite(c):
                 cosines.append(c)

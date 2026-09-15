@@ -5651,7 +5651,7 @@ def _exact_issue_named_files(
         for stem, files in _stem_files.items():
             if len(files) > _MAX_FILES_PER_NAME:  # ambiguous stem -> not a specific anchor
                 continue
-            for fp in files:
+            for fp in sorted(files):  # DETERMINISM: `files` is a set (same as :5621)
                 out.setdefault(fp, [])
                 if stem not in out[fp]:
                     out[fp].append(stem)
@@ -6337,7 +6337,17 @@ def generate_v1r_brief(
             _loc = localize(
                 issue_text, graph_db, top_k=8, issue_anchors=_anchors_obj, repo_root=repo_root
             )
-        except Exception:
+        except Exception as _loc_exc:
+            # The witness path is dead for this brief — never silent (correct-or-quiet
+            # still applies to the BRIEF, but the failure must leave a stderr trace;
+            # a mute fallback hid the 768-vs-384 foreign-model cache collision for days).
+            import sys as _sys_loc
+
+            print(
+                f"[GT_WARN] localize() raised — witness/verified ranking degraded "
+                f"for this brief: {_loc_exc!r}",
+                file=_sys_loc.stderr,
+            )
             _loc = None
     if _loc and _loc.candidates:
         _existing = {str(r.get("path", "")) for r in top_records}

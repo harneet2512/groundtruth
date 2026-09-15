@@ -683,7 +683,27 @@ def model_identity(model: object) -> tuple[str, int]:
     if dim is None:
         inner = getattr(model, "_m", None)
         dim = getattr(inner, "dim", None)
-    return (str(name or _default_embed_model()), int(dim or _default_embed_dim()))
+    if name and dim is not None:
+        return (str(name), int(dim))
+    # Foreign model with no adapter identity surface (a raw SentenceTransformer,
+    # a test stub): keying it as the CONFIGURED default lets its vectors collide
+    # in the shared passage cache — a wrong-dim vec is then served to a
+    # different-width query and np.dot raises inside the localizer (witness path
+    # dies via the `_loc = None` swallow in v1r_brief). Derive a truthful,
+    # class-qualified identity instead; dim 0 can never collide with a real
+    # width, so the worst case is a cache miss — never a wrong-dim serve.
+    if not name:
+        name = f"foreign:{type(model).__module__}.{type(model).__qualname__}"
+    if dim is None:
+        getter = getattr(model, "get_sentence_embedding_dimension", None)
+        if callable(getter):
+            try:
+                dim = int(getter())
+            except Exception:
+                dim = None
+        if dim is None:
+            dim = _default_embed_dim() if name == _default_embed_model() else 0
+    return (str(name), int(dim))
 
 
 def aggregate_symbol_cosines(cosines: list[float], *, alpha: float, top_k: int) -> float:
