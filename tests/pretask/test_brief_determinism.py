@@ -34,7 +34,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from groundtruth.memory.enrich import embed as _embed
 
@@ -85,6 +84,7 @@ def test_model_identity_adapter_surface_preserved():
 
 # ------------------------------------------------- wrong-width cached vector
 
+
 def _make_beets_db(tmp_path: Path) -> tuple[str, str]:
     """4-node beets-shaped fixture: importer.set_fields -> dbcore/db.set_parse."""
     repo = tmp_path / "repo"
@@ -129,14 +129,26 @@ def _make_beets_db(tmp_path: Path) -> tuple[str, str]:
         "INSERT INTO nodes (id,label,name,file_path,start_line,end_line,signature,"
         "is_test,language) VALUES (?,?,?,?,?,?,?,0,'python')",
         [
-            (1, "Method", "set_fields", "beets/importer.py", 1, 3,
-             "def set_fields(self, fields):"),
-            (2, "Method", "set_parse", "beets/dbcore/db.py", 1, 2,
-             "def set_parse(self, key, string):"),
-            (3, "Function", "parse_stage", "beets/util/pipeline.py", 1, 3,
-             "def parse_stage(values):"),
-            (4, "Method", "store", "beets/library.py", 1, 3,
-             "def store(self, fields):"),
+            (1, "Method", "set_fields", "beets/importer.py", 1, 3, "def set_fields(self, fields):"),
+            (
+                2,
+                "Method",
+                "set_parse",
+                "beets/dbcore/db.py",
+                1,
+                2,
+                "def set_parse(self, key, string):",
+            ),
+            (
+                3,
+                "Function",
+                "parse_stage",
+                "beets/util/pipeline.py",
+                1,
+                3,
+                "def parse_stage(values):",
+            ),
+            (4, "Method", "store", "beets/library.py", 1, 3, "def store(self, fields):"),
         ],
     )
     conn.execute(
@@ -185,9 +197,7 @@ def test_semantic_score_survives_wrong_width_cached_vector(tmp_path, monkeypatch
     # so instead inject directly into the function's vec path: poison every
     # passage hash we can compute for the candidate files' symbols.
     conn = sqlite3.connect(db)
-    rows = conn.execute(
-        "SELECT name, signature, file_path FROM nodes WHERE is_test=0"
-    ).fetchall()
+    rows = conn.execute("SELECT name, signature, file_path FROM nodes WHERE is_test=0").fetchall()
     conn.close()
     poisoned = 0
     for name, sig, fp in rows:
@@ -290,9 +300,7 @@ def test_brief_file_order_is_hashseed_invariant():
     for seed in ("0", "1", "7", "42"):
         env = dict(os.environ)
         env["PYTHONHASHSEED"] = seed
-        env.setdefault(
-            "GT_FORCE_ONNX_EMBEDDER", "1"
-        )  # mirror container: single ONNX surface
+        env.setdefault("GT_FORCE_ONNX_EMBEDDER", "1")  # mirror container: single ONNX surface
         proc = subprocess.run(
             [sys.executable, "-c", _SWEEP_CHILD],
             capture_output=True,
@@ -308,11 +316,9 @@ def test_brief_file_order_is_hashseed_invariant():
             for wl in ("beets/library.py", "beets/util/pipeline.py"):
                 if wl in order:
                     assert imp < order.index(wl), (
-                        f"seed={seed}: witness-less {wl} outranks witnessed "
-                        f"importer.py: {order}"
+                        f"seed={seed}: witness-less {wl} outranks witnessed importer.py: {order}"
                     )
     unique = {tuple(o) for o in orders.values()}
-    assert len(unique) == 1, (
-        "PYTHONHASHSEED-dependent brief order: "
-        + "; ".join(f"seed {k}: {v}" for k, v in orders.items())
+    assert len(unique) == 1, "PYTHONHASHSEED-dependent brief order: " + "; ".join(
+        f"seed {k}: {v}" for k, v in orders.items()
     )
