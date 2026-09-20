@@ -63,6 +63,42 @@ _EDGE_TYPE_TO_REF: dict[str, str] = {
     "RAISES": "exception_flow",
     "PRECEDES": "control_flow",
     "CO_SERIALIZES": "data_flow",
+    # taxonomy.DeriveEdges (gt-index/internal/taxonomy/edges.go) — tree-sitter
+    # syntax facts persisted as their own kinds (never merged into the regex
+    # IMPLEMENTS/EXTENDS totals). Same type/data relation, different mechanism.
+    "DECLARED_IMPLEMENTS": "type_usage",
+    "OVERRIDES": "type_usage",
+    "METHOD_OVERRIDES": "type_usage",
+    "RETURNS_TYPE": "type_usage",
+    "PARAM_TYPE": "type_usage",
+    # DECORATES (decorator -> decorated decl) is a decorator application, not a
+    # plain call site and not a type use — distinct kind keeps it honest.
+    "DECORATES": "decorator",
+    # ACCESSES: method reads/writes a field of its owning type — data access,
+    # same family as READS/WRITES.
+    "ACCESSES": "data_flow",
+    # resolver/relationships.go — DI + ORM edges (also INJECTS from taxonomy's
+    # constructor-param emission). INJECTS names a dependency on a type;
+    # QUERIES is data access against a model.
+    "INJECTS": "type_usage",
+    "QUERIES": "data_flow",
+    # resolver/framework_wiring.go — middleware attachment: a middleware fn is
+    # wired onto an app/route/module, i.e. it decorates the request pipeline.
+    # Not a call (nothing invokes it here) — same family as DECORATES.
+    "MIDDLEWARE_ON": "decorator",
+    # resolution_v2 fact links (store/resolution_stmts.go): caller -> Callsite
+    # node and Callsite -> {candidate, selected target, fact node}. These are
+    # resolver provenance bookkeeping between synthetic nodes — NOT observed
+    # code references. Mapping them keeps them reachable yet stops the "call"
+    # fallback from laundering e.g. an unselected CANDIDATE_TARGET into a call
+    # reference. "CANDIDATE" is the disabled legacy spelling kept for old DBs.
+    "HAS_CALLSITE": "resolution_meta",
+    "CANDIDATE": "resolution_meta",
+    "CANDIDATE_TARGET": "resolution_meta",
+    "SELECTED_TARGET": "resolution_meta",
+    "HAS_DERIVATION_FACT": "resolution_meta",
+    "HAS_COMPLETENESS_FACT": "resolution_meta",
+    "HAS_UNRESOLVED_FACT": "resolution_meta",
     # Back-compat for old Python-index DBs and lexical witness tests. The current
     # Go graph stores hierarchy as EXTENDS/IMPLEMENTS; DEFINES is not a graph base.
     "DEFINES": "call",

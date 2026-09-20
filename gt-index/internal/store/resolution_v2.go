@@ -148,6 +148,8 @@ func v2PassKind(mechanism string) string {
 		return "scope_binding"
 	case "vta":
 		return "vta"
+	case "callable_value":
+		return "higher_order_flow"
 	case "return_type":
 		return "return_shape"
 	case "verified_unique", "name_match":

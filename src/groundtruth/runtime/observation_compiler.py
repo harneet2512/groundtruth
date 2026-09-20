@@ -39,6 +39,18 @@ class ActionKind(str, Enum):
     PATCH_IMPACT = "patch_impact"
     RUN_VERIFICATION = "run_verification"
     VERIFICATION_STATUS = "verification_status"
+    DEFINITION = "definition"
+    REFERENCES = "references"
+    CALLERS = "callers"
+    SYMBOL_CONTEXT = "symbol_context"
+    PROCESSES = "processes"
+    ROUTE_MAP = "route_map"
+    API_IMPACT = "api_impact"
+    TAINT = "taint"
+    RENAME = "rename"
+    SHAPE_CHECK = "shape_check"
+    TOOL_MAP = "tool_map"
+    SLICE = "slice"
     SUBMIT = "submit"
 
 
@@ -330,6 +342,18 @@ _TYPED_REPLACEABLE_ACTIONS = frozenset(
         ActionKind.EXACT_LITERAL_SEARCH,
         ActionKind.SYNTAX_QUERY,
         ActionKind.VERIFICATION_STATUS,
+        ActionKind.DEFINITION,
+        ActionKind.REFERENCES,
+        ActionKind.CALLERS,
+        ActionKind.SYMBOL_CONTEXT,
+        ActionKind.PROCESSES,
+        ActionKind.ROUTE_MAP,
+        ActionKind.API_IMPACT,
+        ActionKind.TAINT,
+        ActionKind.RENAME,
+        ActionKind.SHAPE_CHECK,
+        ActionKind.TOOL_MAP,
+        ActionKind.SLICE,
     }
 )
 
@@ -339,7 +363,6 @@ def _expected_producer_revision(request: ActionRequest) -> str:
     if request.kind in {
         ActionKind.EXACT_LITERAL_SEARCH,
         ActionKind.SYNTAX_QUERY,
-        ActionKind.PATCH_IMPACT,
     }:
         return revisions.repository_content
     if request.kind is ActionKind.VERIFICATION_STATUS:

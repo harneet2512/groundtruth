@@ -28,6 +28,11 @@ type ParseResult struct {
 	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
 	ModDecls    []ModDecl       // Rust mod declarations (mod foo;)
 	ReExports   []ReExportRef   // Re-export declarations (barrel files, pub use, __init__.py)
+	// CFGs holds the statement-level control-flow graph for each emitted
+	// function/method node (HAR-90 items 5–8). Raw blocks/edges/defs only —
+	// dominators and control dependence are composed downstream by the
+	// Python consumer (src/groundtruth/runtime/cfg_analysis.py).
+	CFGs []CFGFunc
 	// ParserIncomplete is true when tree-sitter returned a recoverable tree that
 	// contains ERROR/MISSING nodes. Partial facts remain inspectable, but callers
 	// must not treat resolution derived from this file as authoritative.
@@ -118,10 +123,25 @@ type AssignmentRef struct {
 	Line           int
 	IsParameter    bool
 	ParameterIndex int
+	// Owner is the qualified name of the function/method that owns a formal
+	// parameter (IsParameter only): "wrap", "C.m", or the declarator name of a
+	// nested arrow (`const w = (cb) => …` nested in `outer` → Scope="outer",
+	// Owner="w"). The callable-value rung keys callsites by Owner while the
+	// binding stays visible under Scope — the two differ whenever a nested
+	// function body shares its enclosing function's CallerScope.
+	Owner string
 	// ViaReturn marks x = factory() (non-constructor call): TypeName holds the CALLEE
 	// name, and the resolver bridges through that callee's declared return type
 	// (PyCG Rule 4 / JARVIS return-type chaining) rather than treating it as a class.
 	ViaReturn bool
+	// ViaSymbol marks a callable-value alias whose RHS is a SYMBOL reference, not a
+	// call: `x = helper`, `x = obj.method`, `x = mod.func`, `self.f = F`,
+	// `this.f = F`. TypeName holds the RHS leaf name and TypeQualified the full
+	// source text ("obj.method"); the resolver's callable-value rung resolves a
+	// later `x()`/`self.f()` to that symbol. Distinct from ViaReturn (the RHS is
+	// the callee itself, not a call whose return type to bridge) and from a
+	// constructor binding (the RHS names a callable, not necessarily a class).
+	ViaSymbol bool
 }
 
 // ImportRef is a parsed import statement — maps an imported name to its source module.
@@ -159,6 +179,11 @@ func ParseBytes(sf walker.SourceFile, isTest bool, src []byte) (*ParseResult, er
 
 	// Walk the AST to extract definitions and calls
 	walkNode(root, sf, src, isTest, result, 0)
+
+	// Module-scope bindings (`alias = helper` at file level) are visible from
+	// every function scope; they live outside any body node, so walkNode's
+	// per-function extraction never sees them.
+	extractModuleAssignments(root, sf, src, result)
 	if result.ParserIncomplete {
 		for i := range result.Calls {
 			result.Calls[i].ParserIncomplete = true
@@ -195,9 +220,154 @@ func ParseBytes(sf walker.SourceFile, isTest bool, src []byte) (*ParseResult, er
 	// so the graph isn't polluted with content-free anchors.
 	maybeAddFileAnchorNode(sf, src, result)
 
+	// Re-label callsites that dispatch through a recorded callable VALUE
+	// (alias/field/parameter binding) as "function_value".
+	markFunctionValueCallsites(result, sf.Language)
+
 	stampContentAddress(src, result)
 
 	return result, nil
+}
+
+// markFunctionValueCallsites re-labels callsites whose callee resolves through
+// a recorded callable binding — a bare alias (`f = helper`, `f = obj.method`),
+// an object-field alias (`self.cb = helper`, `this.f = f`), or a formal
+// parameter (`def wrap(cb): cb()`). Such a call dispatches through a VALUE,
+// not a statically named target, so its DispatchForm is "function_value" — a
+// member of the closed dispatch vocabulary that previously had no producer.
+// Marking is conservative: a callee that names a defined symbol keeps its
+// existing form, because the defined binding is the primary claim and only
+// shadowing aliases need the distinction; likewise a non-alias binding
+// (constructor/factory assignment) never marks — `x = Foo()` types a receiver,
+// it does not make `x()` a function-value call.
+func markFunctionValueCallsites(result *ParseResult, lang string) {
+	if len(result.Calls) == 0 || len(result.Assignments) == 0 {
+		return
+	}
+	defined := make(map[string]struct{}, len(result.Nodes))
+	for i := range result.Nodes {
+		defined[result.Nodes[i].Name] = struct{}{}
+	}
+	// scoped[scope][varName]: a callable binding visible only inside `scope`
+	// (bare alias local to a function, or a formal parameter). Module-level
+	// assignments (Scope == "") are visible from every scope.
+	scoped := make(map[string]map[string]struct{})
+	// fields[objectScope][varName]: object-field alias bindings ("self.cb",
+	// "this.f") — object-scoped, visible from every method of the SAME class.
+	// Keying by ObjectScope keeps a `this.f` write in class A from re-marking
+	// an unrelated `this.f()` in class B.
+	fields := make(map[string]map[string]struct{})
+	for _, a := range result.Assignments {
+		switch {
+		case a.ViaSymbol && (strings.HasPrefix(a.VarName, "self.") || strings.HasPrefix(a.VarName, "this.")):
+			m := fields[a.ObjectScope]
+			if m == nil {
+				m = make(map[string]struct{})
+				fields[a.ObjectScope] = m
+			}
+			m[a.VarName] = struct{}{}
+		case a.ViaSymbol && a.ObjectScope != "" && a.Scope == "":
+			// Bare-name twin of a class-field alias (Java `this.f` also binds
+			// `f`, Kotlin likewise): it lives in the fields map under the
+			// bare name so `f.run()` marks only inside the owning class —
+			// module-scope visibility (scoped[""]) would leak it into sibling
+			// classes of the same file.
+			m := fields[a.ObjectScope]
+			if m == nil {
+				m = make(map[string]struct{})
+				fields[a.ObjectScope] = m
+			}
+			m[a.VarName] = struct{}{}
+		case a.ViaSymbol || a.IsParameter:
+			m := scoped[a.Scope]
+			if m == nil {
+				m = make(map[string]struct{})
+				scoped[a.Scope] = m
+			}
+			m[a.VarName] = struct{}{}
+		}
+	}
+	visible := func(name, scope string) bool {
+		if m, ok := scoped[scope]; ok {
+			if _, ok := m[name]; ok {
+				return true
+			}
+		}
+		if m, ok := scoped[""]; ok {
+			_, ok := m[name]
+			return ok
+		}
+		return false
+	}
+	for i := range result.Calls {
+		c := &result.Calls[i]
+		if c.ParserIncomplete || c.DynamicDispatch {
+			continue
+		}
+		switch c.DispatchForm {
+		case "static":
+			// Java/Kotlin collapse a field-receiver call into the callee
+			// NAME: `r.run()` extracts as callee "r" and `this.f.run()` as
+			// "this.f" (both static form). A field alias recorded on the
+			// caller's class marks either shape — and for these languages the
+			// field WINS over a same-named defined method (`r.run()`
+			// dereferences the field; a method named `r` is a different
+			// namespace), so the check precedes the defined-symbol veto.
+			classScoped := lang == "java" || lang == "kotlin"
+			callerClass := c.CallerScope
+			if dot := strings.LastIndex(callerClass, "."); dot >= 0 {
+				callerClass = callerClass[:dot]
+			}
+			fieldMarked := false
+			if callerClass != "" {
+				if m, ok := fields[callerClass]; ok {
+					_, fieldMarked = m[c.CalleeName]
+				}
+			}
+			if classScoped && fieldMarked {
+				c.DispatchForm = "function_value"
+				continue
+			}
+			if _, isDef := defined[c.CalleeName]; isDef {
+				continue
+			}
+			if visible(c.CalleeName, c.CallerScope) {
+				c.DispatchForm = "function_value"
+				continue
+			}
+			// `self.f`/`this.f`-shaped callees carry field evidence — a
+			// recorded field alias in the caller's class marks them (the same
+			// check the "virtual" arm applies to self.cb()-shaped calls in
+			// Python/JS).
+			if fieldMarked &&
+				(strings.HasPrefix(c.CalleeName, "self.") || strings.HasPrefix(c.CalleeName, "this.")) {
+				c.DispatchForm = "function_value"
+			}
+		case "virtual":
+			q := c.CalleeQualified
+			if strings.HasPrefix(q, "self.") || strings.HasPrefix(q, "this.") {
+				// A recorded `self.f`/`this.f` field write in the caller's
+				// class is the concrete evidence — an instance attribute
+				// shadows any same-named method or module-level function at
+				// runtime, so a defined leaf name must not veto the mark.
+				// CallerScope is "ClassQual.method"; its class prefix matches
+				// the binding's ObjectScope.
+				callerClass := c.CallerScope
+				if dot := strings.LastIndex(callerClass, "."); dot >= 0 {
+					callerClass = callerClass[:dot]
+				}
+				if m, ok := fields[callerClass]; ok {
+					if _, ok := m[q]; ok {
+						c.DispatchForm = "function_value"
+					}
+				}
+			} else if visible(q, c.CallerScope) {
+				// `obj.f = helper; obj.f()` — a qualified alias written in this
+				// scope marks the matching qualified call.
+				c.DispatchForm = "function_value"
+			}
+		}
+	}
 }
 
 // stampContentAddress completes every node's content address with the sha256 of
@@ -602,17 +772,22 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				}
 			}
 		}
-		if name == "" {
-			name = extractFirstIdentifier(node, src)
-		}
 		// JS/TS fix: arrow functions assigned to variables have no name field.
 		// The name lives on the parent variable_declarator node.
 		// e.g. const handler = async (req, res) => {}
+		// This must run BEFORE extractFirstIdentifier: that helper recurses the
+		// whole arrow subtree, so an arrow with parameters or a non-empty body
+		// would otherwise be misnamed after its first inner identifier
+		// (`const wrap = (cb) => …` → "cb", `const f = () => helper()` →
+		// "helper") — a bogus name that also shadows same-named real symbols.
 		if name == "" && nodeType == "arrow_function" {
 			parent := node.Parent()
 			if parent != nil && parent.Type() == "variable_declarator" {
 				name = extractFieldText(parent, "name", src)
 			}
+		}
+		if name == "" {
+			name = extractFirstIdentifier(node, src)
 		}
 		if name != "" {
 			sig := extractSignature(node, src, spec.BodyField)
@@ -655,6 +830,17 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 
 			// Extract calls from this function's body
 			bodyNode := node.ChildByFieldName(spec.BodyField)
+			if bodyNode == nil && spec.BodyField != "" {
+				// Some grammars (Kotlin) expose the body as an unnamed child
+				// typed `function_body` — match on node type when the field
+				// lookup fails.
+				for i := 0; i < int(node.ChildCount()); i++ {
+					if c := node.Child(i); c != nil && c.Type() == spec.BodyField {
+						bodyNode = c
+						break
+					}
+				}
+			}
 			if bodyNode != nil {
 				scopeName := name
 				objectScope := ""
@@ -662,9 +848,16 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 					objectScope = result.Nodes[parentNodeIdx-1].QualifiedName
 					scopeName = objectScope + "." + name
 				}
+				// Formal parameters bind before the body runs — emit them first
+				// so assignment-order (last-write-wins) sees body writes after
+				// the parameter binding. These feed VTA argument→formal flow
+				// and the callable-value rung (higher-order callable flow).
+				extractFunctionParams(node, sf, src, result, scopeName, objectScope, scopeName)
 				extractCalls(bodyNode, sf, src, result, idx, scopeName)
 				// PyCG Rule 1: extract x = ClassName() assignments for type tracking
 				extractAssignments(bodyNode, sf, src, result, scopeName, objectScope)
+				// HAR-90 items 5-8: statement-level CFG for this function body
+				extractCFG(node, bodyNode, sf, src, result, idx)
 			}
 
 			// Extract properties (guard clauses, exception types, return shape)
@@ -902,6 +1095,8 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 								extractCalls(bodyNode, sf, src, result, idx, n.Name)
 								extractAssignments(bodyNode, sf, src, result, n.Name, "")
 								findAssertions(bodyNode, sf, src, result, idx, 0)
+								// HAR-90 items 5-8: CFG for the synthesized test-function node
+								extractCFG(arg, bodyNode, sf, src, result, idx)
 							} else {
 								// Arrow function with expression body: () => expr
 								extractCalls(arg, sf, src, result, idx, n.Name)
@@ -1103,8 +1298,26 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 			}
 
 			var argumentArity *uint16
+			// Kotlin call sites nest the argument list under call_suffix →
+			// value_arguments rather than an "arguments" field.
+			argumentsNode := node.ChildByFieldName("arguments")
+			if argumentsNode == nil {
+				for i := 0; i < int(node.ChildCount()); i++ {
+					c := node.Child(i)
+					if c == nil || c.Type() != "call_suffix" {
+						continue
+					}
+					for j := 0; j < int(c.ChildCount()); j++ {
+						if v := c.Child(j); v != nil && v.Type() == "value_arguments" {
+							argumentsNode = v
+							break
+						}
+					}
+					break
+				}
+			}
 			argumentSpread := false
-			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
+			if arguments := argumentsNode; arguments != nil {
 				arity := uint16(arguments.NamedChildCount())
 				argumentArity = &arity
 				for i := 0; i < int(arguments.NamedChildCount()); i++ {
@@ -1124,14 +1337,42 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				}
 			}
 			argumentNames := []string(nil)
-			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
+			if arguments := argumentsNode; arguments != nil {
 				for i := 0; i < int(arguments.NamedChildCount()); i++ {
 					arg := arguments.NamedChild(i)
 					if arg == nil {
 						continue
 					}
-					if arg.Type() == "identifier" || arg.Type() == "field_identifier" || arg.Type() == "type_identifier" {
+					if arg.Type() == "value_argument" { // Kotlin wraps each arg
+						for j := 0; j < int(arg.ChildCount()); j++ {
+							if c := arg.Child(j); c != nil && c.IsNamed() {
+								arg = c
+								break
+							}
+						}
+					}
+					switch arg.Type() {
+					case "identifier", "field_identifier", "type_identifier":
 						argumentNames = append(argumentNames, strings.TrimSpace(arg.Content(src)))
+					case "method_reference":
+						// Java `wrap(this::work)` / `f(Helper::parse)` — the
+						// reference names a callable symbol; record the source
+						// text so the callable-parameter rung can resolve the
+						// receiver (`this`/class/var) against the CALLSITE.
+						if sf.Language == "java" {
+							argumentNames = append(argumentNames, strings.TrimSpace(arg.Content(src)))
+						}
+					case "callable_reference":
+						// Kotlin `wrap(::helper)` — same role, `::f` spelling.
+						if sf.Language == "kotlin" {
+							argumentNames = append(argumentNames, strings.TrimSpace(arg.Content(src)))
+						}
+					case "selector_expression":
+						// Go `wrap(s.m)` / `wrap(pkg.F)` — a method value or
+						// package-qualified function passed as an argument.
+						if sf.Language == "go" {
+							argumentNames = append(argumentNames, strings.TrimSpace(arg.Content(src)))
+						}
 					}
 				}
 			}
@@ -1203,17 +1444,58 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 // PyCG Rule 1: x = ClassName() → varTypes[x] = ClassName
 // Looks for assignment nodes where right side is a call to a capitalized name.
 func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope string) {
+	extractAssignmentsMode(node, sf, src, result, scopeName, objectScope, false)
+}
+
+// extractModuleAssignments scans module-level (top-level) statements for
+// callable-alias and type-flow assignments (`alias_helper = helper` at file
+// scope). Function and class subtrees are refused: their bodies are owned by
+// the scoped extractAssignments calls inside walkNode, and descending into
+// them here would mis-record locals as module-visible (Scope == "").
+func extractModuleAssignments(root *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
+	extractAssignmentsMode(root, sf, src, result, "", "", true)
+}
+
+func extractAssignmentsMode(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope string, topLevel bool) {
 	nodeType := node.Type()
+	if topLevel && (sf.Spec.IsFunctionNode(nodeType) || sf.Spec.IsClassNode(nodeType) || nodeType == "decorated_definition") {
+		// Java/Kotlin class-level field declarations can hold callable
+		// aliases (`Runnable r = this::run;`, `val f = ::helper`) — the
+		// per-function extractor never sees class bodies, so harvest field
+		// bindings here, object-scoped rather than module-scoped.
+		if sf.Spec.IsClassNode(nodeType) && (sf.Language == "java" || sf.Language == "kotlin") {
+			extractClassFieldAliases(node, sf, src, result)
+		}
+		return
+	}
 	if sf.Language == "go" && node.Parent() != nil && (node.Parent().Type() == "function_declaration" || node.Parent().Type() == "method_declaration") {
 		extractGoTypedAssignments(node, sf, src, result, scopeName, objectScope)
 	}
 
+	// Nested function boundary: a function/method/arrow declared inside a body
+	// gets no node of its own (walkNode returns after emitting the outer
+	// function), so its formals are recorded here. They stay visible under the
+	// ENCLOSING scope — matching the CallerScope calls inside it carry — while
+	// Owner names the nested callable so the callable-value rung keys callsites
+	// by the right name (`w(helper)` binds `w`'s formals, not `outer`'s).
+	// Anonymous callbacks yield no owner and are skipped: an unnamed formal
+	// cannot be invoked by name, and recording it would shadow same-named
+	// locals the way a real binding never could.
+	if sf.Spec.IsFunctionNode(nodeType) {
+		if owner := nestedFuncOwner(node, sf.Spec, src); owner != "" {
+			extractFunctionParams(node, sf, src, result, scopeName, objectScope, owner)
+		}
+	}
+
 	// Python: assignment, augmented_assignment
 	// JS/TS: variable_declarator, assignment_expression
-	// Go: short_var_declaration, assignment_statement
+	// Go: short_var_declaration, assignment_statement, var_spec
+	// Java: variable_declarator, assignment_expression
+	// Kotlin: assignment, property_declaration
 	isAssignment := nodeType == "assignment" || nodeType == "variable_declarator" ||
 		nodeType == "short_var_declaration" || nodeType == "assignment_statement" ||
-		nodeType == "assignment_expression"
+		nodeType == "assignment_expression" || nodeType == "var_spec" ||
+		nodeType == "property_declaration"
 
 	if isAssignment {
 		// Find LHS (variable name) and RHS (value)
@@ -1222,88 +1504,176 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 		left := node.ChildByFieldName("left")
 		right := node.ChildByFieldName("right")
 		if left == nil {
-			left = node.ChildByFieldName("name") // JS variable_declarator
+			left = node.ChildByFieldName("name") // JS variable_declarator / Go var_spec
 		}
 		if right == nil {
-			right = node.ChildByFieldName("value") // JS variable_declarator
+			right = node.ChildByFieldName("value") // JS variable_declarator / Go var_spec
 		}
+		if nodeType == "property_declaration" {
+			// Kotlin `val f = ::helper`: the bound name sits inside the
+			// variable_declaration child; the RHS is the last named child.
+			for i := 0; i < int(node.ChildCount()); i++ {
+				if c := node.Child(i); c != nil && c.Type() == "variable_declaration" {
+					left = c
+					break
+				}
+			}
+			for i := int(node.ChildCount()) - 1; i >= 0; i-- {
+				if c := node.Child(i); c != nil && c.IsNamed() && c.Type() != "variable_declaration" {
+					right = c
+					break
+				}
+			}
+		}
+		// Go wraps both sides of `f := helper` / `var f = helper` in an
+		// expression_list. Unwrap a single-element list; a multi-element list
+		// is tuple destructuring (`a, b := f, g`) — not a single-name
+		// binding, so it abstains like the Py/TS spread rule.
+		left = unwrapSingleExpr(left)
+		right = unwrapSingleExpr(right)
 
 		if left != nil {
 			lhsText := left.Content(src)
-			// Simple variable: x = ...
-			if left.Type() == "identifier" {
+			switch left.Type() {
+			case "identifier", "simple_identifier":
+				// Simple variable: x = ...
+				lhsName = lhsText
+			case "variable_declaration":
+				// Kotlin `val/var f` — the bound name is the inner
+				// simple_identifier.
+				for i := 0; i < int(left.ChildCount()); i++ {
+					if c := left.Child(i); c != nil && c.Type() == "simple_identifier" {
+						lhsName = strings.TrimSpace(c.Content(src))
+						break
+					}
+				}
+			case "attribute", "member_expression", "field_access",
+				"directly_assignable_expression", "selector_expression":
+				// self.x / this.x / obj.f attribute writes (Python/JS,
+				// Java `this.f = …`, Kotlin `this.f = …`, Go `s.f = …`).
 				lhsName = lhsText
 			}
-			// Attribute: self.x = ...
-			if left.Type() == "attribute" || left.Type() == "member_expression" {
-				lhsName = lhsText
+			if lhsName == "_" {
+				// Go blank identifier — never invocable, never a binding.
+				lhsName = ""
 			}
 		}
 
 		if lhsName != "" && right != nil {
-			// Check if RHS is a call expression: x = ClassName()
-			callNode := right
-			if callNode.Type() == "call" || callNode.Type() == "call_expression" ||
-				callNode.Type() == "new_expression" {
-				simple, qualified := extractCalleeInfo(callNode, src)
-				if simple != "" {
-					typeName := ""
-					// Heuristic 1: capitalized bare name = likely constructor (PyCG ICSE 2021).
-					// Covers: Python `x = MyClass()`, TS/JS `x = new Foo()`.
-					// EXCLUDE Go: an exported Go func is Capitalized but is NOT a constructor
-					// (`x := Marshal()` returns []byte, not a `Marshal` instance). Stamping
-					// TypeName="Marshal" pollutes the resolver with a non-existent type, so for
-					// Go a capitalized bare call falls through to the ViaReturn path below
-					// (bridge through the callee's declared return type). PyCG's capital=ctor
-					// rule is Python/JS/TS-shaped, not Go-shaped.
-					if sf.Language != "go" && len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z' {
-						typeName = simple
-					}
-					// Heuristic 2: Rust/Go qualified constructor — Type::new() / Type::default() / Type::from()
-					// The qualifier IS the type; the method is the constructor idiom.
-					if typeName == "" && qualified != "" && strings.Contains(qualified, "::") {
-						if sepIdx := strings.LastIndex(qualified, "::"); sepIdx > 0 {
-							qual := qualified[:sepIdx]
-							method := qualified[sepIdx+2:]
-							if (method == "new" || method == "default" || method == "from" || method == "from_str" || method == "with_capacity") &&
-								len(qual) > 0 && qual[0] >= 'A' && qual[0] <= 'Z' {
-								typeName = qual
+			// Go: `h := Handler{F: helper}` / `s := &T{}` — a composite
+			// literal records the constructor binding (h → Handler) AND any
+			// keyed function-value fields (h.F → helper). True return means
+			// the RHS was a composite literal — the generic call/alias
+			// checks below must not run on it.
+			goComposite := sf.Language == "go" &&
+				extractGoCompositeValue(right, lhsName, node, sf, src, result, scopeName, objectScope)
+			if !goComposite {
+				// Check if RHS is a call expression: x = ClassName()
+				callNode := right
+				if callNode.Type() == "call" || callNode.Type() == "call_expression" ||
+					callNode.Type() == "new_expression" {
+					simple, qualified := extractCalleeInfo(callNode, src)
+					if simple != "" {
+						typeName := ""
+						// Heuristic 1: capitalized bare name = likely constructor (PyCG ICSE 2021).
+						// Covers: Python `x = MyClass()`, TS/JS `x = new Foo()`.
+						// EXCLUDE Go: an exported Go func is Capitalized but is NOT a constructor
+						// (`x := Marshal()` returns []byte, not a `Marshal` instance). Stamping
+						// TypeName="Marshal" pollutes the resolver with a non-existent type, so for
+						// Go a capitalized bare call falls through to the ViaReturn path below
+						// (bridge through the callee's declared return type). PyCG's capital=ctor
+						// rule is Python/JS/TS-shaped, not Go-shaped.
+						if sf.Language != "go" && len(simple) > 0 && simple[0] >= 'A' && simple[0] <= 'Z' {
+							typeName = simple
+						}
+						// Heuristic 2: Rust/Go qualified constructor — Type::new() / Type::default() / Type::from()
+						// The qualifier IS the type; the method is the constructor idiom.
+						if typeName == "" && qualified != "" && strings.Contains(qualified, "::") {
+							if sepIdx := strings.LastIndex(qualified, "::"); sepIdx > 0 {
+								qual := qualified[:sepIdx]
+								method := qualified[sepIdx+2:]
+								if (method == "new" || method == "default" || method == "from" || method == "from_str" || method == "with_capacity") &&
+									len(qual) > 0 && qual[0] >= 'A' && qual[0] <= 'Z' {
+									typeName = qual
+								}
 							}
 						}
-					}
-					if typeName != "" {
-						result.Assignments = append(result.Assignments, AssignmentRef{
-							VarName:       lhsName,
-							TypeName:      typeName,
-							TypeQualified: qualified,
-							Scope:         scopeName,
-							ObjectScope:   objectScope,
-							File:          sf.Path,
-							Line:          int(node.StartPoint().Row) + 1,
-						})
-					} else {
-						// PyCG Rule 4 / JARVIS return-type chaining: x = factory() where the
-						// callee is a (non-constructor) function — record the CALLEE name with
-						// ViaReturn so the resolver bridges through factory's declared return
-						// type (e.g. `x = get_client(); x.run()` → return type of get_client).
-						// Lowercase simple name (capitalized = ctor, handled above) OR, in Go,
-						// a capitalized bare call (`x := Marshal()`) which is an exported func,
-						// not a constructor — it too must bridge through its return type. Skip
-						// qualified receiver-method calls (obj.method()) — their type is unknown
-						// here, left for the demand-driven residual.
-						isLowerBare := simple[0] >= 'a' && simple[0] <= 'z'
-						isGoCapBare := sf.Language == "go" && simple[0] >= 'A' && simple[0] <= 'Z'
-						if (isLowerBare || isGoCapBare) && (qualified == "" || qualified == simple) {
+						if typeName != "" {
 							result.Assignments = append(result.Assignments, AssignmentRef{
 								VarName:       lhsName,
-								TypeName:      simple,
+								TypeName:      typeName,
 								TypeQualified: qualified,
 								Scope:         scopeName,
 								ObjectScope:   objectScope,
 								File:          sf.Path,
 								Line:          int(node.StartPoint().Row) + 1,
-								ViaReturn:     true,
 							})
+						} else {
+							// PyCG Rule 4 / JARVIS return-type chaining: x = factory() where the
+							// callee is a (non-constructor) function — record the CALLEE name with
+							// ViaReturn so the resolver bridges through factory's declared return
+							// type (e.g. `x = get_client(); x.run()` → return type of get_client).
+							// Lowercase simple name (capitalized = ctor, handled above) OR, in Go,
+							// a capitalized bare call (`x := Marshal()`) which is an exported func,
+							// not a constructor — it too must bridge through its return type. Skip
+							// qualified receiver-method calls (obj.method()) — their type is unknown
+							// here, left for the demand-driven residual.
+							isLowerBare := simple[0] >= 'a' && simple[0] <= 'z'
+							isGoCapBare := sf.Language == "go" && simple[0] >= 'A' && simple[0] <= 'Z'
+							if (isLowerBare || isGoCapBare) && (qualified == "" || qualified == simple) {
+								result.Assignments = append(result.Assignments, AssignmentRef{
+									VarName:       lhsName,
+									TypeName:      simple,
+									TypeQualified: qualified,
+									Scope:         scopeName,
+									ObjectScope:   objectScope,
+									File:          sf.Path,
+									Line:          int(node.StartPoint().Row) + 1,
+									ViaReturn:     true,
+								})
+							}
+						}
+					}
+				} else if callableAliasEligible(sf.Language, right) {
+					if simple, qualified := callableAliasRHS(right, src); simple != "" {
+						// Higher-order callable alias (JARVIS 2023 higher-order flow /
+						// PyCG function-as-value): `x = helper`, `x = obj.method`,
+						// `x = mod.func`, `self.f = F`, `this.f = F`,
+						// `Runnable r = this::run` (Java method_reference),
+						// `val f = ::helper` (Kotlin callable_reference). The RHS is
+						// a symbol reference — record it so the resolver's
+						// callable-value rung can resolve a later `x()`/`self.f()`/
+						// `r.run()` to that symbol.
+						result.Assignments = append(result.Assignments, AssignmentRef{
+							VarName:       lhsName,
+							TypeName:      simple,
+							TypeQualified: qualified,
+							Scope:         scopeName,
+							ObjectScope:   objectScope,
+							File:          sf.Path,
+							Line:          int(node.StartPoint().Row) + 1,
+							ViaSymbol:     true,
+						})
+						// Java/Kotlin `this.f = this::work` also binds the BARE
+						// field name — inside a method `f` resolves to the field
+						// without the `this.` prefix, so `f.run()` must see the
+						// binding too. ObjectScope keeps it from leaking into
+						// same-file sibling classes.
+						if (sf.Language == "java" || sf.Language == "kotlin") &&
+							strings.HasPrefix(lhsName, "this.") {
+							bare := strings.TrimPrefix(lhsName, "this.")
+							if callableIdentRe.MatchString(bare) {
+								result.Assignments = append(result.Assignments, AssignmentRef{
+									VarName:       bare,
+									TypeName:      simple,
+									TypeQualified: qualified,
+									Scope:         "",
+									ObjectScope:   objectScope,
+									File:          sf.Path,
+									Line:          int(node.StartPoint().Row) + 1,
+									ViaSymbol:     true,
+								})
+							}
 						}
 					}
 				}
@@ -1341,8 +1711,725 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 
 	// Recurse
 	for i := 0; i < int(node.ChildCount()); i++ {
-		extractAssignments(node.Child(i), sf, src, result, scopeName, objectScope)
+		extractAssignmentsMode(node.Child(i), sf, src, result, scopeName, objectScope, topLevel)
 	}
+}
+
+// callableAliasStopWords are bare RHS identifiers that are language constants or
+// receiver keywords, never an internal callable symbol — `x = None`, `x = this`
+// carry no call-graph target.
+var callableAliasStopWords = map[string]bool{
+	"none": true, "None": true, "nil": true, "null": true, "undefined": true,
+	"true": true, "false": true, "True": true, "False": true,
+	"self": true, "this": true, "super": true,
+}
+
+// callableIdentRe matches a clean bare identifier — the leaf of a qualified
+// alias RHS must be a plain name ("obj.method" → "method"), never a call,
+// subscript, or operator fragment.
+var callableIdentRe = regexp.MustCompile(`^[A-Za-z_]\w*$`)
+
+// callableAliasRHS reports the SYMBOL a bare-alias assignment RHS refers to:
+//   - `x = helper`        → identifier → ("helper", "helper")
+//   - `x = obj.method`    → attribute/member access → ("method", "obj.method")
+//   - `x = mod.func`      → module member → ("func", "mod.func")
+//   - `x = pkg::f`        → Rust scoped identifier → ("f", "pkg::f")
+//   - `x = (helper)`      → parenthesized → unwrapped
+//
+// Returns ("","") for anything else (calls, literals, comprehensions,
+// subscripts) — the RHS is then not a callable-value binding. This is the
+// parser half of higher-order callable flow (JARVIS 2023 §6, PyCG ICSE 2021):
+// the LHS name becomes a callable alias whose call (`x()`) dispatches to the
+// recorded symbol. Conservative: a receiver rooted in a literal
+// (`x = "s".join`) is a builtin bound method, never an internal symbol, and a
+// qualified text containing `(` is a call result, not a symbol.
+func callableAliasRHS(node *sitter.Node, src []byte) (string, string) {
+	if node == nil {
+		return "", ""
+	}
+	switch node.Type() {
+	case "parenthesized_expression":
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c == nil || !c.IsNamed() {
+				continue
+			}
+			return callableAliasRHS(c, src)
+		}
+		return "", ""
+	case "identifier":
+		name := strings.TrimSpace(node.Content(src))
+		if name == "" || callableAliasStopWords[name] {
+			return "", ""
+		}
+		return name, name
+	case "scoped_identifier": // Rust `a::b` / `a::b::c`
+		qualified := strings.TrimSpace(node.Content(src))
+		leaf := qualified
+		if idx := strings.LastIndex(qualified, "::"); idx >= 0 {
+			leaf = qualified[idx+2:]
+		}
+		if leaf == "" || !callableIdentRe.MatchString(leaf) {
+			return "", ""
+		}
+		return leaf, qualified
+	case "method_reference", "callable_reference":
+		// Java `recv::m` / `this::m` / `Type::new`; Kotlin `::f` / `recv::m`.
+		// The leaf is the LAST identifier-ish named child; the receiver is the
+		// FIRST named child when more than one exists. `Type::new` names the
+		// constructor — the declared node id is the type's own name — so map
+		// it to the receiver (`Factory::new` resolves like `Factory`). The
+		// qualified text is emitted in dotted form (`Helper::parse` →
+		// `Helper.parse`) so the resolver's receiver-splitting applies
+		// unchanged: a class receiver qualifies the member lookup, a `this`
+		// receiver falls back to the leaf.
+		raw := strings.TrimSpace(node.Content(src))
+		qualified := strings.ReplaceAll(raw, "::", ".")
+		var recv, leaf string
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c == nil || !c.IsNamed() {
+				continue
+			}
+			txt := strings.TrimSpace(c.Content(src))
+			switch c.Type() {
+			case "identifier", "simple_identifier", "field_identifier", "type_identifier":
+				if leaf != "" && recv == "" {
+					recv = leaf
+				}
+				leaf = txt
+			default:
+				if recv == "" {
+					recv = txt
+				}
+			}
+		}
+		if leaf == "new" && callableIdentRe.MatchString(recv) {
+			return recv, recv
+		}
+		if leaf == "" || !callableIdentRe.MatchString(leaf) {
+			return "", ""
+		}
+		return leaf, qualified
+	case "attribute", "member_expression", "selector_expression", "field_expression":
+		qualified := strings.TrimSpace(node.Content(src))
+		if qualified == "" || strings.ContainsAny(qualified, "()") {
+			// `x = foo().bar` — the attribute's base is a call result, not a
+			// nameable symbol.
+			return "", ""
+		}
+		// Receiver rooted in a literal (`x = "s".join`, `x = [].append`) is a
+		// builtin bound method, never an internal symbol. Reuses the same
+		// literal-root rule the callsite extractor applies to `recv.method()`.
+		var recv *sitter.Node
+		for _, fld := range []string{"object", "operand", "argument"} {
+			if recv = node.ChildByFieldName(fld); recv != nil {
+				break
+			}
+		}
+		if recv == nil {
+			recv = node.Child(0)
+		}
+		if recv != nil && receiverRootIsLiteral(recv, 0) {
+			return "", ""
+		}
+		leaf := ""
+		// The attribute/property/field child is the accessed member across
+		// Python (`attribute`), JS/TS (`property`), and Go/C++ (`field`).
+		for _, fld := range []string{"attribute", "property", "field"} {
+			if c := node.ChildByFieldName(fld); c != nil {
+				leaf = strings.TrimSpace(c.Content(src))
+				break
+			}
+		}
+		if leaf == "" {
+			for i := int(node.ChildCount()) - 1; i >= 0; i-- {
+				c := node.Child(i)
+				if c == nil {
+					continue
+				}
+				if c.Type() == "identifier" || c.Type() == "property_identifier" || c.Type() == "field_identifier" {
+					leaf = strings.TrimSpace(c.Content(src))
+					break
+				}
+			}
+		}
+		if leaf == "" || !callableIdentRe.MatchString(leaf) {
+			return "", ""
+		}
+		return leaf, qualified
+	}
+	return "", ""
+}
+
+// callableAliasEligible gates which RHS shapes may become a callable-value
+// alias per language. Java and Kotlin have no bare function identifiers — a
+// plain `x = y` copies a variable, it does not alias a callable — so only the
+// explicit callable-reference syntaxes (`this::m`, `Type::m`, `::f`) qualify.
+// Every other language keeps the existing identifier/attribute RHS rule.
+func callableAliasEligible(lang string, right *sitter.Node) bool {
+	if right == nil {
+		return false
+	}
+	switch lang {
+	case "java":
+		return right.Type() == "method_reference"
+	case "kotlin":
+		return right.Type() == "callable_reference"
+	}
+	return true
+}
+
+// unwrapSingleExpr unwraps a single-element expression_list — Go wraps both
+// sides of `f := helper` and `var f = helper` in one. A multi-element list is
+// a tuple destructure (`a, b := f(), g()`): no single-name binding, so the
+// caller must skip (nil) rather than guess.
+func unwrapSingleExpr(node *sitter.Node) *sitter.Node {
+	if node == nil || node.Type() != "expression_list" {
+		return node
+	}
+	var only *sitter.Node
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil || !c.IsNamed() {
+			continue
+		}
+		if only != nil {
+			return nil
+		}
+		only = c
+	}
+	return only
+}
+
+// extractGoCompositeValue handles a Go composite-literal RHS (`h :=
+// Handler{F: helper}`, `s := &T{}`). The literal records the var's concrete
+// type — the Go constructor idiom, Rule-1 for Go — and each keyed element
+// whose value is a symbol reference records a `lhs.F` → symbol callable
+// binding so a later `h.F()` resolves through the stored function value.
+// Returns true when the RHS was a composite literal (possibly behind `&`),
+// so the caller skips the ordinary call/alias checks.
+func extractGoCompositeValue(right *sitter.Node, lhsName string, node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope string) bool {
+	rhs := right
+	if rhs.Type() == "unary_expression" { // `&T{...}`
+		if op := rhs.ChildByFieldName("operand"); op != nil {
+			rhs = op
+		} else {
+			for i := 0; i < int(rhs.ChildCount()); i++ {
+				if c := rhs.Child(i); c != nil && c.IsNamed() {
+					rhs = c
+					break
+				}
+			}
+		}
+	}
+	if rhs.Type() != "composite_literal" {
+		return false
+	}
+	// Declared type: `T{...}` / `pkg.T{...}` — the Go constructor binding.
+	if t := rhs.ChildByFieldName("type"); t != nil &&
+		(t.Type() == "type_identifier" || t.Type() == "qualified_identifier") {
+		if tn := normalizedGoTypeName(t.Content(src)); tn != "" {
+			result.Assignments = append(result.Assignments, AssignmentRef{
+				VarName:       lhsName,
+				TypeName:      tn,
+				TypeQualified: tn,
+				Scope:         scopeName,
+				ObjectScope:   objectScope,
+				File:          sf.Path,
+				Line:          int(node.StartPoint().Row) + 1,
+			})
+		}
+	}
+	// Keyed elements: `F: helper` inside literal_value.
+	body := rhs.ChildByFieldName("body")
+	if body == nil {
+		return true
+	}
+	for i := 0; i < int(body.ChildCount()); i++ {
+		el := body.Child(i)
+		if el == nil || el.Type() != "keyed_element" {
+			continue
+		}
+		var key, val *sitter.Node
+		for j := 0; j < int(el.ChildCount()); j++ {
+			c := el.Child(j)
+			if c == nil || !c.IsNamed() {
+				continue
+			}
+			if key == nil {
+				key = c
+			} else if val == nil {
+				val = c
+			}
+		}
+		if key == nil || val == nil {
+			continue
+		}
+		// literal_element wraps the actual key/value expression.
+		unwrapLit := func(n *sitter.Node) *sitter.Node {
+			if n.Type() == "literal_element" {
+				for j := 0; j < int(n.ChildCount()); j++ {
+					if c := n.Child(j); c != nil && c.IsNamed() {
+						return c
+					}
+				}
+			}
+			return n
+		}
+		keyName := strings.TrimSpace(unwrapLit(key).Content(src))
+		if !callableIdentRe.MatchString(keyName) {
+			continue
+		}
+		if simple, qualified := callableAliasRHS(unwrapLit(val), src); simple != "" {
+			result.Assignments = append(result.Assignments, AssignmentRef{
+				VarName:       lhsName + "." + keyName,
+				TypeName:      simple,
+				TypeQualified: qualified,
+				Scope:         scopeName,
+				ObjectScope:   objectScope,
+				File:          sf.Path,
+				Line:          int(node.StartPoint().Row) + 1,
+				ViaSymbol:     true,
+			})
+		}
+	}
+	return true
+}
+
+// extractClassFieldAliases harvests class-level FIELD declarations whose RHS
+// is a callable alias — Java `Runnable r = this::run;`, Kotlin `val f =
+// ::helper` — which the per-function extractor never reaches (top-level
+// traversal stops at class boundaries to keep locals from leaking). Each
+// field gets two bindings: the bare field name (Java extracts `r.run()` with
+// the receiver name `r` as the callee) and the `this.`-prefixed form
+// (`this.r.run()`). Both carry the declaring class as ObjectScope so a
+// same-named var in a sibling class can never mark or bind it.
+func extractClassFieldAliases(classNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
+	name := extractFieldText(classNode, sf.Spec.NameField, src)
+	if name == "" {
+		name = extractFirstIdentifier(classNode, src)
+	}
+	if name == "" {
+		return
+	}
+	walkFieldAliasScope(classNode, sf, src, result, name)
+}
+
+// walkFieldAliasScope descends a class body for field declarations, skipping
+// method bodies (they belong to the scoped extractor) and requalifying nested
+// classes under `Outer.Inner`.
+func walkFieldAliasScope(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, classQual string) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		t := child.Type()
+		switch {
+		case sf.Spec.IsFunctionNode(t):
+			continue
+		case sf.Spec.IsClassNode(t):
+			name := extractFieldText(child, sf.Spec.NameField, src)
+			if name == "" {
+				name = extractFirstIdentifier(child, src)
+			}
+			if name != "" {
+				walkFieldAliasScope(child, sf, src, result, classQual+"."+name)
+			}
+		case t == "field_declaration" || t == "property_declaration":
+			extractFieldDeclAliases(child, sf, src, result, classQual)
+		default:
+			// Body containers (class_body, interface_body, enum_body,
+			// companion_object, ...) and anything else keep the same scope.
+			walkFieldAliasScope(child, sf, src, result, classQual)
+		}
+	}
+}
+
+// extractFieldDeclAliases records callable aliases from one field/property
+// declaration: Java `field_declaration` → variable_declarator children, Kotlin
+// `property_declaration` → variable_declaration + trailing initializer.
+func extractFieldDeclAliases(decl *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, classQual string) {
+	emit := func(name string, value *sitter.Node, line int) {
+		if name == "" || value == nil || !callableAliasEligible(sf.Language, value) {
+			return
+		}
+		simple, qualified := callableAliasRHS(value, src)
+		if simple == "" {
+			return
+		}
+		for _, vn := range []string{name, "this." + name} {
+			result.Assignments = append(result.Assignments, AssignmentRef{
+				VarName:       vn,
+				TypeName:      simple,
+				TypeQualified: qualified,
+				Scope:         "",
+				ObjectScope:   classQual,
+				File:          sf.Path,
+				Line:          line,
+				ViaSymbol:     true,
+			})
+		}
+	}
+	switch decl.Type() {
+	case "field_declaration": // Java `Runnable r = this::run;`
+		for i := 0; i < int(decl.ChildCount()); i++ {
+			child := decl.Child(i)
+			if child == nil || child.Type() != "variable_declarator" {
+				continue
+			}
+			name := ""
+			if n := child.ChildByFieldName("name"); n != nil {
+				name = strings.TrimSpace(n.Content(src))
+			}
+			emit(name, child.ChildByFieldName("value"), int(child.StartPoint().Row)+1)
+		}
+	case "property_declaration": // Kotlin `val f = ::helper`
+		name := ""
+		var value *sitter.Node
+		for i := 0; i < int(decl.ChildCount()); i++ {
+			child := decl.Child(i)
+			if child == nil || !child.IsNamed() {
+				continue
+			}
+			if child.Type() == "variable_declaration" {
+				for j := 0; j < int(child.ChildCount()); j++ {
+					if c := child.Child(j); c != nil && c.Type() == "simple_identifier" {
+						name = strings.TrimSpace(c.Content(src))
+						break
+					}
+				}
+				continue
+			}
+			value = child // the last named child is the initializer
+		}
+		emit(name, value, int(decl.StartPoint().Row)+1)
+	}
+}
+
+// extractFunctionParams records every formal parameter of a Python, JS/TS,
+// Java, or Kotlin function/method/arrow as an AssignmentRef{IsParameter:
+// true, ParameterIndex: position} — the argument-to-formal binding the VTA
+// worklist and the callable-value resolver rung consume (`def wrap(cb):
+// cb(); wrap(helper)` → `cb` is bound by the argument at each callsite). Go
+// already emits these via extractGoTypedAssignments; other languages keep
+// their existing behavior.
+//
+// ParameterIndex counts only positionally-bindable formals: the receiver
+// formals `self`/`cls` bind implicitly (never by a callsite argument) so they
+// are skipped WITHOUT consuming an index; `*args`/`**kw`/`...rest` and the
+// keyword separator `*` end positional binding, so extraction stops there
+// (formals after a splat are keyword-only and cannot be reached positionally);
+// a destructured/object pattern consumes one positional slot but binds no
+// single name (consumed index, no ref).
+//
+// scopeName is the scope the formals are VISIBLE under — for a nested
+// function body this is the enclosing function's scope, matching the
+// CallerScope calls inside it carry. owner is the qualified name of the
+// function the formals belong to — the callsite key the callable-value rung
+// scans (`w(helper)` binds `w`'s formals, not `outer`'s). For a top-level
+// emit the two coincide (owner == scopeName).
+func extractFunctionParams(funcNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope, owner string) {
+	switch sf.Language {
+	case "python", "javascript", "typescript", "java", "kotlin":
+	default:
+		return
+	}
+	params := funcNode.ChildByFieldName(sf.Spec.ParamsField)
+	if params == nil && sf.Spec.ParamsField != "" {
+		// Some grammars (Kotlin) expose the parameter list as an unnamed
+		// child typed `function_value_parameters` — match on node type.
+		for i := 0; i < int(funcNode.ChildCount()); i++ {
+			if c := funcNode.Child(i); c != nil && c.Type() == sf.Spec.ParamsField {
+				params = c
+				break
+			}
+		}
+	}
+	if params == nil {
+		// JS bare-parameter arrow `x => x()`: the lone formal sits on the
+		// `parameter` field, not under a `parameters` list.
+		if p := funcNode.ChildByFieldName("parameter"); p != nil && p.Type() == "identifier" {
+			result.Assignments = append(result.Assignments, AssignmentRef{
+				VarName:        strings.TrimSpace(p.Content(src)),
+				Scope:          scopeName,
+				ObjectScope:    objectScope,
+				File:           sf.Path,
+				Line:           int(p.StartPoint().Row) + 1,
+				IsParameter:    true,
+				ParameterIndex: 0,
+				Owner:          owner,
+			})
+		}
+		return
+	}
+	index := 0
+	for i := 0; i < int(params.ChildCount()); i++ {
+		p := params.Child(i)
+		if p == nil || !p.IsNamed() {
+			continue
+		}
+		name, typeName, consume, stop := paramBinding(p, src)
+		if stop {
+			break
+		}
+		if !consume {
+			continue
+		}
+		if name == "self" || name == "cls" {
+			// Receiver formals are bound implicitly by the dispatch, never by a
+			// callsite argument — skip WITHOUT consuming a positional index so
+			// `def m(self, cb)` numbers cb 0, matching `obj.m(arg)`.
+			continue
+		}
+		if name != "" {
+			result.Assignments = append(result.Assignments, AssignmentRef{
+				VarName:        name,
+				TypeName:       typeName,
+				TypeQualified:  typeName,
+				Scope:          scopeName,
+				ObjectScope:    objectScope,
+				File:           sf.Path,
+				Line:           int(p.StartPoint().Row) + 1,
+				IsParameter:    true,
+				ParameterIndex: index,
+				Owner:          owner,
+			})
+		}
+		index++
+	}
+}
+
+// nestedFuncOwner derives the name a nested function node is invocable under:
+// its own `name` field (`def inner`, `function f`, `method m`), or the
+// binding target of a nameless arrow/function expression
+// (`const w = (cb) => …`, `w = function (cb) {…}`). A function lexically
+// inside a class is qualified (`C.m`) so `self.m`/`obj.m` callsites can be
+// attributed to it. Returns "" for anonymous callbacks — they cannot be
+// invoked by name, so their formals must not claim a callsite key.
+func nestedFuncOwner(node *sitter.Node, spec *specs.Spec, src []byte) string {
+	name := extractFieldText(node, spec.NameField, src)
+	if name == "" {
+		if p := node.Parent(); p != nil {
+			switch p.Type() {
+			case "variable_declarator":
+				name = extractFieldText(p, "name", src)
+			case "assignment", "assignment_expression":
+				if l := p.ChildByFieldName("left"); l != nil && l.Type() == "identifier" {
+					name = strings.TrimSpace(l.Content(src))
+				}
+			}
+		}
+	}
+	if name == "" {
+		return ""
+	}
+	// Qualify with the enclosing class name when one exists — but stop at the
+	// first enclosing FUNCTION: a nested `def inner` inside `C.m` is owned by
+	// "inner", not by the class.
+	for p := node.Parent(); p != nil; p = p.Parent() {
+		if spec.IsFunctionNode(p.Type()) {
+			return name
+		}
+		if spec.IsClassNode(p.Type()) {
+			if cn := extractFieldText(p, spec.NameField, src); cn != "" {
+				return cn + "." + name
+			}
+			return name
+		}
+	}
+	return name
+}
+
+// paramBinding decodes one formal-parameter node into (name, declared type,
+// consume, stop). `consume` reports whether the node occupies a positional
+// slot; `stop` reports that every following formal is non-positional
+// (splat/keyword-only boundary), so extraction must halt entirely.
+func paramBinding(p *sitter.Node, src []byte) (name, typeName string, consume, stop bool) {
+	switch p.Type() {
+	case "identifier", "property_identifier", "type_identifier":
+		return strings.TrimSpace(p.Content(src)), "", true, false
+	case "typed_parameter", "typed_default_parameter":
+		// Python `a: T` / `a: T = v`. The name field is unreliable across
+		// grammar versions, so take the first identifier child (the type node
+		// itself is typed, never a bare `identifier` at this level).
+		name = firstIdentifierChild(p, src)
+		if ty := p.ChildByFieldName("type"); ty != nil {
+			typeName = normalizeParamAnnotation(ty.Content(src))
+		}
+		return name, typeName, true, false
+	case "default_parameter": // Python `cb=None`
+		if n := p.ChildByFieldName("name"); n != nil {
+			name = strings.TrimSpace(n.Content(src))
+		}
+		if name == "" {
+			name = firstIdentifierChild(p, src)
+		}
+		return name, "", true, false
+	case "required_parameter", "optional_parameter": // TS `a: T` / `a?: T` / `a = v`
+		pat := p.ChildByFieldName("pattern")
+		if pat == nil {
+			pat = p.ChildByFieldName("name")
+		}
+		if pat != nil {
+			switch pat.Type() {
+			case "rest_pattern":
+				return "", "", false, true
+			case "identifier", "property_identifier", "type_identifier":
+				name = strings.TrimSpace(pat.Content(src))
+			}
+			// object_pattern/array_pattern: destructured — consumes a slot,
+			// binds no single name.
+		}
+		if ty := p.ChildByFieldName("type"); ty != nil {
+			typeName = normalizeParamAnnotation(ty.Content(src))
+		}
+		return name, typeName, true, false
+	case "assignment_pattern": // JS `cb = () => {}`
+		if l := p.ChildByFieldName("left"); l != nil && l.Type() == "identifier" {
+			name = strings.TrimSpace(l.Content(src))
+		}
+		return name, "", true, false
+	case "formal_parameter": // Java `Type name`
+		if n := p.ChildByFieldName("name"); n != nil {
+			name = strings.TrimSpace(n.Content(src))
+		}
+		if name == "" {
+			// tree-sitter-java nests the name inside variable_declarator_id
+			// (`Runnable cb` → [type_identifier, variable_declarator_id]);
+			// the name is the LAST identifier leaf, the type is first.
+			var scan func(n *sitter.Node) string
+			scan = func(n *sitter.Node) string {
+				for i := int(n.ChildCount()) - 1; i >= 0; i-- {
+					c := n.Child(i)
+					if c == nil || !c.IsNamed() {
+						continue
+					}
+					if c.Type() == "identifier" {
+						return strings.TrimSpace(c.Content(src))
+					}
+					if t := scan(c); t != "" {
+						return t
+					}
+				}
+				return ""
+			}
+			name = scan(p)
+		}
+		if ty := p.ChildByFieldName("type"); ty != nil {
+			typeName = normalizeParamAnnotation(ty.Content(src))
+		}
+		return name, typeName, true, false
+	case "parameter": // Kotlin `cb: () -> Unit` / `x: Int`
+		for i := 0; i < int(p.ChildCount()); i++ {
+			c := p.Child(i)
+			if c == nil || !c.IsNamed() {
+				continue
+			}
+			t := c
+			if c.Type() == "type" { // `x: T` wraps the concrete type
+				for j := 0; j < int(c.ChildCount()); j++ {
+					if cc := c.Child(j); cc != nil && cc.IsNamed() {
+						t = cc
+						break
+					}
+				}
+			}
+			switch t.Type() {
+			case "simple_identifier":
+				if name == "" {
+					name = strings.TrimSpace(t.Content(src))
+				}
+			case "function_type", "function_type_parameters":
+				// Callable-typed formal — a pure value slot, no TypeName.
+			case "user_type", "type_identifier", "nullable_type":
+				typeName = normalizeParamAnnotation(t.Content(src))
+			}
+		}
+		return name, typeName, true, false
+	case "spread_parameter": // Java `T... args` — varargs: positional binding past it is meaningless
+		return "", "", false, true
+	case "receiver_parameter": // Java `Foo this` — implicit receiver like self
+		return "", "", false, false
+	case "list_splat_pattern", "dictionary_splat_pattern", "rest_pattern", "keyword_separator":
+		// `*args`, `**kw`, `...rest`, bare `*` — every later formal is
+		// keyword-only or splat-absorbed; positional binding stops here.
+		return "", "", false, true
+	case "positional_separator":
+		// Python `/` ends positional-ONLY formals; following params still bind
+		// positionally — do not consume a slot, keep going.
+		return "", "", false, false
+	default:
+		// Unknown param-ish node: still consumes a positional slot so later
+		// indices stay aligned with callsite arguments.
+		return "", "", true, false
+	}
+}
+
+// firstIdentifierChild returns the first direct child that is an identifier —
+// the parameter's bound name inside a typed/default wrapper.
+func firstIdentifierChild(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil {
+			continue
+		}
+		if c.Type() == "identifier" || c.Type() == "property_identifier" || c.Type() == "type_identifier" || c.Type() == "field_identifier" {
+			return strings.TrimSpace(c.Content(src))
+		}
+	}
+	return ""
+}
+
+// normalizeParamAnnotation reduces a parameter's declared annotation to the
+// leaf type name the resolver indexes by ("HttpClient"), or "" when the
+// annotation does not name a class-like symbol — e.g. `Callable`/`() => void`
+// function types, where the parameter is a callable VALUE tracked by the
+// callable-value rung rather than a typed receiver.
+func normalizeParamAnnotation(raw string) string {
+	t := strings.TrimSpace(raw)
+	t = strings.TrimPrefix(t, ":") // TS type_annotation text carries the colon
+	t = strings.TrimSpace(t)
+	t = strings.Trim(t, `"'`) // Python forward-reference string annotations
+	// Union: take the first non-nullish side (`HttpClient | None` → HttpClient).
+	if pipe := strings.Index(t, "|"); pipe >= 0 {
+		picked := ""
+		for _, part := range strings.Split(t, "|") {
+			part = strings.TrimSpace(part)
+			if part == "" || part == "None" || part == "NoneType" || part == "null" || part == "undefined" {
+				continue
+			}
+			picked = part
+			break
+		}
+		t = picked
+	}
+	// Wrapper unwrap: Optional[X] → X, list[X] → X — mirrors stripTypeWrapper.
+	if idx := strings.Index(t, "["); idx > 0 && strings.HasSuffix(t, "]") {
+		inner := t[idx+1 : len(t)-1]
+		if comma := strings.LastIndex(inner, ","); comma > 0 {
+			inner = strings.TrimSpace(inner[comma+1:])
+		}
+		t = strings.TrimSpace(inner)
+	}
+	// Java/Kotlin generics: Function<String,Integer> → Function, List<T> → List.
+	if lt := strings.Index(t, "<"); lt > 0 {
+		t = t[:lt]
+	}
+	t = strings.TrimPrefix(t, "*")
+	t = strings.TrimPrefix(t, "&")
+	if dot := strings.LastIndex(t, "."); dot >= 0 {
+		t = t[dot+1:]
+	}
+	t = strings.TrimSpace(t)
+	if !callableIdentRe.MatchString(t) {
+		return ""
+	}
+	return t
 }
 
 var goTypedBindingRE = regexp.MustCompile(`\b([A-Za-z_]\w*)\s+(\*?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b`)
@@ -1359,37 +2446,84 @@ func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src 
 	if parent == nil {
 		return
 	}
-	appendBinding := func(name, typeName string, line int, isParameter bool, parameterIndex int) {
+	// Only the BODY node owns this extraction — every direct child of the
+	// function node is visited by the walk, and re-running per child would
+	// record each binding several times.
+	if bodyNode.Type() != "block" {
+		return
+	}
+	appendBinding := func(name, typeName string, line int, isParameter bool, parameterIndex int, owner string) {
 		name = strings.TrimSpace(name)
 		typeName = normalizedGoTypeName(typeName)
-		if name == "" || typeName == "" {
+		if name == "" || (typeName == "" && !isParameter) {
 			return
 		}
 		result.Assignments = append(result.Assignments, AssignmentRef{
 			VarName: name, TypeName: typeName, TypeQualified: typeName,
 			Scope: scopeName, File: sf.Path, Line: line,
 			ObjectScope: objectScope, IsParameter: isParameter, ParameterIndex: parameterIndex,
+			Owner: owner,
 		})
 	}
 
-	// Function and method parameters are in the final parenthesized list before
-	// the body. Restricting the regex to that list avoids recording `func` and
-	// the function name as fake bindings, and preserves formal argument order.
-	headerStart, headerEnd := parent.StartByte(), bodyNode.StartByte()
-	if headerStart <= headerEnd && int(headerEnd) <= len(src) {
-		header := string(src[headerStart:headerEnd])
-		params := header
-		if open := strings.LastIndex(params, "("); open >= 0 {
-			if close := strings.LastIndex(params, ")"); close > open {
-				params = params[open+1 : close]
+	// Owner names the callable whose formals the callsites bind — for a method
+	// it is the qualified `Recv.Name` (callsites key on the leaf `Serve`, the
+	// class part gates same-file receivers).
+	owner := scopeName
+	if parent.Type() == "method_declaration" {
+		if recv := parent.ChildByFieldName("receiver"); recv != nil {
+			for i := 0; i < int(recv.ChildCount()); i++ {
+				pd := recv.Child(i)
+				if pd == nil || pd.Type() != "parameter_declaration" {
+					continue
+				}
+				if rt := pd.ChildByFieldName("type"); rt != nil {
+					if rtName := normalizedGoTypeName(rt.Content(src)); rtName != "" {
+						owner = rtName + "." + scopeName
+					}
+				}
+				break
 			}
 		}
+	}
+
+	// Formal parameters: read the AST `parameters` field rather than a header
+	// regex — a func-typed formal (`cb func() string`) carries inner parens
+	// that break a last-paren split, and the receiver list would inject a fake
+	// binding into the formal order. Each parameter_declaration contributes
+	// one positional slot per `name` field (`a, b int` → two slots); an
+	// unnamed formal still consumes its slot; a func-typed name is a pure
+	// callable value slot (no TypeName — mirrors the TS `() => void` rule);
+	// `args ...T` absorbs the rest, so positional binding stops there.
+	if plist := parent.ChildByFieldName("parameters"); plist != nil {
 		parameterIndex := 0
-		for _, match := range goTypedBindingRE.FindAllStringSubmatchIndex(params, -1) {
-			name := params[match[2]:match[3]]
-			typeName := params[match[4]:match[5]]
-			appendBinding(name, typeName, int(parent.StartPoint().Row)+1, true, parameterIndex)
-			parameterIndex++
+		for i := 0; i < int(plist.ChildCount()); i++ {
+			pd := plist.Child(i)
+			if pd == nil {
+				continue
+			}
+			if pd.Type() == "variadic_parameter_declaration" {
+				break
+			}
+			if pd.Type() != "parameter_declaration" {
+				continue
+			}
+			typeName := ""
+			if ty := pd.ChildByFieldName("type"); ty != nil && ty.Type() != "function_type" {
+				typeName = ty.Content(src)
+			}
+			named := 0
+			for j := 0; j < int(pd.ChildCount()); j++ {
+				c := pd.Child(j)
+				if c != nil && pd.FieldNameForChild(j) == "name" {
+					appendBinding(c.Content(src), typeName, int(parent.StartPoint().Row)+1, true, parameterIndex, owner)
+					parameterIndex++
+					named++
+				}
+			}
+			if named == 0 {
+				parameterIndex++
+			}
 		}
 	}
 
@@ -1412,12 +2546,12 @@ func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src 
 			continue
 		}
 		if match := goTypedVarRE.FindStringSubmatch(line); len(match) == 3 {
-			appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1)
+			appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1, "")
 			continue
 		}
 		if grouped {
 			if match := goTypedBindingRE.FindStringSubmatch(line); len(match) == 3 {
-				appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1)
+				appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1, "")
 			}
 		}
 	}
@@ -1652,7 +2786,8 @@ func extractFirstIdentifier(node *sitter.Node, src []byte) string {
 	}
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" || child.Type() == "type_identifier" || child.Type() == "tag_name" {
+		if child.Type() == "identifier" || child.Type() == "type_identifier" ||
+			child.Type() == "tag_name" || child.Type() == "simple_identifier" {
 			return child.Content(src)
 		}
 		if name := extractFirstIdentifier(child, src); name != "" {

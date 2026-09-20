@@ -260,7 +260,14 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 			return false
 		}
 		callee := normalizedTypeName(call.CalleeName)
-		scope := normalizedTypeName(assignment.Scope)
+		// The formal belongs to assignment.Owner (the invocable name) — for a
+		// nested function this differs from Scope, which is the ENCLOSING
+		// function the binding is visible under. Older bindings carry no
+		// Owner; Scope is equivalent there.
+		scope := normalizedTypeName(assignment.Owner)
+		if scope == "" {
+			scope = normalizedTypeName(assignment.Scope)
+		}
 		if call.CalleeScope != "" {
 			return scope == normalizedTypeName(call.CalleeScope)
 		}
@@ -397,7 +404,11 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 						var formal *parser.AssignmentRef
 						for i := range assignments {
 							candidate := &assignments[i]
-							if candidate.IsParameter && candidate.ParameterIndex == index && strings.TrimSpace(candidate.Scope) == strings.TrimSpace(methodScope(methodID)) {
+							owner := candidate.Owner
+							if owner == "" {
+								owner = candidate.Scope
+							}
+							if candidate.IsParameter && candidate.ParameterIndex == index && strings.TrimSpace(owner) == strings.TrimSpace(methodScope(methodID)) {
 								formal = candidate
 								break
 							}

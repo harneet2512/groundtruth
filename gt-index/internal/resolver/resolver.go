@@ -1022,6 +1022,10 @@ type NodeMeta struct {
 //     1.96  Assignment-flow: x = ClassName(); x.method() → "type_flow" (conf=0.9)
 //     PyCG ICSE 2021: 99% precision from assignment tracking rules.
 //     1.97  Return-type bridging: get_user().save() via return type → "return_type" (conf=0.85)
+//     1.96b Callable-value flow (runs between 1.97 and 1.98): the callee is a
+//     bound VALUE — `f = helper; f()`, `self.cb = helper; self.cb()`,
+//     `def wrap(cb): cb(); wrap(helper)` — → "callable_value"
+//     (conf=0.85 alias / 0.8 parameter; JARVIS 2023 higher-order flow).
 //     1.98  Unique-method-class: method name unique to one class → "unique_method" (conf=0.85)
 //  2. Cross-file name match → "name_match" (conf=0.2-0.6, fallback)
 //
@@ -1504,10 +1508,17 @@ func BuildParamTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int6
 
 // BuildAssignmentIndex builds a per-file variable→type map from parsed assignments.
 // PyCG ICSE 2021: assignment tracking for x = ClassName() resolution.
+//
+// The index carries every binding kind the parser emits: constructor writes
+// (`x = Foo()`), factory writes (`x = make_foo()`, ViaReturn), callable-value
+// aliases (`x = helper`, ViaSymbol), and formal parameters (IsParameter — a
+// pure value slot whose TypeName is the declared annotation or empty). An
+// unannotated parameter has no TypeName but must still enter the map: it is
+// the argument→formal slot VTA and the callable-value rung bind through.
 func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*AssignmentMap {
 	index := make(map[string]*AssignmentMap)
 	for _, a := range assignments {
-		if a.VarName == "" || a.TypeName == "" {
+		if a.VarName == "" || (a.TypeName == "" && !a.IsParameter) {
 			continue
 		}
 		m, ok := index[a.File]
@@ -1516,13 +1527,19 @@ func BuildAssignmentIndex(assignments []parser.AssignmentRef) map[string]*Assign
 			index[a.File] = m
 		}
 		m.Add(VarType{
-			VarName:   a.VarName,
-			TypeName:  a.TypeName,
-			TypeFile:  "", // resolved later
-			Scope:     a.Scope,
-			Line:      a.Line,
-			Confident: !a.ViaReturn, // direct constructor = confident; factory-return = tentative
-			ViaReturn: a.ViaReturn,
+			VarName:        a.VarName,
+			TypeName:       a.TypeName,
+			TypeQualified:  a.TypeQualified,
+			TypeFile:       "", // resolved later
+			Scope:          a.Scope,
+			ObjectScope:    a.ObjectScope,
+			Line:           a.Line,
+			Confident:      !a.ViaReturn, // direct constructor = confident; factory-return = tentative
+			ViaReturn:      a.ViaReturn,
+			ViaSymbol:      a.ViaSymbol,
+			IsParameter:    a.IsParameter,
+			ParameterIndex: a.ParameterIndex,
+			Owner:          a.Owner,
 		})
 	}
 	return index
@@ -1711,6 +1728,391 @@ func resolveInternal(
 		resolved = append(resolved, rc)
 	}
 
+	// ── Callable-value (higher-order) resolution support ─────────────────────
+	// Strategy 1.96b resolves a callsite whose callee is a bound VALUE, not a
+	// declared symbol — the parser records the binding (ViaSymbol alias write
+	// or an IsParameter formal) and this rung turns it into a CALLS edge:
+	//   f = helper; f()                  bare alias → the recorded symbol
+	//   f = obj.attr / f = mod.func      receiver-qualified alias
+	//   self.cb = helper; self.cb()      object-field alias
+	//   def wrap(cb): cb(); wrap(helper) argument→formal parameter flow
+	// All emit Method "callable_value" — the mechanism the parser's
+	// dispatch_form "function_value" marking names.
+
+	// collectCallable filters candidate ids to call-target labels a VALUE can
+	// hold (the same closed set IsCallTargetLabel declares). A bare name can
+	// never reach a bound method — allowMethod=false for bare-name lookups.
+	collectCallable := func(ids []int64, allowMethod bool, excludeID int64) []int64 {
+		var out []int64
+		for _, id := range ids {
+			if id == 0 || id == excludeID {
+				continue
+			}
+			m, ok := metaMap[id]
+			if !ok || !IsCallTargetLabel(m.Label) {
+				continue
+			}
+			if !allowMethod && m.Label == "Method" {
+				continue
+			}
+			out = append(out, id)
+		}
+		return out
+	}
+
+	// resolveCallableBareName resolves a bare symbol name to the callables it
+	// can name in `file` — same-file and import-bound definitions take
+	// precedence (locality beats the global namespace); only when neither
+	// yields a candidate does the global name index apply. Deterministic: the
+	// candidate set is deduplicated and sorted.
+	resolveCallableName := func(name, file string, excludeID int64, allowMethod bool) []int64 {
+		var bound []int64
+		if fileNodes, ok := fileNodeIDs[file]; ok {
+			bound = append(bound, collectCallable(fileNodes[name], allowMethod, excludeID)...)
+		}
+		if fileImports, ok := importIndex[file]; ok {
+			for _, f := range fileImports[name] {
+				if fns, ok := fileNodeIDs[f]; ok {
+					bound = append(bound, collectCallable(fns[name], allowMethod, excludeID)...)
+				}
+			}
+		}
+		if len(bound) == 0 {
+			bound = collectCallable(nodeIDs[name], allowMethod, excludeID)
+		}
+		ids := uniqueIDs(bound)
+		sortIDsByContent(ids, metaMap)
+		return ids
+	}
+	resolveCallableBareName := func(name, file string, excludeID int64) []int64 {
+		return resolveCallableName(name, file, excludeID, false)
+	}
+
+	// callsByCallee: callee name → callsite ordinals, for the parameter-flow
+	// scan (find every callsite that binds a formal of the callee's function).
+	callsByCallee := make(map[string][]int, len(allCalls))
+	for idx, c := range allCalls {
+		callsByCallee[c.CalleeName] = append(callsByCallee[c.CalleeName], idx)
+	}
+
+	// resolveAliasTargets resolves the RHS of a callable-value alias write to
+	// the callable nodes it can name. For a qualified RHS (`recv.leaf`) the
+	// receiver is probed conservatively — self/this (caller's class), a tracked
+	// variable's type, a directly-named class, an imported module — and the
+	// leaf is always also probed same-file/global (a bound method's leaf names
+	// its Method node). Every probe merges into one candidate set; the caller
+	// emits only when exactly one viable target remains.
+	resolveAliasTargets := func(binding VarType, file, scope string, callerID int64, fa *AssignmentMap) []int64 {
+		qual := binding.TypeQualified
+		if qual == "" || qual == binding.TypeName {
+			return resolveCallableBareName(binding.TypeName, file, callerID)
+		}
+		var recv, leaf string
+		if i := strings.LastIndex(qual, "::"); i >= 0 {
+			recv, leaf = qual[:i], qual[i+2:]
+		} else if i := strings.LastIndex(qual, "."); i >= 0 {
+			recv, leaf = qual[:i], qual[i+1:]
+		}
+		if leaf == "" {
+			leaf = binding.TypeName
+		}
+		out := make(map[int64]struct{})
+		add := func(ids []int64) {
+			for _, id := range ids {
+				out[id] = struct{}{}
+			}
+		}
+		switch recv {
+		case "self", "this", "":
+			// f = self.helper — bound member of the caller's own class.
+			if cm, ok := metaMap[callerID]; ok && cm.ParentID != 0 {
+				if tid, ok := lookupMethodWithInheritance(cm.ParentID, leaf); ok && tid != callerID {
+					out[tid] = struct{}{}
+				}
+			}
+		default:
+			if identLikeRe.MatchString(recv) {
+				// f = obj.method — receiver is a tracked variable: its type's
+				// method is the bound target.
+				if fa != nil {
+					if tn, _, viaReturn, found := fa.ResolveQualifiedCall(recv, leaf, scope); found && !viaReturn {
+						for _, classID := range nodeIDs[normalizedTypeName(stripTypeWrapper(tn))] {
+							if cm, ok := metaMap[classID]; ok && (cm.Label == "Class" || cm.Label == "Struct" || cm.Label == "Interface") {
+								if tid, ok := lookupMethodWithInheritance(classID, leaf); ok && tid != callerID {
+									out[tid] = struct{}{}
+								}
+							}
+						}
+					}
+				}
+				// Receiver names a class directly (`handler = Widget.method`).
+				for _, classID := range nodeIDs[recv] {
+					if cm, ok := metaMap[classID]; ok && (cm.Label == "Class" || cm.Label == "Struct" || cm.Label == "Interface") {
+						if tid, ok := lookupMethodWithInheritance(classID, leaf); ok && tid != callerID {
+							out[tid] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+		// f = mod.func — receiver is an imported module: the member named leaf
+		// in the module's files (module members are never bound Methods).
+		if fileImports, ok := importIndex[file]; ok {
+			for _, f := range fileImports[recv] {
+				if fns, ok := fileNodeIDs[f]; ok {
+					add(collectCallable(fns[leaf], false, callerID))
+				}
+			}
+		}
+		// Leaf-name fallbacks: same-file then global. A bound-method RHS
+		// (`f = obj.method`) names a Method leaf — allowed here.
+		if fns, ok := fileNodeIDs[file]; ok {
+			add(collectCallable(fns[leaf], true, callerID))
+		}
+		add(collectCallable(nodeIDs[leaf], true, callerID))
+		ids := make([]int64, 0, len(out))
+		for id := range out {
+			ids = append(ids, id)
+		}
+		ids = uniqueIDs(ids)
+		sortIDsByContent(ids, metaMap)
+		return ids
+	}
+
+	// callableValueEdge emits the callable_value CALLS edge for a resolved
+	// binding: conf 0.85 for a written alias (direct write evidence), 0.8 for
+	// argument→formal parameter flow (one indirection weaker). Both CANDIDATE
+	// tier — a tracked binding is evidence, not a receiver-type proof, so it
+	// never lands in sourceSupportedResolution.
+	callableValueEdge := func(call parser.CallRef, callerID, targetID int64, evidence string, conf float64) {
+		key := edgeKey{callerID, targetID, "CALLS"}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		emit(ResolvedCall{
+			SourceNodeID:     callerID,
+			TargetNodeID:     targetID,
+			SourceLine:       call.Line,
+			SourceFile:       call.File,
+			Method:           "callable_value",
+			Confidence:       conf,
+			CandidateCount:   1,
+			CandidateNodeIDs: []int64{targetID},
+			TrustTier:        tierFor(conf),
+			EvidenceType:     evidence,
+			ReceiverOrigin:   "assignment",
+		})
+	}
+
+	// callableParamTarget resolves `cb()` where cb is the ParameterIndex-th
+	// formal of the function named by binding.Owner (falling back to
+	// binding.Scope): scan every callsite that
+	// plausibly invokes that function, read the identifier argument bound to
+	// the formal, and keep the result only when every read callsite agrees on
+	// one callable. A callsite whose argument list cannot be read positionally
+	// (spread, non-identifier arguments, arity unknown/short) leaves the formal
+	// bound to something unseen → abstain. Same-file callsites must name the
+	// function lexically; cross-file callsites must resolve their callee to
+	// the function's own node.
+	callableParamTarget := func(binding VarType, file string, thisCall int, fa *AssignmentMap) (int64, bool) {
+		// Owner names the callable whose formals the callsites bind — for a
+		// nested function this differs from Scope (the enclosing function the
+		// binding is visible under). Fall back to Scope for bindings recorded
+		// before Owner existed.
+		fnScope := binding.Owner
+		if fnScope == "" {
+			fnScope = binding.Scope
+		}
+		base := fnScope
+		classPart := ""
+		if dot := strings.LastIndex(fnScope, "."); dot >= 0 {
+			classPart, base = fnScope[:dot], fnScope[dot+1:]
+		}
+		// The function/method node owning the formal — needed to verify that a
+		// cross-file callsite resolves to THIS callee. Ambiguity (two same-named
+		// defs in one file) forfeits cross-file evidence.
+		var fnID int64
+		if fns, ok := fileNodeIDs[file]; ok {
+			for _, id := range collectCallable(fns[base], true, 0) {
+				if m, ok := metaMap[id]; ok && m.File == file {
+					if fnID != 0 {
+						fnID = -1 // ambiguous
+						break
+					}
+					fnID = id
+				}
+			}
+		}
+		targets := make(map[int64]struct{})
+		contributed := false
+		idx := binding.ParameterIndex
+		for _, j := range callsByCallee[base] {
+			if j == thisCall {
+				continue
+			}
+			c2 := allCalls[j]
+			// Does c2 invoke the function owning this formal?
+			bindsHere := false
+			if c2.File == file {
+				q := c2.CalleeQualified
+				if classPart == "" {
+					bindsHere = q == "" || q == base
+				} else {
+					switch {
+					case q == classPart+"."+base:
+						bindsHere = true
+					case q == "self."+base || q == "this."+base:
+						bindsHere = callerObjectScope(c2.CallerScope) == classPart
+					case q == base && callerObjectScope(c2.CallerScope) == classPart:
+						// Java/Kotlin unqualified method call inside the
+						// owning class (`register(this::work)` in another
+						// Items method binds Items.register). Binds iff every
+						// same-file def of `base` is a member of classPart —
+						// a module-level or sibling-class same-named callable
+						// would steal the call.
+						if fns, ok := fileNodeIDs[file]; ok {
+							cands := collectCallable(fns[base], true, 0)
+							bindsHere = len(cands) > 0
+							for _, id := range cands {
+								m := metaMap[id]
+								pm := metaMap[m.ParentID]
+								if m.ParentID == 0 || pm.Name != classPart {
+									bindsHere = false
+									break
+								}
+							}
+						}
+					default:
+						if dot := strings.LastIndex(q, "."); dot > 0 && q[dot+1:] == base {
+							recv := q[:dot]
+							if fa != nil {
+								if tn, _, _, found := fa.ResolveQualifiedCall(recv, "", c2.CallerScope); found {
+									bindsHere = normalizedTypeName(stripTypeWrapper(tn)) == normalizedTypeName(classPart)
+								}
+							}
+						}
+					}
+				}
+			} else if fnID > 0 {
+				ids := resolveCallableBareName(base, c2.File, 0)
+				if len(ids) == 0 {
+					// A cross-file callsite may name a METHOD (`wrap(cb)` in
+					// file B calling `H.wrap` in file A) — a bare-name read
+					// excludes Methods, so retry with method candidates
+					// allowed. Still requires exactly one hit equal to fnID.
+					ids = resolveCallableName(base, c2.File, 0, true)
+				}
+				if len(ids) == 1 && ids[0] == fnID {
+					bindsHere = true
+				}
+			}
+			if !bindsHere {
+				continue
+			}
+			if c2.ArgumentSpread {
+				return 0, false
+			}
+			if c2.ArgumentArity == nil {
+				if len(c2.ArgumentNames) > idx {
+					return 0, false // args recorded but positions unverifiable
+				}
+				return 0, false // arity unknown → the formal's binding is unseen
+			}
+			if int(*c2.ArgumentArity) <= idx {
+				// The callsite leaves the formal unbound → it holds its default
+				// (possibly another callable) → not visible evidence.
+				return 0, false
+			}
+			if int(*c2.ArgumentArity) != len(c2.ArgumentNames) {
+				// A non-identifier argument scrambles recorded positions — the
+				// formal's actual argument cannot be identified.
+				return 0, false
+			}
+			arg := c2.ArgumentNames[idx]
+			var ids []int64
+			if strings.ContainsAny(arg, ".:") {
+				// A qualified or method-reference argument (`this::work`,
+				// `obj.method`, `s.m`, `::helper`) binds through the same
+				// receiver-probing path as an alias RHS. `this`/`self` resolve
+				// against the CALLSITE's caller (the method containing the
+				// call), not the formal's owner. `::` normalizes to `.` so the
+				// receiver split applies unchanged.
+				leaf := arg
+				if k := strings.LastIndex(arg, "::"); k >= 0 {
+					leaf = arg[k+2:]
+				} else if k := strings.LastIndex(arg, "."); k >= 0 {
+					leaf = arg[k+1:]
+				}
+				synth := VarType{
+					VarName:       arg,
+					TypeName:      leaf,
+					TypeQualified: strings.ReplaceAll(arg, "::", "."),
+					ViaSymbol:     true,
+				}
+				ids = resolveAliasTargets(synth, c2.File, c2.CallerScope, callerNodeIDs[j], fa)
+			} else {
+				ids = resolveCallableBareName(arg, c2.File, 0)
+			}
+			if len(ids) != 1 {
+				return 0, false
+			}
+			targets[ids[0]] = struct{}{}
+			contributed = true
+		}
+		if !contributed || len(targets) != 1 {
+			return 0, false
+		}
+		for t := range targets {
+			return t, true
+		}
+		return 0, false
+	}
+
+	// tryMarkedCallableValue resolves a callsite the parser stamped
+	// dispatch_form "function_value": a recorded callable binding exists for
+	// the callee, so the callee is a variable holding a function and the
+	// name-scoped rungs must not claim it. Returns true when the callsite was
+	// handled — edge emitted or deliberately abstained; false when no binding
+	// applies and the normal ladder should run.
+	tryMarkedCallableValue := func(i int, call parser.CallRef, callerID int64) bool {
+		if call.DispatchForm != "function_value" || assignmentIndex == nil || len(nodeMeta) == 0 || nodeMeta[0] == nil {
+			return false
+		}
+		fileAssignments, ok := assignmentIndex[call.File]
+		if !ok {
+			return false
+		}
+		varName := call.CalleeName
+		if call.CalleeQualified != "" && call.CalleeQualified != call.CalleeName {
+			varName = call.CalleeQualified
+		}
+		callerScope := call.CallerScope
+		if callerScope == "" {
+			if cm, ok := nodeMeta[0][callerID]; ok {
+				callerScope = cm.Name
+			}
+		}
+		binding, found := fileAssignments.ResolveCallableBinding(varName, callerScope, callerObjectScope(callerScope), call.Line)
+		if !found {
+			return false
+		}
+		currentPasses.begin("declared_type")
+		if binding.IsParameter {
+			if targetID, ok := callableParamTarget(binding, call.File, i, fileAssignments); ok && targetID != callerID {
+				callableValueEdge(call, callerID, targetID, "callable_parameter", 0.8)
+			}
+			return true // a formal shadows every same-named symbol — resolve or abstain
+		}
+		if binding.ViaSymbol {
+			if ids := resolveAliasTargets(binding, call.File, callerScope, callerID, fileAssignments); len(ids) == 1 && ids[0] != callerID {
+				callableValueEdge(call, callerID, ids[0], "callable_alias", 0.85)
+			}
+			return true // the variable holds a value — a name guess cannot claim it
+		}
+		return false
+	}
+
 	for i, call := range allCalls {
 		currentCallsite = i
 		currentPasses = newResolutionPassTracker(call)
@@ -1731,6 +2133,23 @@ func resolveInternal(
 		var ok bool
 		matchMethod := "name_match"
 		evidence := "name_match"
+
+		// dispatch_form "function_value" — the parser recorded a callable VALUE
+		// binding for this callee, so the callee name is a variable holding a
+		// function, not a symbol. Name-scoped rungs (same_file / import /
+		// name_match) would claim a binding the variable shadows — e.g.
+		// `self.cb = helper; self.cb()` must reach helper even when a module-
+		// level `def cb` exists — so the value binding is resolved FIRST here.
+		// A found binding that yields no unique target abstains the callsite
+		// entirely rather than letting a later rung guess by name. Calls the
+		// marker left alone (binding invisible or a same-named definition
+		// takes precedence) are unaffected — they keep the normal ladder.
+		if tryMarkedCallableValue(i, call, callerID) {
+			if len(executionTraces[i]) == 0 {
+				executionTraces[i] = currentPasses.snapshot()
+			}
+			continue
+		}
 
 		// Strategy 1: Same-file exact name match (only when unambiguous)
 		currentPasses.begin("lexical_binding")
@@ -2680,6 +3099,61 @@ func resolveInternal(
 								}
 							}
 						}
+					}
+				}
+			}
+		}
+
+		// Strategy 1.96b (T3b): Callable-value flow — the callee is a bound
+		// VALUE, not a declared symbol (JARVIS 2023 higher-order flow / PyCG's
+		// function-as-value rule). Runs inside the assignment-flow family,
+		// after every receiver-typing rung and before the receiver-unproven
+		// guesses (1.98 unique_method, Strategy 2 name_match):
+		//   f = helper; f()                   bare alias — the recorded symbol
+		//   f = obj.attr / f = mod.func       receiver-qualified alias
+		//   self.cb = helper; self.cb()       object-field alias
+		//   this.f = f; this.f()              JS/TS field alias
+		//   def wrap(cb): cb(); wrap(helper)  argument→formal parameter flow
+		// Emits resolution_method "callable_value" (the dispatch_form
+		// "function_value" family) at conf 0.85 for a written alias, 0.8 for
+		// parameter flow — both CANDIDATE: one tracked binding is evidence, not
+		// a receiver-type proof, so it never lands in sourceSupportedResolution.
+		// Conservative: only a single viable target wins — a rebound,
+		// multiply-bound, or unresolvable alias abstains and falls through. A
+		// FORMAL parameter binding never falls through: a parameter shadows any
+		// same-named symbol, so a name_match guess would claim a binding the
+		// callee cannot have.
+		if assignmentIndex != nil && len(nodeMeta) > 0 && nodeMeta[0] != nil {
+			varName := calleeName
+			if call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+				varName = call.CalleeQualified
+			}
+			if fileAssignments, ok := assignmentIndex[call.File]; ok {
+				currentPasses.begin("declared_type")
+				callerScope := call.CallerScope
+				if callerScope == "" {
+					if cm, ok := nodeMeta[0][callerID]; ok {
+						callerScope = cm.Name
+					}
+				}
+				callerObject := callerObjectScope(callerScope)
+				if binding, found := fileAssignments.ResolveCallableBinding(varName, callerScope, callerObject, call.Line); found {
+					switch {
+					case binding.IsParameter:
+						// Argument→formal flow: every callsite that binds this
+						// formal must agree on one callable.
+						if targetID, ok := callableParamTarget(binding, call.File, i, fileAssignments); ok && targetID != callerID {
+							callableValueEdge(call, callerID, targetID, "callable_parameter", 0.8)
+						}
+						goto nextCall // a formal shadows every same-named symbol — resolve or abstain
+					case binding.ViaSymbol:
+						if ids := resolveAliasTargets(binding, call.File, callerScope, callerID, fileAssignments); len(ids) == 1 && ids[0] != callerID {
+							callableValueEdge(call, callerID, ids[0], "callable_alias", 0.85)
+							goto nextCall
+						}
+						// Ambiguous (0 or >1 targets) → fall through to the
+						// name-based rungs; a same-named real symbol is a
+						// legitimate competing claim.
 					}
 				}
 			}

@@ -57,6 +57,16 @@ func nullableParentID(parentID int64) any {
 	return parentID
 }
 
+// nullableText binds an optional free-text column as NULL when empty, so an
+// unset payload reads as "absent" rather than as an empty string (the explicit
+// empty bind defeats the SQL column DEFAULT otherwise).
+func nullableText(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // contentAddress returns the three address bind values for a node, all NULL
 // when the node carries no address. They are returned together because a
 // partial address is unverifiable and must never reach the database.
@@ -82,6 +92,12 @@ type Edge struct {
 	CandidateCount     int
 	EvidenceType       string // ast_call, ast_import, name_match
 	VerificationStatus string // unverified, verified, rejected
+	// AccessSites carries the promoted READS/WRITES statement-level access
+	// payload (a JSON object: field, access, line, enclosing-scope identity, and
+	// the deduped per-site list). It lives in its own column — never in Metadata,
+	// which stays the bare field name for the consumers' field-exact `metadata = ?`
+	// match (contract_map.py, promote_test assertTier). Empty -> NULL.
+	AccessSites string
 }
 
 // ResolutionCandidate preserves one resolver-produced viable target. The
@@ -335,6 +351,14 @@ func resolutionDerivation(mechanism, dispatchState string, candidateCount int) (
 		return "declared_type", "closed", "", nil
 	case "vta":
 		return "variable_type_flow", "open", "candidate_only_flow_evidence", nil
+	case "callable_value":
+		// Higher-order callable flow (resolver Strategy 1.96b): the callsite
+		// dispatches through a tracked VALUE — an alias write (`f = helper`,
+		// `self.cb = helper`) or a formal parameter (`def wrap(cb): cb()`).
+		// A single-candidate derivation from a concrete binding is closed
+		// evidence, but it is a VALUE provenance, not a receiver-type proof —
+		// it stays candidate_only rather than source-supported.
+		return "callable_value_flow", "closed", "", nil
 	case "impl_method":
 		if candidateCount == 1 {
 			return "single_implementation", "closed", "", nil
@@ -769,7 +793,8 @@ func createSchema(db *sql.DB) error {
 		exclusion_fact_ids TEXT,
 		selection_rule_id TEXT,
 		resolution_reason TEXT,
-		resolution_step INTEGER
+		resolution_step INTEGER,
+		access_sites TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS resolution_symbols (
@@ -913,6 +938,44 @@ func createSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_closure_source ON closure(source_id);
 	CREATE INDEX IF NOT EXISTS idx_closure_target ON closure(target_id);
 
+	-- HAR-90 items 5-8: per-function statement-level control-flow facts.
+	-- The parser emits one block/edge/def set per function node; the Python
+	-- consumer composes dominators/control-dependence/reaching-definitions on
+	-- top of this raw structure. Pure sidecar — no existing table or column
+	-- changes, so consumers that predate it read a byte-exact schema for
+	-- everything they already know. Edge labels form a closed vocabulary:
+	-- '' (fall-through), 'entry', 'end', 'true', 'false', 'loop_back',
+	-- 'break', 'case', 'no_match', 'except', 'finally', 'throw', 'return',
+	-- 'goto'.
+	CREATE TABLE IF NOT EXISTS cfg_blocks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id INTEGER NOT NULL REFERENCES nodes(id),
+		block_index INTEGER NOT NULL,
+		kind TEXT NOT NULL,
+		start_line INTEGER,
+		end_line INTEGER,
+		statement_lines TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_cfg_blocks_node ON cfg_blocks(node_id);
+
+	CREATE TABLE IF NOT EXISTS cfg_edges (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id INTEGER NOT NULL REFERENCES nodes(id),
+		from_block INTEGER NOT NULL,
+		to_block INTEGER NOT NULL,
+		label TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_cfg_edges_node ON cfg_edges(node_id);
+
+	CREATE TABLE IF NOT EXISTS cfg_defs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id INTEGER NOT NULL REFERENCES nodes(id),
+		block_index INTEGER NOT NULL,
+		var_name TEXT NOT NULL,
+		line INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_cfg_defs_node ON cfg_defs(node_id);
+
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -952,6 +1015,7 @@ func createSchema(db *sql.DB) error {
 		{"derivation_fact_ids", `ALTER TABLE edges ADD COLUMN derivation_fact_ids TEXT`},
 		{"exclusion_fact_ids", `ALTER TABLE edges ADD COLUMN exclusion_fact_ids TEXT`},
 		{"selection_rule_id", `ALTER TABLE edges ADD COLUMN selection_rule_id TEXT`},
+		{"access_sites", `ALTER TABLE edges ADD COLUMN access_sites TEXT`},
 	}
 	for _, column := range typedColumns {
 		var count int
@@ -1175,10 +1239,10 @@ func (d *DB) InsertNode(n *Node) (int64, error) {
 func (d *DB) InsertEdge(e *Edge) error {
 	_, err := d.db.Exec(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata,
-		 trust_tier, candidate_count, evidence_type, verification_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 trust_tier, candidate_count, evidence_type, verification_status, access_sites)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile, e.ResolutionMethod, e.Confidence, e.Metadata,
-		e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
+		e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus, nullableText(e.AccessSites),
 	)
 	return err
 }
@@ -1287,8 +1351,8 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
-		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status, access_sites)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -1301,6 +1365,7 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 			e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
 			e.ResolutionMethod, e.Confidence, e.Metadata,
 			e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
+			nullableText(e.AccessSites),
 		)
 		if err != nil {
 			tx.Rollback()

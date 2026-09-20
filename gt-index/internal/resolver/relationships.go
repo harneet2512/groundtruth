@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -87,7 +88,9 @@ var (
 	// and INJECTS). These resolve the *target* symbol — the model class a query
 	// reads, or the service type a constructor injects — so the edge lands only
 	// when the target is a graph node (never a bare annotation string).
-	pyDependsRe    = regexp.MustCompile(`Depends\(\s*([A-Z]\w*|get_\w+)\s*\)`)
+	// FastAPI Depends(f): the provider f is any callable/class name, not just
+	// the get_* convention (HAR-90 item 3 widened the identifier shape).
+	pyDependsRe    = regexp.MustCompile(`Depends\(\s*([A-Za-z_]\w*)\s*\)`)
 	injectAnnoRe   = regexp.MustCompile(`@(?:Inject|Autowired|Injectable)\s*(?:\(\s*([A-Z]\w*)\s*\))?`)
 	tsCtorInjectRe = regexp.MustCompile(`constructor\s*\([^)]*(?:private|protected|public|readonly)\s+\w+\s*:\s*([A-Z]\w*)`)
 	// ORM / query-builder reads: Django `M.objects.x(...)`, SQLAlchemy
@@ -110,7 +113,12 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 	var edges []*store.Edge
 	seen := make(map[edgeKey]bool)
 
-	addEdge := func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64) {
+	// addEdgeCounted is the one emit path every relationship edge goes through:
+	// dedup on (source,target,type), tier stamped from confidence via the same
+	// threshold table (tierFor), and candidate_count carried honestly — the
+	// framework-wiring pass (HAR-90 item 3) needs >1 for ambiguous DI impl
+	// candidate edges; single-resolution edges pass 1.
+	addEdgeCounted := func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64, metadata string, candidateCount int) {
 		if sourceID == 0 || targetID == 0 || sourceID == targetID {
 			return
 		}
@@ -134,10 +142,19 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 			ResolutionMethod:   method,
 			Confidence:         confidence,
 			TrustTier:          tierFor(confidence),
-			CandidateCount:     1,
+			CandidateCount:     candidateCount,
 			EvidenceType:       method,
 			VerificationStatus: "unverified",
+			Metadata:           metadata,
 		})
+	}
+
+	addEdgeMeta := func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64, metadata string) {
+		addEdgeCounted(sourceID, targetID, edgeType, sourceFile, sourceLine, method, confidence, metadata, 1)
+	}
+
+	addEdge := func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64) {
+		addEdgeMeta(sourceID, targetID, edgeType, sourceFile, sourceLine, method, confidence, "")
 	}
 
 	// Go interfaces collected during the source scan, for CHA-style structural
@@ -162,8 +179,13 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		lineNum := 0
 		pendingRoutePath := "" // route path from decorator, waiting for the next def
 		pendingRouteLine := 0  // line of the route decorator
-		inStruct := false      // Go: tracking struct body for embedded types
-		structDepth := 0       // Go: brace nesting depth inside the struct body (P2-7)
+		// Non-Python decorator/annotation-shaped route fact (NestJS @Get, TS
+		// @app.get, Java @*Mapping) waiting to bind the NEXT method/function
+		// declaration — the analogue of pendingRoutePath for languages whose
+		// handlers are class methods or registered references.
+		var pendingFwRoute *routeBinding
+		inStruct := false // Go: tracking struct body for embedded types
+		structDepth := 0  // Go: brace nesting depth inside the struct body (P2-7)
 		var currentStructName string
 		var currentStructLine int
 
@@ -309,6 +331,58 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					}
 				}
 
+				// P2: JS/TS route handlers — HANDLES_ROUTE edges (handler ->
+				// file anchor, same target convention as the Python decorator
+				// path). Shares the compiled framework route patterns via
+				// ExtractFrameworkRoutes; three binding shapes:
+				//   - registration: app.get(path, handler) / router.METHOD(path,
+				//     handler) — the handler is the LAST top-level argument after
+				//     the path literal; a named reference resolved through the
+				//     function index (looser match -> 0.7, framework_route).
+				//   - decorator: NestJS @Get/@Post or TS @app.get — binds the
+				//     NEXT method declaration through pendingFwRoute
+				//     (adjacent-function binding -> 0.95, decorator_route).
+				//   - Next.js app router: `export function GET` in a route.*
+				//     file — the file convention binds the exported function
+				//     itself (0.8, framework_route).
+				for _, r := range ExtractFrameworkRoutes(line) {
+					if !frameworkFactInFileLang(r.Language, r.Mechanism, sf.Language) {
+						continue
+					}
+					if r.Mechanism == "app_router_handler" {
+						// File-convention binding: only inside an app-router
+						// route file — an `export function GET` anywhere else
+						// is a coincidence, so abstain.
+						if route, ok := nextAppRoutePath(sf.Path); ok {
+							if funcs := funcFileIndex[sf.Path]; funcs != nil {
+								if funcID, ok2 := funcs[r.Method]; ok2 {
+									addEdgeMeta(funcID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
+										"framework_route", 0.8, routeEdgeMetadata(routeBinding{
+											Path: route, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
+								}
+							}
+						}
+						continue
+					}
+					if isAnnotationLine(line) {
+						// Decorator-shaped (@Get/@Post, @app.get) — bind the
+						// next declaration. A later route decorator overwrites
+						// the pending fact (last-decorator-wins, like Python).
+						pendingFwRoute = &routeBinding{Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism, Line: lineNum}
+						continue
+					}
+					// Registration-shaped — the handler token follows the path
+					// literal; abstain when it is not a resolvable named
+					// reference (inline function, arrow, unresolvable name).
+					if tok := routeHandlerArg(line); tok != "" {
+						if handlerID := resolveRouteHandler(tok, sf.Path, funcFileIndex, classIndex); handlerID != 0 {
+							addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
+								"framework_route", 0.7, routeEdgeMetadata(routeBinding{
+									Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
+						}
+					}
+				}
+
 			case "java", "kotlin":
 				// P0: Java/Kotlin extends
 				if m := javaExtendsRe.FindStringSubmatch(line); m != nil {
@@ -340,8 +414,43 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					}
 				}
 
-				// P2: Java route annotations — already handled by Pass 4b (API edges).
-				// HANDLES_ROUTE edges for Java are skipped here to avoid duplication.
+				// P2: Java/Kotlin route annotations — HANDLES_ROUTE edges
+				// (handler method -> file anchor, same target convention as the
+				// Python path). Spring @GetMapping/@PostMapping/@RequestMapping
+				// on a method is decorator-shaped: it binds the NEXT method
+				// declaration via pendingFwRoute (adjacent binding -> 0.95,
+				// decorator_route). Pass 4b (ResolveAPIEdges) mints API_CALL
+				// file->file edges — a different edge type, so no duplication.
+				// Shares the compiled framework patterns via
+				// ExtractFrameworkRoutes; javaRouteMappingRe additionally
+				// catches the `value =`/`path =` attribute form the literal-only
+				// framework pattern misses.
+				for _, r := range ExtractFrameworkRoutes(line) {
+					if !frameworkFactInFileLang(r.Language, r.Mechanism, sf.Language) {
+						continue
+					}
+					if r.Method == "" {
+						// request_mapping facts carry no HTTP method — derive it
+						// from the annotation name (@GetMapping -> GET).
+						if am := javaMappingAnnoRe.FindStringSubmatch(line); am != nil {
+							if anno := strings.TrimSuffix(am[1], "Mapping"); anno != "Request" {
+								r.Method = extractMethod(anno)
+							}
+						}
+					}
+					pendingFwRoute = &routeBinding{Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism, Line: lineNum}
+				}
+				if pendingFwRoute == nil || pendingFwRoute.Line != lineNum {
+					if m := javaRouteMappingRe.FindStringSubmatch(line); m != nil {
+						method := ""
+						if am := javaMappingAnnoRe.FindStringSubmatch(line); am != nil {
+							if anno := strings.TrimSuffix(am[1], "Mapping"); anno != "Request" {
+								method = extractMethod(anno)
+							}
+						}
+						pendingFwRoute = &routeBinding{Path: normalizePath(m[1]), Method: method, Framework: "Spring", Mechanism: "request_mapping", Line: lineNum}
+					}
+				}
 
 			case "go":
 				// CHA: collect interface method sets. `type Name interface {` opens a
@@ -456,6 +565,41 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 				// covers the interface. The regex only duplicated/contradicted CHA, so it is
 				// deleted (fail-closed: no edge beats a wrong edge).
 
+				// P2: Go route handlers — HANDLES_ROUTE edges (handler -> file
+				// anchor, same target convention as the Python path). Two
+				// registration shapes share the compiled patterns from
+				// api_edges.go: gin/echo `r.GET(path, handler)` via
+				// ExtractFrameworkRoutes, and net/http-style
+				// `mux.HandleFunc(path, handler)` via goHandleRoutePat (the SAME
+				// compiled regex as routePatterns[1]). The handler is the LAST
+				// top-level argument after the path literal — a bare or
+				// receiver-qualified identifier resolved through the function
+				// index (looser match -> 0.7, framework_route). Inline
+				// `func(...)` handlers and unresolvable names abstain.
+				for _, r := range ExtractFrameworkRoutes(line) {
+					if !frameworkFactInFileLang(r.Language, r.Mechanism, sf.Language) {
+						continue
+					}
+					if tok := routeHandlerArg(line); tok != "" {
+						if handlerID := resolveRouteHandler(tok, sf.Path, funcFileIndex, classIndex); handlerID != 0 {
+							addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
+								"framework_route", 0.7, routeEdgeMetadata(routeBinding{
+									Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
+						}
+					}
+				}
+				if m := goHandleRoutePat.FindStringSubmatch(line); m != nil {
+					if tok := routeHandlerArg(line); tok != "" {
+						if handlerID := resolveRouteHandler(tok, sf.Path, funcFileIndex, classIndex); handlerID != 0 {
+							if norm := normalizePath(m[2]); isAPIPath(norm) {
+								addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
+									"framework_route", 0.7, routeEdgeMetadata(routeBinding{
+										Path: norm, Method: extractMethod(m[1]), Framework: "net/http", Mechanism: "route_registration"}, sf.Language))
+							}
+						}
+					}
+				}
+
 			case "rust":
 				// Rust: `impl [<generics>] <TraitPath> for <Type>`. The regex skips the
 				// optional impl-generic block, captures the trait path + the implementing
@@ -473,6 +617,41 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 				}
 			}
 
+			// Decorator/annotation route binding: pendingFwRoute was set by a
+			// decorator-shaped route fact on THIS line or an earlier one
+			// (NestJS @Get, TS @app.get, Java @*Mapping) and binds the NEXT
+			// function/method declaration — the non-Python analogue of
+			// pendingRoutePath. Blank/comment lines and annotation-only lines
+			// (stacked decorators) leave the pending fact alive; the first
+			// real declaration either binds a resolvable method name or clears
+			// the pending fact without an edge (abstain on the unnameable).
+			if pendingFwRoute != nil {
+				t := strings.TrimSpace(line)
+				switch {
+				case t == "" || strings.HasPrefix(t, "//") || strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*"):
+					// Comment/blank — pending survives.
+				default:
+					rest := stripLeadingAnnotations(t)
+					if rest == "" {
+						// Annotation-only line — pending survives.
+						break
+					}
+					name := ""
+					if m := routeDefNameRe.FindStringSubmatch(rest); m != nil && !declKeyword[m[1]] {
+						name = m[1]
+					}
+					if name != "" {
+						if funcs := funcFileIndex[sf.Path]; funcs != nil {
+							if funcID, ok := funcs[name]; ok {
+								addEdgeMeta(funcID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, pendingFwRoute.Line,
+									"decorator_route", 0.95, routeEdgeMetadata(*pendingFwRoute, sf.Language))
+							}
+						}
+					}
+					pendingFwRoute = nil
+				}
+			}
+
 			// Data-access + dependency-injection edges. Language-agnostic: the
 			// source is the enclosing function; the target resolves through the
 			// class index so the edge only lands when the symbol is a graph node.
@@ -481,7 +660,16 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 				if srcFunc != 0 {
 					if m := pyDependsRe.FindStringSubmatch(line); m != nil {
 						if tgt := resolveClassOrFuncNode(m[1], sf.Path, classIndex, funcFileIndex); tgt != 0 {
-							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "depends_injection", 0.85)
+							// HAR-90 item 3: carry the DI provenance metadata
+							// ({mechanism,declared_type,resolved_to}). The declared
+							// type is the parameter annotation in `x: T = Depends(f)`
+							// when present, else the provider name itself.
+							declared := m[1]
+							if dm := dependsParamTypeRe.FindStringSubmatch(line); dm != nil {
+								declared = dm[1]
+							}
+							addEdgeMeta(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "depends_injection", 0.85,
+								injectEdgeMetadata(mechFastAPIDepends, declared, m[1], false))
 						}
 					}
 					if m := injectAnnoRe.FindStringSubmatch(line); m != nil && m[1] != "" {
@@ -515,6 +703,15 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 	// struct whose method set covers an interface's required method set. Runs once
 	// over the collected interfaces + the struct method sets read from the DB.
 	resolveGoImplements(db, goInterfaces, classIndex, interfaceIndex, addEdge)
+
+	// HAR-90 item 3: framework wiring — middleware registration (MIDDLEWARE_ON)
+	// and dependency-injection binding (INJECTS). Runs as its own scan AFTER the
+	// structural pass so a declared interface type can hop to its implementation
+	// through the IMPLEMENTS edges emitted above plus the taxonomy
+	// DECLARED_IMPLEMENTS rows already persisted. `edges` is passed by value for
+	// the impl-index build; new edges still append through addEdgeCounted.
+	resolveFrameworkWiring(db, files, root, classIndex, interfaceIndex,
+		funcFileIndex, fileNodeMap, edges, addEdgeCounted)
 
 	if len(edges) == 0 {
 		return 0, nil
@@ -1259,4 +1456,265 @@ func isHTMLElement(name string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// P2b: Route handler binding (HANDLES_ROUTE) — non-Python manifest languages
+// ---------------------------------------------------------------------------
+
+// routeBinding carries one detected route fact plus the line it was declared
+// on. For decorator/annotation-shaped registrations (NestJS @Get, TS
+// @app.get, Java @*Mapping) it is the PENDING fact that binds the next method
+// declaration; for registration/app-router shapes it is emitted immediately.
+type routeBinding struct {
+	Path      string // normalized route path ("/api/users")
+	Method    string // HTTP method ("GET") or "" when unknown
+	Framework string // framework identity from the shared pattern table
+	Mechanism string // route_registration / request_mapping / app_router_handler
+	Line      int    // source line the route was declared on
+}
+
+var (
+	// First "name(" token on a declaration line — applied to the text left
+	// after leading decorators/annotations are stripped, so it names the
+	// method/function a route annotation binds (`getUsers(`). An optional
+	// generic block between name and `(` is skipped (`getUsers<T>(`).
+	routeDefNameRe = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*(?:<[^()]*>)?\s*\(`)
+	// A handler reference: a bare or dotted identifier chain (`handler`,
+	// `h.listUsers`, `controllers.GetUser`).
+	routeHandlerNameRe = regexp.MustCompile(`^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$`)
+	// One-level adapter call wrapping a handler (`http.HandlerFunc(h)` -> `h`).
+	routeHandlerWrapRe = regexp.MustCompile(`^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\)$`)
+	// Java mapping annotation name — derives the HTTP method the literal-only
+	// framework pattern leaves blank on request_mapping facts.
+	javaMappingAnnoRe = regexp.MustCompile(`@(Get|Post|Put|Delete|Patch|Request)Mapping\b`)
+	// Next.js app-router route file basename (route.ts, route.jsx, ...).
+	nextRouteFileRe = regexp.MustCompile(`^route\.(?:ts|tsx|js|jsx|mjs|cjs)$`)
+)
+
+// declKeyword filters control-flow/statement keywords out of routeDefNameRe
+// matches so `if (`/`return f(`/`new X(` lines following a route annotation do
+// not masquerade as the handler declaration.
+var declKeyword = map[string]bool{
+	"if": true, "for": true, "while": true, "switch": true, "catch": true,
+	"return": true, "new": true, "function": true, "class": true,
+	"interface": true, "constructor": true, "super": true, "this": true,
+	"else": true, "do": true, "case": true, "throw": true, "func": true,
+	"type": true, "package": true, "import": true, "require": true,
+	"synchronized": true, "typeof": true, "sizeof": true, "defer": true,
+	"go": true, "select": true,
+}
+
+// frameworkFactInFileLang reports whether a framework fact tagged with
+// producer language `factLang` may bind a handler in a file whose walker
+// language is `fileLang`. Express registration syntax is identical in .js and
+// .ts; Next.js route files may be .ts/.tsx/.js/.jsx; Spring annotations appear
+// in Java and Kotlin sources alike.
+func frameworkFactInFileLang(factLang, mechanism, fileLang string) bool {
+	switch factLang {
+	case "Python":
+		return fileLang == "python"
+	case "TypeScript":
+		if fileLang == "typescript" {
+			return true
+		}
+		return mechanism == "app_router_handler" && fileLang == "javascript"
+	case "JavaScript":
+		return fileLang == "javascript" || fileLang == "typescript"
+	case "Go":
+		return fileLang == "go"
+	case "Java":
+		return fileLang == "java" || fileLang == "kotlin"
+	}
+	return false
+}
+
+// isAnnotationLine reports whether the line is decorator/annotation-shaped
+// (`@Get(...)`, `@app.get(...)`, `@GetMapping(...)`) — the form whose route
+// binds the NEXT declaration rather than an argument on the same line.
+func isAnnotationLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "@")
+}
+
+// stripLeadingAnnotations removes leading `@Name(...)` decorators/annotations
+// (dotted names like `@app.get` included, balanced parens consumed) and returns
+// what remains on the line — "" for an annotation-only line, or the start of
+// the annotated declaration for a same-line `@Get("/x") getUsers() {}` form.
+func stripLeadingAnnotations(s string) string {
+	t := strings.TrimSpace(s)
+	for strings.HasPrefix(t, "@") {
+		i := 1
+		for i < len(t) {
+			c := t[i]
+			if c == '_' || c == '$' || c == '.' ||
+				(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+				i++
+				continue
+			}
+			break
+		}
+		t = strings.TrimSpace(t[i:])
+		if strings.HasPrefix(t, "(") {
+			depth := 0
+			j := 0
+			for j < len(t) {
+				if t[j] == '(' {
+					depth++
+				} else if t[j] == ')' {
+					depth--
+					if depth == 0 {
+						j++
+						break
+					}
+				}
+				j++
+			}
+			t = strings.TrimSpace(t[j:])
+		}
+	}
+	return t
+}
+
+// routeHandlerArg returns the LAST top-level argument after the route-path
+// string literal of a registration call — the handler reference in
+// `app.get(path, ..., handler)`, `r.GET(path, handler)`, or
+// `mux.HandleFunc(path, handler)`. Returns "" when the trailing argument is
+// anything but a resolvable named reference (inline function, arrow, call
+// chain) — abstain rather than fabricate.
+func routeHandlerArg(line string) string {
+	// Locate the first string literal (the route path argument).
+	q := strings.IndexAny(line, `"'`)
+	if q < 0 {
+		return ""
+	}
+	end := q + 1
+	for end < len(line) && line[end] != line[q] {
+		end++
+	}
+	if end >= len(line) {
+		return "" // unterminated path literal — abstain
+	}
+	// tail sits inside the registration call's arg list (depth 1). The handler
+	// is the LAST top-level argument; nested parens/brackets/braces and inner
+	// string literals are skipped so `app.get("/x", auth, h)` picks `h`.
+	depth := 1
+	cur := ""
+	tail := line[end+1:]
+	for i := 0; i < len(tail); i++ {
+		c := tail[i]
+		if c == '"' || c == '\'' || c == '`' {
+			j := i + 1
+			for j < len(tail) && tail[j] != c {
+				j++
+			}
+			i = j // skip the inner literal (unterminated -> exits the loop)
+			continue
+		}
+		switch c {
+		case '(', '[', '{':
+			depth++
+			cur += string(c)
+		case ')', ']', '}':
+			depth--
+			if depth <= 0 {
+				return cleanRouteHandler(cur)
+			}
+			cur += string(c)
+		case ',':
+			if depth == 1 {
+				cur = ""
+			} else {
+				cur += string(c)
+			}
+		default:
+			cur += string(c)
+		}
+	}
+	return cleanRouteHandler(cur) // call never closed on this line — trailing token
+}
+
+// cleanRouteHandler validates a raw trailing-argument token as a handler
+// reference. One level of adapter call (`http.HandlerFunc(h)`) is unwrapped to
+// the inner handler name; anything that is not a bare/dotted identifier
+// returns "" (abstain).
+func cleanRouteHandler(arg string) string {
+	arg = strings.TrimSpace(arg)
+	if m := routeHandlerWrapRe.FindStringSubmatch(arg); m != nil {
+		arg = m[1]
+	}
+	if !routeHandlerNameRe.MatchString(arg) {
+		return ""
+	}
+	return arg
+}
+
+// resolveRouteHandler resolves a handler token to a Function/Method (or class)
+// node. The tail segment of a dotted reference (`h.listUsers`,
+// `controllers.GetUser`) is resolved same-file-first, then cross-file only
+// when globally unique — ambiguity abstains (returns 0), never guesses.
+func resolveRouteHandler(token, file string, funcFileIndex map[string]map[string]int64, classIndex map[string][]classNodeEntry) int64 {
+	token = strings.TrimSpace(token)
+	token = strings.TrimLeft(token, "&*")
+	if i := strings.LastIndex(token, "."); i >= 0 {
+		token = token[i+1:]
+	}
+	if token == "" || !identLikeRe.MatchString(token) {
+		return 0
+	}
+	return resolveClassOrFuncNode(token, file, classIndex, funcFileIndex)
+}
+
+// nextAppRoutePath derives the route path of a Next.js app-router file from
+// its directory convention: `app/api/users/route.ts` -> "/api/users". Route
+// groups `(marketing)` do not contribute segments; dynamic segments `[id]`
+// are kept verbatim (informative for consumers). Returns ok=false when the
+// file is not an app-router route file — the caller must then abstain, since
+// an `export function GET` outside the convention is not a route handler.
+func nextAppRoutePath(filePath string) (string, bool) {
+	p := strings.ReplaceAll(filePath, "\\", "/")
+	segs := strings.Split(p, "/")
+	if len(segs) < 2 || !nextRouteFileRe.MatchString(segs[len(segs)-1]) {
+		return "", false
+	}
+	// Locate the LAST "app" directory segment (covers `src/app` and nested
+	// app dirs).
+	appIdx := -1
+	for i := len(segs) - 2; i >= 0; i-- {
+		if segs[i] == "app" {
+			appIdx = i
+			break
+		}
+	}
+	if appIdx < 0 {
+		return "", false
+	}
+	var parts []string
+	for _, s := range segs[appIdx+1 : len(segs)-1] {
+		if s == "" {
+			continue
+		}
+		// Route groups do not contribute to the URL path.
+		if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+			continue
+		}
+		parts = append(parts, s)
+	}
+	if len(parts) == 0 {
+		return "/", true
+	}
+	return "/" + strings.Join(parts, "/"), true
+}
+
+// routeEdgeMetadata serializes the route fact carried by a HANDLES_ROUTE edge
+// so consumers do not have to re-parse the source line (the Python path stores
+// no route and route_map re-reads source_line — non-Python edges carry it).
+func routeEdgeMetadata(b routeBinding, language string) string {
+	md, err := json.Marshal(map[string]string{
+		"route": b.Path, "method": b.Method, "framework": b.Framework,
+		"mechanism": b.Mechanism, "language": language,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(md)
 }

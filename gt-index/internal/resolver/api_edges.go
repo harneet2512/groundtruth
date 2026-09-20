@@ -226,14 +226,22 @@ type ClientCall struct {
 	NodeID int64  // DB node ID of the file (or nearest function)
 }
 
-// Route definition patterns (Python Flask/FastAPI, Go, Express/JS).
-var routePatterns = []*regexp.Regexp{
+// Route definition patterns (Python Flask/FastAPI, Go, Express/JS). The
+// compiled expressions are named package vars so the HANDLES_ROUTE binding
+// pass in relationships.go shares them rather than duplicating the regexes.
+var (
 	// Python: @app.route("/path") or @router.get("/path")
-	regexp.MustCompile(`^\s*@(?:app|router)\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`),
+	pyRouteDecoratorPat = regexp.MustCompile(`^\s*@(?:app|router)\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`)
 	// Go: r.HandleFunc("/path", ...) or mux.Handle("/path", ...)
-	regexp.MustCompile(`^\s*[\w.]+\.(HandleFunc|Handle)\s*\(\s*["']([^"']+)["']`),
+	goHandleRoutePat = regexp.MustCompile(`^\s*[\w.]+\.(HandleFunc|Handle)\s*\(\s*["']([^"']+)["']`)
 	// JS/TS: app.get("/path", ...) or router.post("/path", ...)
-	regexp.MustCompile(`^\s*(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`),
+	jsAppRoutePat = regexp.MustCompile(`^\s*(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`)
+)
+
+var routePatterns = []*regexp.Regexp{
+	pyRouteDecoratorPat,
+	goHandleRoutePat,
+	jsAppRoutePat,
 }
 
 // Client call patterns (requests, httpx, fetch, axios, Go http).

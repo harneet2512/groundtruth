@@ -1678,6 +1678,8 @@ def _is_brief_boundary(line: str) -> bool:
         "</gt-obligations>",
         "<gt-graph-map>",
         "</gt-graph-map>",
+        "<gt-flows>",
+        "</gt-flows>",
     ):
         return True
     if (
@@ -1756,6 +1758,13 @@ def _segment_brief_blocks(text: str) -> list[dict]:
             _add(6, "graph-map", lines[i : e + 1])
             i = e + 1
             continue
+        if s == "<gt-flows>":
+            # The step-0 execution-flow index — orientation-value narration, same
+            # lowest kept band as the graph-map so a tight rail drops it first.
+            e = _until_close(i, "</gt-flows>")
+            _add(6, "flows", lines[i : e + 1])
+            i = e + 1
+            continue
         if s == "<gt-obligations>":
             e = _until_close(i, "</gt-obligations>")
             _add(1, "obligations", lines[i : e + 1])
@@ -1824,6 +1833,7 @@ _BLOCK_FACT_CLASS: dict[str, str] = {
     "edit-target-contracts": "contract",
     "companion": "scope",
     "graph-map": "graph-map",
+    "flows": "flows",
     "orientation-note": "orientation",
     # "file-entry-<N>" is matched by prefix below (each N is a distinct label).
 }
@@ -1905,7 +1915,14 @@ def _brief_minimal_on() -> bool:
 # 'which file' orientation), never dropped — handled specially in the reducer. The
 # scaffold (<gt-task-brief> tags), ``obligations``, and ``orientation-note`` are KEPT.
 _BRIEF_MINIMAL_DROP_LABELS: frozenset = frozenset(
-    {"localization-header", "graph-map", "edit-target-contracts", "companion", "expected-behavior"}
+    {
+        "localization-header",
+        "graph-map",
+        "flows",
+        "edit-target-contracts",
+        "companion",
+        "expected-behavior",
+    }
 )
 
 
@@ -2116,6 +2133,7 @@ def _brief_minimal_participation(before: str, after: str) -> list[dict]:
 # caller/scope narration lines, ``expected-behavior`` -> the issue-spec echo.
 _BRIEF_MINIMAL_RETIRED_MARKERS: tuple[str, ...] = (
     "<gt-graph-map>",
+    "<gt-flows>",
     "EDIT-TARGET CONTRACTS",
     "Callers:",
     "Calls:",
@@ -2820,6 +2838,9 @@ def _enforce_token_rail(text: str, budget: int) -> tuple[str, list[str]]:
 
     # Lowest priority FIRST. Each op removes ONE unit; loop while still over.
     _passes = [
+        # The step-0 flow index is repo-wide orientation narration — under a
+        # tight rail it yields before even the (demand-gated) graph-map.
+        ("flows", lambda: _drop_tagged("<gt-flows>", "</gt-flows>")),
         ("graph-map", lambda: _drop_tagged("<gt-graph-map>", "</gt-graph-map>")),
         (
             "orientation-note",
@@ -3685,6 +3706,131 @@ def _with_graph_map(
     return brief[:insert_at] + "\n" + block + brief[insert_at:]
 
 
+# --------------------------------------------------------------------------- #
+# Step-0 execution-flow section — ``<gt-flows>`` (2026).
+#
+# The repo's detected process library (``runtime.processes.detect_processes`` /
+# ``render_process_block``): named entry->terminal CALLS chains with their
+# CERTIFIED-edge ratio. This is orientation evidence the agent's own grep cannot
+# cheaply rebuild — the same class of unique value as the graph-map, but
+# repo-wide rather than anchor-scoped, and NOT demand-gated (a compact <=5-flow
+# index is brief-scale orientation, not a who-calls-whom evidence wall).
+# --------------------------------------------------------------------------- #
+def _brief_flows_on() -> bool:
+    """GT_BRIEF_FLOWS — KILL-SWITCH for the step-0 ``<gt-flows>`` section.
+    DEFAULT ON (the kill-switch polarity, not a demand gate): unset => the
+    section renders whenever the graph yields deliverable flows; only the
+    literal string ``"0"`` omits it — byte-identical to before."""
+    import os as _os
+
+    return (_os.environ.get("GT_BRIEF_FLOWS", "1") or "1").strip() != "0"
+
+
+# Design ceiling for the tagged section (NOT fixture-tuned): ~2-3 rendered flows
+# at the default breadth. The B-30 token rail remains the real ceiling — the
+# ``flows`` block is segmented at the lowest kept priority and is the first
+# thing dropped when the budget is tight.
+_BRIEF_FLOWS_MAX_BYTES = 1600
+_BRIEF_FLOWS_TOPK = 5  # the contract: at most five flows, never more
+# Breadth ladder: shrink WHOLE-flow count and per-flow symbol list until the
+# tagged section fits the byte cap — never truncate mid-line, never fabricate.
+_BRIEF_FLOWS_SHAPES: tuple[tuple[int, int], ...] = (
+    (_BRIEF_FLOWS_TOPK, 8),
+    (4, 6),
+    (3, 5),
+    (2, 4),
+    (1, 4),
+)
+
+# One-graph-at-a-time memo: ``render_brief`` is re-invoked inside the token-rail
+# trimming loop (entry-count pass + body-cap pass), and the flow library is
+# graph-fixed, so detection runs once per (path, mtime, size) — the same
+# staleness contract as the substrate's frozen graph.db.
+_FLOWS_CACHE: dict[tuple[str, int, int], tuple] = {}
+
+
+def _detect_flows_cached(graph_db: str):
+    """``detect_processes(graph_db).processes`` memoized on (path, mtime_ns, size).
+    A re-indexed graph (changed mtime/size) is a cache MISS; a missing/unreadable
+    db or detection fault abstains as ``()`` — correct-or-quiet."""
+    try:
+        st = os.stat(graph_db)
+    except OSError:
+        return ()
+    key = (graph_db, st.st_mtime_ns, st.st_size)
+    hit = _FLOWS_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        from groundtruth.runtime.processes import detect_processes
+    except Exception:
+        return ()
+    try:
+        procs = tuple(detect_processes(graph_db).processes)
+    except Exception:
+        return ()
+    _FLOWS_CACHE.clear()
+    _FLOWS_CACHE[key] = procs
+    return procs
+
+
+def _with_flows(
+    brief: str,
+    graph_db: str,
+    body_line_cap: int = _MAX_BODY_LINE_CHARS,
+) -> str:
+    """Append the detected execution-flow library as a bounded ``<gt-flows>``
+    section just before the ``</gt-task-brief>`` close tag.
+
+    Each flow line carries its certified ratio verbatim from
+    ``render_process_block`` (``certified NN%``; a ``(lower bound)`` chain label
+    on non-certified hops) — provenance-honest by construction, nothing
+    fabricated. Delivery-surface law applies at PROCESS granularity: a flow that
+    steps through ANY non-deliverable (test/vendored/minified) path is dropped
+    whole rather than leaking the path or rendering a doctored chain. Flag off,
+    no graph_db, no qualifying flows, any detection fault, or a smallest-shape
+    section that still exceeds the byte cap all return ``brief`` unchanged
+    (silent omission — never an empty tag).
+    """
+    if not _brief_flows_on() or not graph_db:
+        return brief
+    procs = _detect_flows_cached(graph_db)
+    if not procs:
+        return brief
+    try:
+        from groundtruth.runtime.processes import render_process_block
+    except Exception:
+        return brief
+    # A flow is a chain — dropping one interior node would falsify it, so the
+    # deliverable-path screen operates on WHOLE processes.
+    procs = tuple(p for p in procs if all(_is_deliverable(n.file_path) for n in p.nodes))
+    if not procs:
+        return brief
+    section = ""
+    for k, spp in _BRIEF_FLOWS_SHAPES:
+        try:
+            block = render_process_block(procs, max_processes=k, max_symbols_per_process=spp)
+        except Exception:
+            return brief
+        if not block:
+            return brief  # empty library -> omit silently
+        block = "\n".join(
+            _clip_body_line(ln, body_line_cap) if ln.startswith(" ") else ln
+            for ln in block.split("\n")
+        )
+        cand = "<gt-flows>\n" + block + "\n</gt-flows>"
+        if len(cand.encode("utf-8", "replace")) <= _BRIEF_FLOWS_MAX_BYTES:
+            section = cand
+            break
+    if not section:
+        return brief
+    close = "</gt-task-brief>"
+    idx = brief.rfind(close)
+    if idx == -1:
+        return f"{brief}\n{section}"
+    return brief[:idx] + section + "\n" + brief[idx:]
+
+
 _MAX_EDIT_TARGET_CONTRACT_LINES = 5
 
 
@@ -4088,16 +4234,20 @@ def _render_obligations_block(
             with open(_anchors_path(), encoding="utf-8") as _obl_f:
                 _obl_data = _obl_json.load(_obl_f)
             _persisted = _obl_data.get("obligations") or []
-            if _obligations_v2_on():
-                # V2 artifacts are task-bound.  A shared /tmp fallback can
-                # outlive its producer; version alone cannot prevent a valid
-                # artifact from another issue being laundered into this brief.
+            if _persisted:
+                # Task-binding guard (BOTH schema modes): gt_issue_anchors.json
+                # is a canonical filename on a shared /tmp fallback — it can
+                # outlive its producer and carry ANOTHER issue's obligations.
+                # The writer stamps issue_sha256 unconditionally; a missing
+                # stamp means a legacy/foreign artifact. Reject on mismatch and
+                # fall through to live extraction — extract_spec is
+                # deterministic on issue_text, so a same-issue artifact still
+                # bridges and a foreign one is never laundered into this brief.
                 import hashlib as _obl_hashlib
 
                 _issue_sha = _obl_hashlib.sha256(issue_text.encode("utf-8")).hexdigest()
-                if (
-                    _obl_data.get("obligations_version") != 2
-                    or _obl_data.get("issue_sha256") != _issue_sha
+                if _obl_data.get("issue_sha256") != _issue_sha or (
+                    _obligations_v2_on() and _obl_data.get("obligations_version") != 2
                 ):
                     _persisted = []
             if _persisted:
@@ -4286,7 +4436,7 @@ def render_brief(
     anchor_symbols: set[str] | None = None,
 ) -> str:
     if not files:
-        return "<gt-task-brief>\n</gt-task-brief>"
+        return _with_flows("<gt-task-brief>\n</gt-task-brief>", graph_db)
 
     # D1: per-body-line char cap. The budget-enforcement loop in
     # generate_v1r_brief tightens this (not the file LIST) when the brief is over
@@ -4632,7 +4782,11 @@ def render_brief(
     # Internal gating only — no tier displayed in directive line.
     if not files:
         lines.append("</gt-task-brief>")
-        return _with_graph_map("\n".join(lines), files, graph_db, body_line_cap)
+        return _with_flows(
+            _with_graph_map("\n".join(lines), files, graph_db, body_line_cap),
+            graph_db,
+            body_line_cap,
+        )
     top = files[0]
     # Task #45 (P0 HARM): naming a SINGLE highest-confidence candidate is only safe
     # when the rank is NOT a pure name_match/lexical guess. On beets ev1 the top
@@ -4691,7 +4845,11 @@ def render_brief(
                 "the edit target."
             )
     lines.append("</gt-task-brief>")
-    return _with_graph_map("\n".join(lines), files, graph_db, body_line_cap)
+    return _with_flows(
+        _with_graph_map("\n".join(lines), files, graph_db, body_line_cap),
+        graph_db,
+        body_line_cap,
+    )
 
 
 def _common_region(paths: list[str]) -> str:
@@ -5976,7 +6134,11 @@ def generate_v1r_brief(
         ]
         _nm_lines.extend(_nm_oblig)
         _nm_lines.append("</gt-task-brief>")
-        _nm_brief = "\n".join(_nm_lines)
+        # The repo flow library is still honest orientation on a no-match task
+        # (a new-file change lands INSIDE one of the repo's existing flows), so
+        # the same bounded <gt-flows> section applies here — inserted before the
+        # rail check below so it participates in the SAME hard token budget.
+        _nm_brief = _with_flows("\n".join(_nm_lines), graph_db)
         # Brief-F3: the no-match brief must obey the SAME hard token rail (B-30) as the
         # matched path — the early return previously bypassed _enforce_token_rail, so a
         # small max_brief_tokens (or GT_OBLIGATIONS_V2 dynamic-K growth) shipped an

@@ -168,6 +168,20 @@ try:
     from groundtruth.pretask.graph_localizer import localize as _localize
 except Exception:  # noqa: BLE001
     _localize = None  # type: ignore[assignment]
+# Post-search symbol/flow context lane (the ``search_context`` producer). Same
+# optional-import contract as the engines above: a container shipping gateway.py
+# WITHOUT the enrichment stack must still import — absent -> None -> the producer
+# abstains correct-or-quiet (returns []), never a module-load crash.
+try:
+    from groundtruth.runtime.search_context import (
+        build_search_context as _build_search_context,
+    )
+except Exception:  # noqa: BLE001
+    _build_search_context = None  # type: ignore[assignment]
+try:
+    from groundtruth.runtime.processes import detect_processes as _detect_processes
+except Exception:  # noqa: BLE001
+    _detect_processes = None  # type: ignore[assignment]
 
 __all__ = [
     "ToolEvent",
@@ -572,6 +586,17 @@ def _loc_reslot_on() -> bool:
         "no",
         "off",
     )
+
+
+def _search_context_on() -> bool:
+    """KILL-SWITCH for the ``_produce_search_context`` call site (the D2/post-search
+    ``<gt-search-context>`` lane). DEFAULT ON — the ``_change_surface_producer_on`` /
+    ``_patch_delta_producer_on`` polarity, not the ``_loc_reslot_on`` enablement
+    polarity: unset => ``True`` => the producer fires exactly as if this gate did
+    not exist (byte-identical); only the literal string ``"0"`` skips that call
+    site, the OTHER producers unaffected. Correct-or-quiet still applies inside the
+    producer (no graph / no indexable term / no symbol match -> abstains)."""
+    return os.environ.get("GT_SEARCH_CONTEXT", "1").strip() != "0"
 
 
 def _ss_arbiter_v2_on() -> bool:
@@ -3040,6 +3065,181 @@ def _produce_ranked_localization(event: ToolEvent, state: GatewayState) -> list[
     )
 
 
+# --------------------------------------------------------------------------- #
+# POST-SEARCH SYMBOL/FLOW CONTEXT lane — the ``search_context`` producer. When the
+# agent's own grep lands (or misses), enrich the observation with the graph facts a
+# grep cannot cheaply rebuild: who CALLS / is called by the matched symbols and
+# which detected execution flows they ride. Ships through the ONE payload contract
+# (``_mk_add`` -> ``EvidenceEnvelope``): the ``<gt-search-context>`` block produced
+# by ``search_context.build_search_context`` rides the payload lines verbatim, so
+# the leak-law body scan, envelope validation, freshness routing, and the delivery
+# dedup chain all apply unchanged — this lane adds NO second render path.
+# --------------------------------------------------------------------------- #
+# Bounded dose ("small" like the def_partition family the class aliases to). A
+# design ceiling, NOT a fixture-tuned constant: ~3-4 whole symbol entries.
+_SEARCH_CONTEXT_MAX_BYTES = 1600
+# ``file:line`` references inside the rendered block (def sites + neighbor refs) —
+# the envelope's provenance rows, re-derived from the SAME bytes that ship so the
+# shipped content and its provenance can never diverge.
+_SEARCH_CONTEXT_FILE_LINE_RE = re.compile(r"([^\s(),]+):(\d+)")
+
+
+def _search_context_processes(state: GatewayState) -> tuple:
+    """Episode-MEMOIZED ``detect_processes`` output for the search-context lane —
+    the repo flow library is issue-independent and graph-fixed, so it is computed
+    ONCE per graph state and reused on every later search turn (the same
+    ``_graph_state_token`` memoization as :func:`_ranked_localization_rows`: a
+    graph birth or re-index is a cache MISS, a fixed graph serves cached).
+    Correct-or-quiet: no module / no db / detection fault -> ``()`` (the block then
+    carries no ``in flow:`` lines); a slotted episode that rejects the setattr
+    just recomputes, never a crash."""
+    if _detect_processes is None:
+        return ()
+    db = state.graph_db or ""
+    if not db or not os.path.isfile(db):
+        return ()
+    ep = state.episode
+    token = _graph_state_token(state)
+    cached = getattr(ep, "_gt_search_ctx_procs", None)
+    if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == token:
+        return cached[1]
+    try:
+        procs = tuple(_detect_processes(db).processes)
+    except Exception:  # noqa: BLE001 — flow membership is additive, never a gate
+        procs = ()
+    try:
+        setattr(ep, "_gt_search_ctx_procs", (token, procs))
+    except Exception:  # noqa: BLE001 — a slotted episode can't cache; recompute is correct
+        pass
+    return procs
+
+
+def _bound_search_context_block(block: str, max_bytes: int = _SEARCH_CONTEXT_MAX_BYTES) -> str:
+    """Trim a ``<gt-search-context>`` block to <= ``max_bytes`` at SYMBOL-ENTRY
+    granularity. ``build_search_context`` emits one entry per matched symbol — a
+    2-space-indented ``name (label, file:line)`` head plus deeper-indented
+    ``called by:`` / ``calls:`` / ``in flow:`` lines — so dropping trailing WHOLE
+    entries keeps the tag balanced and every shipped line complete. A block whose
+    FIRST entry alone exceeds the cap abstains (``""``), never a mid-line cut."""
+    if len(block.encode("utf-8", "replace")) <= max_bytes:
+        return block
+    lines = block.split("\n")
+    if not lines or lines[0].strip() != "<gt-search-context>":
+        return ""
+    out = [lines[0]]
+    used = len(lines[0].encode("utf-8", "replace")) + len("</gt-search-context>") + 2
+    i = 1
+    while i < len(lines) and lines[i].strip() != "</gt-search-context>":
+        entry = [lines[i]]
+        i += 1
+        while i < len(lines) and lines[i].startswith("    "):
+            entry.append(lines[i])
+            i += 1
+        cost = sum(len(ln.encode("utf-8", "replace")) + 1 for ln in entry)
+        if used + cost > max_bytes:
+            break
+        out.extend(entry)
+        used += cost
+    if len(out) == 1:
+        return ""
+    out.append("</gt-search-context>")
+    return "\n".join(out)
+
+
+def _produce_search_context(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
+    """ONE ``search_context`` envelope carrying the bounded ``<gt-search-context>``
+    block for the agent's OWN grep operand: callers/callees/detected-flow
+    membership of the symbols the pattern resolves to
+    (``search_context.build_search_context`` — FTS5 symbol match + CALLS
+    neighbors, reused, never re-parsed here). The operand comes from
+    :func:`normalize_search` (``raw_operand``, dequoted, regex-tolerant — a
+    behavior-PHRASE grep still yields terms for ``extract_search_terms``). Fires
+    on ``search_result`` AND ``failed_search`` alike — on an empty grep the
+    graph's view of the same terms is exactly the enrichment needed. The SAME
+    operand re-offers with a stable ``dedup_key`` (fire-once via the delivery
+    dedup chain; a changed match set re-fires as new content). Correct-or-quiet:
+    no engine / no graph / no operand / no match / fully leak-filtered -> []."""
+    audit = _producer_audit(
+        state,
+        event,
+        producer="search_context",
+        evidence_types=("search_context",),
+        invocation_site="gateway.search.search_context",
+    )
+    if _build_search_context is None:
+        audit.note("search_context_unavailable", category="dependency_failure")
+        return audit.finish([])
+    db = state.graph_db or ""
+    if not db or not os.path.isfile(db):
+        audit.note("graph_unavailable", category="dependency_failure")
+        return audit.finish([])
+    query = normalize_search(event.command)
+    operand = ((query.raw_operand if query else "") or "").strip()
+    if not operand:
+        audit.note("search_operand_missing", category="dependency_failure")
+        return audit.finish([])
+    try:
+        block = _build_search_context(db, operand, processes=_search_context_processes(state))
+    except Exception as exc:  # noqa: BLE001
+        audit.note(
+            "search_context_fault",
+            category="dependency_failure",
+            detail={"fault_type": type(exc).__name__},
+        )
+        return audit.finish([])
+    if not block:
+        audit.note("search_context_empty", category="correct_quiet")
+        return audit.finish([])
+    block = _bound_search_context_block(block)
+    if not block:
+        audit.note("search_context_over_cap", category="correct_quiet")
+        return audit.finish([])
+    body = block.splitlines()
+    # Provenance = the real graph sites the block names (each matched symbol's def
+    # site first, then caller/callee refs) — re-derived from the SAME bytes that
+    # ship. ``_mk_add`` leak-filters every provenance row AND every body line, so
+    # a test/vendored path can never ship. Target = the first NON-leaky site (a
+    # leaky one would drop the whole envelope at the law-(a) gate upstream).
+    evidence: list[tuple[str, int]] = []
+    for f, ln in _SEARCH_CONTEXT_FILE_LINE_RE.findall(block):
+        row = (f, int(ln))
+        if row not in evidence:
+            evidence.append(row)
+    clean = [row for row in evidence if not _is_leaky(row[0])]
+    sym = search_pattern(event.command) or ""
+    target = clean[0][0] if clean else (sym or operand)
+    env = _mk_add(
+        state,
+        event,
+        fact_kind="search_context",
+        target=target,
+        body_lines=body,
+        evidence=evidence,
+        tier=INFO,  # FTS name-match + mixed-tier neighbors — enrichment, not a verdict
+        producer="search_context",
+        symbol=sym or operand,
+        # No cap_feature_ids claim: GT_SEARCH_CONTEXT is a dispatch kill-switch,
+        # not a CAP byte owner — the same non-claim as def_ref_partition/covering.
+        observed_substrates=("fts5", "graph"),
+        canonical_subject=operand,
+        canonical_claim=(
+            f"The pattern {operand} resolves to indexed symbols whose caller/"
+            "callee and execution-flow context is listed."
+        ),
+        canonical_consequence=(
+            "Use the listed callers/callees and flows to pick the next file to "
+            "inspect instead of re-grepping the same term."
+        ),
+    )
+    # If the leak scan emptied the payload entirely there is no fact to ship —
+    # abstain rather than produce a zero-byte envelope (the SS-V2 guard drops it
+    # downstream when armed; this keeps the abstention honest when it is not).
+    if not _envelope_has_bytes(env):
+        audit.note("search_context_fully_filtered", category="authority")
+        return audit.finish([])
+    return audit.finish([env])
+
+
 def _produce_wrong_surface(event: ToolEvent, state: GatewayState) -> list[EvidenceEnvelope]:
     audit = _producer_audit(
         state,
@@ -5132,6 +5332,25 @@ def _produce_raw_candidates(
                 evidence_types=("ranked_localization",),
                 invocation_site="gateway.search.ranked_localization",
                 reason="loc_reslot_off",
+            )
+        # Post-search symbol/flow context (2026 — GT_SEARCH_CONTEXT, DEFAULT ON
+        # kill-switch): the ``<gt-search-context>`` block — callers/callees and
+        # detected-flow membership for the symbols the agent's OWN grep operand
+        # resolves to. Independent of the outcome lattice below (fires on
+        # EXACT_HIT/SATISFIED too — a successful grep still lacks graph context).
+        # Enters the delivery chain through ``_mk_add`` envelopes like every
+        # producer — registry renderability, validation, leak scan, freshness
+        # routing, and the dedup chain all apply; no bypass.
+        if _search_context_on():
+            additions += _produce_search_context(event, state)
+        else:
+            _audit_dispatch_skip(
+                state,
+                event,
+                producer="search_context",
+                evidence_types=("search_context",),
+                invocation_site="gateway.search.search_context",
+                reason="kill_switch_off",
             )
 
     # outcome-dispatched producers

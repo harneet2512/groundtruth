@@ -437,6 +437,14 @@ _EVIDENCE_TYPE_ALIASES: dict[str, str] = {
     "name_fold": "def_partition",
     "wrong_surface": "def_partition",
     "body_concept": "def_partition",
+    # Post-search symbol/flow context (gateway ``_produce_search_context``): the
+    # bounded ``<gt-search-context>`` block — callers/callees + detected-flow
+    # membership for the symbols the agent's OWN grep operand resolved to. It
+    # answers the SAME post-search decision ("which def/caller to inspect next")
+    # on the SAME ``search_result`` boundary (a ``failed_search`` event realizes
+    # the same coarse search ordinal), so it aliases to ``def_partition`` by
+    # DECISION and needs NO ``_EVIDENCE_TYPE_DELIVER_BY`` timing override.
+    "search_context": "def_partition",
     # a stack-frame localizer answers "which file to open"
     "trace_frame": "localization",
     # patch_delta signature/registration facts answer "must callers/registrations change"
@@ -760,6 +768,11 @@ _EVIDENCE_TYPE_PRODUCERS: dict[str, frozenset[str]] = {
     "name_fold": frozenset({"name_fold"}),
     "wrong_surface": frozenset({"wrong_surface"}),
     "body_concept": frozenset({"body_concept"}),
+    # The post-search ``<gt-search-context>`` lane's producer id (gateway
+    # ``_produce_search_context``) — distinct from ``post_search``/``def_ref_partition``
+    # so the audit grain can tell a context block from a partition verdict even
+    # though both share fact_class ``def_partition``.
+    "search_context": frozenset({"search_context"}),
     "trace_frame": frozenset({"trace"}),
     "caller_break": frozenset({"caller_contract"}),
     "caller_contract_view": frozenset({"caller_contract"}),
@@ -868,6 +881,11 @@ FRESHNESS_SURFACES: dict[str, tuple[str, ...]] = {
     "caller_break": ("nodes", "edges"),
     "caller_contract_view": ("nodes", "edges"),
     "body_concept": ("nodes", "edges", "content_fts"),
+    # The ``<gt-search-context>`` block reads the FTS5 symbol index over ``nodes``
+    # plus CALLS ``edges`` (and the detected-process library, itself nodes+edges
+    # derived) — nothing else. A nodes/edges reindex stales it; a properties-only
+    # or cochange-only reindex must not.
+    "search_context": ("nodes", "edges"),
     "new_file_destination": ("nodes", "edges", "closure"),
     "missing_role": ("nodes", "edges", "closure"),
     "missing_role_postcreate": ("nodes", "edges", "closure"),

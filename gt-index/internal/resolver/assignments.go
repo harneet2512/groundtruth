@@ -1,5 +1,7 @@
 package resolver
 
+import "strings"
+
 // AssignmentTracker builds a per-file map of variable → type assignments.
 // Used by Strategy 1.96 to resolve x.method() when x = SomeClass().
 //
@@ -20,16 +22,38 @@ package resolver
 // file where that class is defined (for cross-file resolution).
 type VarType struct {
 	VarName   string // "x", "self.client", "result"
-	TypeName  string // "SomeClass", "HttpClient" — or a callee name when ViaReturn
+	TypeName  string // "SomeClass", "HttpClient" — callee name (ViaReturn) or RHS symbol leaf (ViaSymbol)
 	TypeFile  string // file where type is defined (empty = same file or unknown)
 	Scope     string // function name where assignment occurred (empty = module level)
 	Line      int    // line number of the assignment
 	Confident bool   // true if assignment is unambiguous (direct constructor call)
 	// ViaReturn marks an assignment whose RHS is a (non-constructor) call: x = factory().
 	// TypeName then holds the CALLEE name, not a class; the resolver must bridge through
-	// that callee's declared return type (Strat 1.96b) before resolving the method.
+	// that callee's declared return type (Strat 1.96 viaReturn) before resolving the method.
 	// JARVIS (arXiv 2305.05949): return-type chaining is a core flow-sensitive transfer.
 	ViaReturn bool
+	// ViaSymbol marks a callable-value binding whose RHS is a symbol reference:
+	// `x = helper`, `x = obj.method`, `x = mod.func`, `self.f = F`. TypeName is
+	// the RHS leaf name; TypeQualified the full source text ("obj.method"). The
+	// callable-value rung resolves `x()` to the named symbol.
+	ViaSymbol bool
+	// IsParameter marks a formal parameter binding (JARVIS argument→formal
+	// flow): TypeName is the declared annotation (empty when unannotated — the
+	// parameter is then a pure value slot), ParameterIndex its positional slot
+	// excluding receiver formals (self/cls).
+	IsParameter    bool
+	ParameterIndex int
+	// Owner names the function/method a formal parameter belongs to
+	// (IsParameter only) — the callsite key the callable-value rung scans.
+	// It differs from Scope when the owning function is nested inside another
+	// body (`const w = (cb) => …` inside `outer`: Scope="outer", Owner="w").
+	Owner string
+	// TypeQualified is the qualified RHS/annotation text ("mod.func",
+	// "pkg.Type") when the source carried one.
+	TypeQualified string
+	// ObjectScope is the enclosing class/object for self./this. field bindings —
+	// the object-scope key the field path and callable-value rung match on.
+	ObjectScope string
 }
 
 // AssignmentMap is a per-file collection of variable → type inferences.
@@ -131,4 +155,128 @@ func (m *AssignmentMap) ResolveQualifiedCall(qualifier, method, scope string) (s
 		return best.TypeName, method, best.ViaReturn, true
 	}
 	return "", "", false, false
+}
+
+// ResolveCallableBinding resolves the binding behind a callee that is a
+// function VALUE, not a declared symbol — the callsite `x()` or `self.cb()`
+// where `x`/`self.cb` was bound by an alias write (`x = helper`,
+// `x = obj.method`) or is a formal parameter (`def wrap(cb): cb()`).
+//
+// varName is the callsite's callee (bare "x" or qualified "self.cb"); scope is
+// the caller's enclosing function scope; objectScope the caller's enclosing
+// class (for field bindings); line the callsite line. Returns the single
+// viable binding, or found=false when the name has no callable binding, the
+// latest write is not a symbol/parameter binding, or multiple viable bindings
+// disagree — ambiguity abstains rather than guesses.
+//
+// Scope rules mirror ResolveQualifiedCall: self./this. fields are
+// object-scoped (any method's write is eligible when the class matches);
+// dotted non-field names and bare names are function-scoped (same-scope
+// writes, or module-level Scope=="" globals). For non-field names a write
+// textually AFTER the call (use-before-assign) is ineligible. A formal
+// parameter is chosen only when no later write shadows it — a rebound param
+// (`cb = helper` inside the body) resolves through the write.
+func (m *AssignmentMap) ResolveCallableBinding(varName, scope, objectScope string, line int) (VarType, bool) {
+	types := m.VarTypes[varName] // exact name — Lookup's self./this. fallback would merge distinct slots
+	if len(types) == 0 {
+		return VarType{}, false
+	}
+	field := strings.HasPrefix(varName, "self.") || strings.HasPrefix(varName, "this.")
+	dotted := !field && strings.ContainsAny(varName, ".:")
+	var eligible []VarType
+	for _, t := range types {
+		switch {
+		case field:
+			// Object-scoped: writes on the same class (or an unscoped write)
+			// are eligible from every method.
+			if t.ObjectScope == "" || objectScope == "" || t.ObjectScope == objectScope {
+				eligible = append(eligible, t)
+			}
+		case dotted:
+			// A dotted name is function-scoped; a binding that also carries an
+			// ObjectScope (Java/Kotlin field alias) must come from the SAME
+			// class — a sibling class's `this.f` must never bind `f.run()`.
+			if t.Scope == scope && (t.ObjectScope == "" || t.ObjectScope == objectScope) {
+				eligible = append(eligible, t)
+			}
+		default:
+			// Bare names: same-scope writes and module-level globals are
+			// eligible, but an ObjectScope-carrying binding (the bare twin of
+			// a Java/Kotlin `this.f` field alias, Scope=="") only applies
+			// inside its own class — a module-level or sibling-class call
+			// cannot see it.
+			if (t.Scope == scope || t.Scope == "") &&
+				(t.ObjectScope == "" || t.ObjectScope == objectScope) {
+				eligible = append(eligible, t)
+			}
+		}
+	}
+	// A local write textually after the call cannot be the binding it reads
+	// (use-before-assign). Fields are exempt — methods are unordered.
+	if !field && line > 0 {
+		var filtered []VarType
+		for _, t := range eligible {
+			if t.Line <= line || t.Line == 0 {
+				filtered = append(filtered, t)
+			}
+		}
+		eligible = filtered
+	}
+	if len(eligible) == 0 {
+		return VarType{}, false
+	}
+	var params, writes []VarType
+	for _, t := range eligible {
+		if t.IsParameter {
+			params = append(params, t)
+		} else {
+			writes = append(writes, t)
+		}
+	}
+	if len(writes) == 0 {
+		// Pure parameter binding: viable only when every same-named formal
+		// agrees on position AND owner (a redefined function with a moved
+		// formal — or two same-scoped nested functions declaring the same
+		// formal — is ambiguous).
+		if len(params) == 1 {
+			return params[0], true
+		}
+		first := params[0]
+		for _, p := range params[1:] {
+			if p.ParameterIndex != first.ParameterIndex || p.VarName != first.VarName || p.Owner != first.Owner {
+				return VarType{}, false
+			}
+		}
+		return first, true
+	}
+	// Writes exist: the latest write decides what the name currently holds.
+	latest := 0
+	for _, t := range writes {
+		if t.Line > latest {
+			latest = t.Line
+		}
+	}
+	var latestSymbol *VarType
+	for i := range writes {
+		if writes[i].Line == latest && writes[i].ViaSymbol {
+			latestSymbol = &writes[i]
+		}
+	}
+	if latestSymbol == nil {
+		// Latest write is a constructor/factory binding — `x` holds a value of
+		// a type, not a callable symbol: `x()` is not a callable-value call.
+		return VarType{}, false
+	}
+	// Every ViaSymbol write must agree on the same target: a conditional
+	// rebind (`if c: x = f else: x = g`) leaves both writes viable.
+	target := latestSymbol.TypeName + "\x00" + latestSymbol.TypeQualified
+	for _, t := range writes {
+		if !t.ViaSymbol {
+			continue
+		}
+		if t.TypeName+"\x00"+t.TypeQualified != target {
+			return VarType{}, false
+		}
+	}
+	return *latestSymbol, true
 }

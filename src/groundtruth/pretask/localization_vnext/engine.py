@@ -131,6 +131,28 @@ _SUPPORTED_RELATIONS = {
     "CO_SERIALIZES",
     "OVERRIDES",
     "CATCHES",
+    # taxonomy.DeriveEdges kinds (syntactic_* mechanisms, CANDIDATE/SPECULATIVE
+    # tiers) — traversable code relations between real symbol nodes, gated by
+    # the same confidence/trust floor as the promoted depth edges.
+    "DECLARED_IMPLEMENTS",
+    "METHOD_OVERRIDES",
+    "DECORATES",
+    "RETURNS_TYPE",
+    "PARAM_TYPE",
+    "ACCESSES",
+    # resolver/relationships.go data-access + dependency-injection edges, and
+    # resolver/framework_wiring.go middleware attachment (middleware fn ->
+    # app/route/module node — a real wiring relation between symbol nodes).
+    "INJECTS",
+    "QUERIES",
+    "MIDDLEWARE_ON",
+    # Deliberately absent: the resolution_v2 fact links (HAS_CALLSITE,
+    # CANDIDATE_TARGET, SELECTED_TARGET, HAS_DERIVATION_FACT,
+    # HAS_COMPLETENESS_FACT, HAS_UNRESOLVED_FACT). They connect synthetic
+    # Callsite/fact nodes, carry NULL confidence by contract (the confidence
+    # gate in _edge_evidence drops them regardless), and are resolver
+    # provenance — not code relations the localizer can traverse. INSTANTIATES
+    # is in the Go taxonomy vocabulary but never emitted.
 }
 _PARSER_ONLY_RELATIONS = {"PUBLISHES", "SUBSCRIBES", "CONFIGURES", "VALIDATES"}
 _POLICY_RELATION_PRIORITY: dict[str, tuple[str, ...]] = {
@@ -456,25 +478,32 @@ def detect_ecosystem_adapter(repository_root: str | Path) -> EcosystemAdapter:
     pyproject = _read_small(root / "pyproject.toml")
     requirements = _read_small(root / "requirements.txt")
     if any(term in pyproject + requirements for term in ("fastapi", "django")):
+        # QUERIES = Django/SQLAlchemy model access; INJECTS = FastAPI Depends().
         return EcosystemAdapter(
-            "python_web", ("HANDLES_ROUTE", "READS", "WRITES", "CO_SERIALIZES", "CALLS")
+            "python_web",
+            ("HANDLES_ROUTE", "READS", "WRITES", "CO_SERIALIZES", "CALLS", "QUERIES", "INJECTS"),
         )
     pom = _read_small(root / "pom.xml") + _read_small(root / "build.gradle")
     if "spring" in pom:
+        # Spring is DI-first (@Inject/@Autowired) plus Spring-Data queries.
         return EcosystemAdapter(
-            "java_spring", ("HANDLES_ROUTE", "IMPLEMENTS", "CO_SERIALIZES", "CALLS")
+            "java_spring",
+            ("HANDLES_ROUTE", "IMPLEMENTS", "CO_SERIALIZES", "CALLS", "INJECTS", "QUERIES"),
         )
     package = _read_small(root / "package.json")
     if "express" in package:
+        # Mongoose/ActiveRecord-style Model.find|where|create -> QUERIES.
         return EcosystemAdapter(
-            "javascript_express", ("HANDLES_ROUTE", "API_CALL", "CALLS", "PRECEDES")
+            "javascript_express", ("HANDLES_ROUTE", "API_CALL", "CALLS", "PRECEDES", "QUERIES")
         )
     if "react" in package:
         return EcosystemAdapter("javascript_react", ("DATA_FLOW", "PRECEDES", "READS", "WRITES"))
     for candidate in sorted(root.glob("*.csproj")):
         if "microsoft.net.sdk.web" in _read_small(candidate):
+            # Constructor injection is the canonical ASP.NET DI pattern.
             return EcosystemAdapter(
-                "dotnet_aspnet", ("HANDLES_ROUTE", "IMPLEMENTS", "CO_SERIALIZES", "CALLS")
+                "dotnet_aspnet",
+                ("HANDLES_ROUTE", "IMPLEMENTS", "CO_SERIALIZES", "CALLS", "INJECTS"),
             )
     gomod = _read_small(root / "go.mod")
     if any(term in gomod for term in ("gin-gonic", "gorilla/mux", "go-chi", "echo")):
@@ -810,7 +839,11 @@ def _roles_for(
         roles.add("authorization")
     if relation in {"RAISES", "CATCHES"} or "exception" in property_kind:
         roles.update(("exception", "expected_behavior", "transition"))
-    if relation in {"DATA_FLOW", "PRECEDES", "READS", "WRITES"}:
+    # QUERIES (ORM model access) and ACCESSES (field read/write on the owning
+    # type) are data-access edges — the same family as READS/WRITES, so they
+    # carry the same transition role. INJECTS/DECORATES/hierarchy kinds get
+    # roles only when an endpoint is independently issue-relevant.
+    if relation in {"DATA_FLOW", "PRECEDES", "READS", "WRITES", "QUERIES", "ACCESSES"}:
         roles.add("transition")
     if property_kind in {
         "boundary_condition",
@@ -1500,7 +1533,7 @@ def derive_certified_relationships(request: LocalizationRequest) -> list[Evidenc
             FROM edges e
             JOIN nodes c ON c.id=e.source_id
             JOIN nodes p ON p.id=e.target_id
-            WHERE e.type IN ('EXTENDS','IMPLEMENTS')
+            WHERE e.type IN ('EXTENDS','IMPLEMENTS','DECLARED_IMPLEMENTS')
               AND c.label IN ('Class','Interface','Struct','Trait')
               AND p.label IN ('Class','Interface','Struct','Trait')
             ORDER BY child_id, parent_id, e.type

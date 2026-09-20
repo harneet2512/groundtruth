@@ -10,12 +10,21 @@ from typing import Final
 
 SCHEMA: Final = "gt.language_operation_compatibility.v1"
 OPERATIONS: Final = (
+    "api_impact",
     "callers",
     "definition",
     "exact_literal_search",
     "patch_impact",
+    "processes",
     "references",
+    "rename",
+    "route_map",
+    "shape_check",
+    "slice",
+    "symbol_context",
     "syntax",
+    "taint",
+    "tool_map",
     "verification_status",
 )
 TERMINAL_SEMANTICS: Final = frozenset(
@@ -68,8 +77,11 @@ def load_language_operation_compatibility(
     if not _is_sha256(raw.get("source_manifest_sha256")):
         raise ValueError("invalid source language manifest hash")
     raw_rows = raw.get("rows")
-    if not isinstance(raw_rows, list) or len(raw_rows) != 210:
-        raise ValueError("compatibility manifest must contain exactly 210 rows")
+    expected_rows = 30 * len(OPERATIONS)
+    if not isinstance(raw_rows, list) or len(raw_rows) != expected_rows:
+        raise ValueError(
+            f"compatibility manifest must contain exactly {expected_rows} rows"
+        )
     rows: list[LanguageOperationRow] = []
     for item in raw_rows:
         if not isinstance(item, dict):
@@ -88,7 +100,7 @@ def load_language_operation_compatibility(
         rows.append(row)
     identities = {row.registry_identity for row in rows}
     pairs = {(row.registry_identity, row.operation) for row in rows}
-    if len(identities) != 30 or len(pairs) != 210:
+    if len(identities) != 30 or len(pairs) != expected_rows:
         raise ValueError("compatibility manifest is missing or duplicates registry pairs")
     expected_pairs = {(identity, operation) for identity in identities for operation in OPERATIONS}
     if pairs != expected_pairs:
