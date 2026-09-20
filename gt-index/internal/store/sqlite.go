@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -1164,12 +1165,7 @@ func createSchema(db *sql.DB) error {
 	// FTS5 virtual table: SEPARATE from main schema because some SQLite builds
 	// (e.g. container images) lack FTS5 support. Non-fatal: if FTS5 is unavailable,
 	// the Python localizer falls back to name-match-only seeding.
-	_, ftsErr := db.Exec(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
-			name, qualified_name, signature, file_path,
-			content='nodes', content_rowid='id'
-		);
-	`)
+	_, ftsErr := db.Exec(fmt.Sprintf(nodesFTSDDL, "IF NOT EXISTS"))
 	if ftsErr != nil {
 		log.Printf("[WARN] FTS5 not available (non-fatal): %v", ftsErr)
 	}
@@ -1180,12 +1176,35 @@ func createSchema(db *sql.DB) error {
 	return nil
 }
 
-// PopulateFTS5 fills the nodes_fts virtual table from the nodes table.
-// Must be called AFTER all nodes are inserted (end of DEFINITIONS pass).
-// Idempotent: DELETEs existing FTS5 content first, then re-inserts.
-// Non-fatal: if FTS5 table doesn't exist (SQLite build without FTS5),
-// logs a warning and returns nil. The Python localizer handles this
-// gracefully with name-match-only fallback.
+// nodesFTSDDL is the single source of truth for the index's shape, shared by
+// schema creation and the corruption-recovery path so the two can never
+// declare different columns (same convention as propertiesFTSDDL).
+const nodesFTSDDL = `CREATE VIRTUAL TABLE %s nodes_fts USING fts5(
+	name, qualified_name, signature, file_path,
+	content='nodes', content_rowid='id'
+)`
+
+// PopulateFTS5 rebuilds the nodes_fts inverted index from nodes and verifies
+// the result can answer a scored MATCH query before returning.
+//
+// Maintenance uses FTS5's own `'rebuild'` command — the same choice
+// populatePropertiesFTS5 made, for the same reason. The previous hand-rolled
+// `DELETE FROM nodes_fts` + re-`INSERT` cannot remove index entries for
+// content rows that are already gone: on an external-content table the
+// delete is computed by re-reading the content row, so a dead generation's
+// doclist entries survive. A paid DeepSWE graph (run 35056493769) shipped in
+// exactly that state — nodes_fts_docsize held 190,953 rows against 95,644
+// nodes — and bm25's idf term then evaluates log() of a non-positive value,
+// which SQLite maps NaN to NULL and the consumer's float(bm25) raises
+// TypeError. `'rebuild'` discards the index and reconstructs it from the
+// content table in one statement, so it cannot inherit a dead generation.
+//
+// When the shadow tables are structurally damaged, 'rebuild' itself fails
+// ("database disk image is malformed"); recovery drops the virtual table —
+// which drops the shadow tables with it — and rebuilds on the fresh schema.
+// Either path ends in VerifyFTS5Integrity, so a graph whose index cannot
+// answer a real scored query is an error to the caller instead of a WARN on
+// a corrupt published artifact.
 func (d *DB) PopulateFTS5() error {
 	// Check if nodes_fts table exists (FTS5 may not be compiled in)
 	var count int
@@ -1194,47 +1213,119 @@ func (d *DB) PopulateFTS5() error {
 		log.Printf("[WARN] nodes_fts table not found (FTS5 unavailable); skipping FTS5 population")
 		return nil
 	}
-	insertSQL := `INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
-		 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-		 FROM nodes`
-	// Clear any existing content (idempotent rebuild), then re-insert.
-	_, delErr := d.db.Exec("DELETE FROM nodes_fts")
-	if delErr == nil {
-		if _, err := d.db.Exec(insertSQL); err == nil {
-			return nil
-		} else {
-			delErr = err // fall through to the DROP+recreate recovery
+	if _, err := d.db.Exec(`INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')`); err != nil {
+		log.Printf("[WARN] nodes_fts rebuild failed (%v) — DROP+recreate to self-heal the FTS5 index", err)
+		if _, derr := d.db.Exec("DROP TABLE IF EXISTS nodes_fts"); derr != nil {
+			return fmt.Errorf("drop corrupt nodes_fts: %w", derr)
+		}
+		if _, derr := d.db.Exec(fmt.Sprintf(nodesFTSDDL, "")); derr != nil {
+			return fmt.Errorf("recreate nodes_fts: %w", derr)
+		}
+		if _, derr := d.db.Exec(`INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')`); derr != nil {
+			return fmt.Errorf("rebuild nodes_fts after recreate: %w", derr)
 		}
 	}
-	// Recovery: the external-content FTS5 index can be CORRUPT ("database disk image
-	// is malformed") — e.g. when nodes was UPDATEd (LSP resolve) or graph.db was
-	// `docker cp`'d away from its -wal between containers, stranding the index. DELETE
-	// then fails. DROP the vtable and recreate it fresh from the current nodes table.
-	log.Printf("[WARN] nodes_fts clear/insert failed (%v) — DROP+recreate to self-heal the FTS5 index", delErr)
-	if _, err := d.db.Exec("DROP TABLE IF EXISTS nodes_fts"); err != nil {
-		return fmt.Errorf("drop corrupt nodes_fts: %w", err)
+	return d.VerifyFTS5Integrity()
+}
+
+// VerifyFTS5Integrity proves the index can answer the query lexical_rank is
+// about to send it. Two checks:
+//
+//  1. Coverage parity — nodes_fts_docsize holds exactly one row per indexed
+//     document, so its count must equal NodeCount(). A dead generation
+//     (amend-era index entries whose content rows are gone) or an emptied
+//     index both break this invariant.
+//  2. Scored probe — a real MATCH over a term drawn from the content itself,
+//     requiring every returned bm25() to be a finite number. Stale index
+//     statistics make bm25's idf term non-finite and SQLite surfaces that as
+//     NULL, which is precisely what reached production as a consumer-side
+//     TypeError. An index that claims full coverage yet matches nothing is
+//     also an integrity failure — the probe term comes from a row the index
+//     claims to hold.
+func (d *DB) VerifyFTS5Integrity() error {
+	indexed := d.FTS5RowCount()
+	if indexed < 0 {
+		return fmt.Errorf("nodes_fts index state unreadable — FTS5 compiled out or shadow tables missing")
 	}
-	if _, err := d.db.Exec(`CREATE VIRTUAL TABLE nodes_fts USING fts5(
-		name, qualified_name, signature, file_path,
-		content='nodes', content_rowid='id'
-	)`); err != nil {
-		return fmt.Errorf("recreate nodes_fts: %w", err)
+	if content := d.NodeCount(); indexed != content {
+		return fmt.Errorf("nodes_fts covers %d of %d node rows — index desynced from content", indexed, content)
 	}
-	if _, err := d.db.Exec(insertSQL); err != nil {
-		return fmt.Errorf("populate nodes_fts after recreate: %w", err)
+	if indexed == 0 {
+		return nil
+	}
+	// Probe with terms taken from rows the index claims to hold. A term that
+	// MATCHes at least one row must return a finite bm25 for every hit; the
+	// first NULL/non-finite score is the stale-statistics signature.
+	rows, err := d.db.Query(
+		`SELECT name FROM nodes WHERE name <> '' ORDER BY id LIMIT 16`)
+	if err != nil {
+		return fmt.Errorf("probe terms: %w", err)
+	}
+	var terms []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		terms = append(terms, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	matched := false
+	for _, term := range terms {
+		scores, err := d.db.Query(
+			`SELECT bm25(nodes_fts) FROM nodes_fts WHERE nodes_fts MATCH ?`,
+			`"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+		if err != nil {
+			return fmt.Errorf("probe MATCH %q: %w", term, err)
+		}
+		hits := 0
+		for scores.Next() {
+			var s *float64
+			if err := scores.Scan(&s); err != nil {
+				scores.Close()
+				return fmt.Errorf("probe score scan: %w", err)
+			}
+			hits++
+			if s == nil || math.IsNaN(*s) || math.IsInf(*s, 0) {
+				scores.Close()
+				return fmt.Errorf("bm25 returned NULL/NaN for term %q — index statistics are stale relative to its doclists", term)
+			}
+		}
+		if err := scores.Err(); err != nil {
+			scores.Close()
+			return fmt.Errorf("probe MATCH %q: %w", term, err)
+		}
+		scores.Close()
+		if hits > 0 {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return fmt.Errorf("nodes_fts covers %d rows but MATCHes nothing — index cannot answer a query for content it claims to hold", indexed)
 	}
 	return nil
 }
 
-// FTS5RowCount returns the number of rows in nodes_fts, or -1 when the table
-// is absent (the binary was built WITHOUT the `sqlite_fts5` build tag, so the
-// CREATE VIRTUAL TABLE … fts5 was rejected). Used by the GT_REQUIRE_FTS5
-// preflight gate in main to abort a paid run that would silently degrade to the
-// Python name-match fallback. A real, queryable FTS5 index is the first stage of
-// the localizer pipeline; we never want to pay for a run without it.
+// FTS5RowCount returns the number of documents the nodes_fts inverted index
+// actually holds, or -1 when the virtual table is absent (the binary was
+// built WITHOUT the `sqlite_fts5` build tag). Used by the GT_REQUIRE_FTS5
+// gates and by VerifyFTS5Integrity.
+//
+// It reads `nodes_fts_docsize`, the shadow table FTS5 keeps with one row per
+// indexed document, and NOT `SELECT COUNT(*) FROM nodes_fts`. On an
+// external-content table a query with no MATCH is answered from the content
+// table, so `COUNT(*) FROM nodes_fts` returns `COUNT(*) FROM nodes` whether
+// the index holds every document, a dead generation, or none at all — the
+// same trap `PropertiesFTS5RowCount` is documented against. A gate built on
+// that count asserts nothing at all.
 func (d *DB) FTS5RowCount() int {
 	var n int
-	if err := d.db.QueryRow("SELECT COUNT(*) FROM nodes_fts").Scan(&n); err != nil {
+	if err := d.db.QueryRow("SELECT COUNT(*) FROM nodes_fts_docsize").Scan(&n); err != nil {
 		return -1
 	}
 	return n

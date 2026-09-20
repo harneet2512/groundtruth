@@ -325,9 +325,15 @@ func main() {
 		// looks full, but MATCH returns 0). Rebuild the index from the CURRENT nodes here,
 		// then checkpoint so graph.db is self-contained for the preflight + artifact copy.
 		if err := db.PopulateFTS5(); err != nil {
+			if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+				log.Fatalf("rebuild-closure: GT_REQUIRE_FTS5=1 and nodes_fts re-population failed: %v", err)
+			}
 			log.Printf("[WARN] rebuild-closure: FTS5 re-population failed: %v", err)
 		}
 		if err := db.PopulatePropertiesFTS5(); err != nil {
+			if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+				log.Fatalf("rebuild-closure: GT_REQUIRE_FTS5=1 and properties FTS5 re-population failed: %v", err)
+			}
 			log.Printf("[WARN] rebuild-closure: properties FTS5 re-population failed: %v", err)
 		}
 		db.CheckpointWAL()
@@ -577,9 +583,18 @@ func main() {
 
 	// Populate FTS5 virtual table AFTER all nodes are inserted. The localizer
 	// queries nodes_fts for BM25 retrieval — gives GT at least grep-grade recall
-	// with structural ranking on top. Non-fatal: if FTS5 fails (e.g. SQLite
-	// compiled without FTS5), the Python reader falls back to name-match seeding.
+	// with structural ranking on top. Non-fatal outside a paid run: if FTS5
+	// fails (e.g. SQLite compiled without FTS5), the Python reader falls back
+	// to name-match seeding. Under GT_REQUIRE_FTS5 a graph whose index cannot
+	// be rebuilt AND verified is an abort, not a published WARN — PopulateFTS5
+	// now verifies coverage parity and a finite-bm25 probe, so a stale or
+	// desynced index (the run-35056493769 failure) is refused here rather than
+	// discovered by the consumer.
 	if err := db.PopulateFTS5(); err != nil {
+		if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_FTS5=1 and nodes_fts maintenance failed: %v — "+
+				"refusing to publish a graph whose lexical index cannot answer a scored query.", err)
+		}
 		log.Printf("WARNING: FTS5 population failed: %v", err)
 	}
 	// GT_REQUIRE_FTS5 preflight gate: on a paid benchmark we must NOT silently
@@ -1301,6 +1316,21 @@ func main() {
 		abortStagedBuild(db, stagedOutput, "foreign-key validation failed: %v", err)
 	}
 
+	// nodes_fts is rebuilt once more at the true end of the pipeline. The
+	// PopulateFTS5 after the definitions pass covers only the nodes that
+	// existed there — Pass 4/4f/4g insert their own node rows (import modules,
+	// communities, processes) afterwards, so that index always covered a
+	// prefix. COUNT(*) never showed it; the docsize-parity assertion below
+	// does. 'rebuild' is idempotent, so this second call is the authoritative
+	// populate and its internal verify is what the assertion measures.
+	if err := db.PopulateFTS5(); err != nil {
+		if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_FTS5=1 and nodes_fts final rebuild failed: %v — "+
+				"refusing to publish a graph whose lexical index cannot answer a scored query.", err)
+		}
+		log.Printf("[WARN] nodes_fts final rebuild failed: %v", err)
+	}
+
 	// properties_fts coverage at the publication boundary. Every batch writer
 	// maintains the index in its own transaction, so this is an assertion, not
 	// a repair — but it is the only place that can compare the index against
@@ -1314,6 +1344,21 @@ func main() {
 				indexed, facts)
 		}
 		log.Printf("[WARN] properties_fts covers %d of %d property rows; property_rank will under-recall", indexed, facts)
+	}
+
+	// Same coverage assertion for nodes_fts. FTS5RowCount reads
+	// nodes_fts_docsize — one row per indexed document — so a dead
+	// generation left behind by an amend (the run-35056493769 state:
+	// 190,953 index docs vs 95,644 nodes) is visible here as a mismatch
+	// even though PopulateFTS5's own verify already ran. Under
+	// GT_REQUIRE_FTS5 a mismatch aborts rather than publishes.
+	if indexed, nodes := db.FTS5RowCount(), db.NodeCount(); indexed != nodes {
+		if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+			abortStagedBuild(db, stagedOutput,
+				"GT_REQUIRE_FTS5=1 but nodes_fts covers %d of %d node rows — refusing to publish a desynced index.",
+				indexed, nodes)
+		}
+		log.Printf("[WARN] nodes_fts covers %d of %d node rows; lexical_rank will under-recall", indexed, nodes)
 	}
 
 	// Fold the WAL into graph.db so the file is SELF-CONTAINED before the process
@@ -2030,8 +2075,14 @@ func runIncremental(root, relpath, dbPath string) error {
 
 	mark("set_meta")
 	// Refresh FTS5 index after incremental node changes so BM25 queries
-	// stay current. Same call as the full-index path (idempotent).
+	// stay current. Same call as the full-index path (idempotent). Under
+	// GT_REQUIRE_FTS5 a failed refresh is a process failure, not a WARN —
+	// the incremental path writes in place, so the alternative is leaving
+	// the live graph with an index the verifier just refused.
 	if err := db.PopulateFTS5(); err != nil {
+		if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+			return fmt.Errorf("GT_REQUIRE_FTS5=1 and nodes_fts refresh failed: %w", err)
+		}
 		log.Printf("[WARN] FTS5 refresh after incremental reindex: %v", err)
 	}
 	mark("populate_fts5")
