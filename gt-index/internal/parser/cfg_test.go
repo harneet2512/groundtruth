@@ -658,3 +658,38 @@ func TestCFGUsesParamDefaultAndBoundary(t *testing.T) {
 		t.Errorf("nested-function read leaked into outer uses: %+v", fn.Uses)
 	}
 }
+
+// TestCFGLabeledStatementWhoseBodyDrainsTheLabel: a labeled statement must not
+// assume its own label is still pending when the body finishes.
+//
+// emitLabeled pushed the name onto pendingLabels and then popped one entry
+// unconditionally. takeLabels drains the whole slice to nil for the statement
+// that consumes the label, so by the time the body returned there was nothing
+// left to pop and the slice expression computed [:-1]:
+//
+//	panic: runtime error: slice bounds out of range [:-1]
+//	  parser.(*cfgBuilder).emitLabeled cfg.go:955
+//
+// That panic killed the whole index build on run 35539578563 — 184 files, one
+// labeled loop, three attempts, no graph, and GT ran blind for the task.
+func TestCFGLabeledStatementWhoseBodyDrainsTheLabel(t *testing.T) {
+	fn, _ := parseCFG(t, ".ts", "f",
+		`function f(rows: number[][]): number {
+  let total = 0;
+  outer: for (const row of rows) {
+    for (const cell of row) {
+      if (cell < 0) { continue outer; }
+      if (cell > 100) { break outer; }
+      total += cell;
+    }
+  }
+  return total;
+}`)
+
+	if len(fn.Blocks) == 0 {
+		t.Fatalf("labeled loop produced no CFG blocks")
+	}
+	if !hasDef(fn, "total") {
+		t.Errorf("expected a def for total, got defs %+v", fn.Defs)
+	}
+}

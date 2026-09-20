@@ -940,6 +940,11 @@ func (b *cfgBuilder) emitLabeled(s *sitter.Node) {
 			}
 		}
 	}
+	// Remember the depth rather than assuming this frame's label survives:
+	// takeLabels drains the whole slice to nil for the statement that
+	// consumes it, so an unconditional pop below computed [:-1] and
+	// panicked, taking the entire index build with it.
+	pendingDepth := len(b.pendingLabels)
 	b.pendingLabels = append(b.pendingLabels, name)
 	if body != nil && b.lang.blockTypes[body.Type()] {
 		// labeled block is itself breakable
@@ -952,7 +957,9 @@ func (b *cfgBuilder) emitLabeled(s *sitter.Node) {
 	} else {
 		b.emitStmtOrBlock(body)
 	}
-	b.pendingLabels = b.pendingLabels[:len(b.pendingLabels)-1]
+	if len(b.pendingLabels) > pendingDepth {
+		b.pendingLabels = b.pendingLabels[:pendingDepth]
+	}
 
 	if name != "" {
 		if mark < len(b.blocks) {
