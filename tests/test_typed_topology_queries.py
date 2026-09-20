@@ -143,6 +143,10 @@ func gofn(x int) int {
 func nocfg() int {
 	return 1
 }
+
+func gocaller(n int) int {
+	return gofn(n)
+}
 """
 
 # tsfn: straight-line function — def chain only, no control dependence.
@@ -208,6 +212,22 @@ _NODES = [
     # slice: typescript function with a persisted CFG (linear def chain)
     (25, "Function", "tsfn", "app.tsfn", "app.ts", 1, 4,
      "function tsfn(p: number): number", "number", 1, 0, "typescript"),
+    # gocaller calls gofn at line 19 — persisted interprocedural slice hop.
+    (26, "Function", "gocaller", "main.gocaller", "main.go", 18, 20,
+     "func gocaller(n int) int", "int", 1, 0, "go"),
+    # Owner-bound taint: two classes with same-named field "state" —
+    # Repo.set/get (owner Repo) must channel; Other.peek (owner Other)
+    # must NOT join Repo's writer.
+    (27, "Class", "Repo", "db.Repo", "db.py", 1, 10,
+     "class Repo", "", 0, 0, "python", None),
+    (28, "Method", "set", "db.Repo.set", "db.py", 2, 4,
+     "def set(self, v)", "", 0, 0, "python", 27),
+    (29, "Method", "get", "db.Repo.get", "db.py", 5, 7,
+     "def get(self)", "", 0, 0, "python", 27),
+    (30, "Class", "Other", "db.Other", "db.py", 11, 15,
+     "class Other", "", 0, 0, "python", None),
+    (31, "Method", "peek", "db.Other.peek", "db.py", 12, 14,
+     "def peek(self)", "", 0, 0, "python", 30),
 ]
 
 # (src, dst, type, line, file, method, tier, confidence, metadata)
@@ -229,6 +249,15 @@ _EDGES = [
      '{"v":1,"field":"payload","access":"read","line":6,"scope_name":"execute"}'),
     (5, 2, "CALLS", 6, "client.py", "import", "CERTIFIED", 1.0, ""),
     (22, 20, "CALLS", 10, "calc.py", "same_file", "CERTIFIED", 1.0, ""),
+    (26, 21, "CALLS", 19, "main.go", "same_file", "CERTIFIED", 1.0, ""),
+    # Owner-bound channel: Repo.set WRITES state, Repo.get READS state.
+    (28, 28, "WRITES", 3, "db.py", "field_write", "CERTIFIED", 1.0, "",
+     '{"v":1,"field":"state","access":"write","line":3,"scope_node_id":28}'),
+    (29, 29, "READS", 6, "db.py", "field_read", "CERTIFIED", 1.0, "",
+     '{"v":1,"field":"state","access":"read","line":6,"scope_node_id":29}'),
+    # Same field name, different owner — must never join Repo's channel.
+    (31, 31, "READS", 13, "db.py", "field_read", "CERTIFIED", 1.0, "",
+     '{"v":1,"field":"state","access":"read","line":13,"scope_node_id":31}'),
 ]
 
 # Persisted CFG rows mirroring what gt-index emits for the fixtures above.
@@ -245,6 +274,10 @@ _CFG_BLOCKS = [
     (25, 0, "entry", 1, 1, "[1]"),
     (25, 1, "exit", None, None, "[]"),
     (25, 2, "block", 2, 3, "[2, 3]"),
+    # gocaller: entry -> block(return gofn(n)) -> exit
+    (26, 0, "entry", 18, 18, "[18]"),
+    (26, 1, "exit", None, None, "[]"),
+    (26, 2, "block", 19, 19, "[19]"),
 ]
 
 # (node_id, from_block, to_block, label)
@@ -257,6 +290,8 @@ _CFG_EDGES = [
     (21, 5, 1, "end"),
     (25, 0, 2, "entry"),
     (25, 2, 1, "end"),
+    (26, 0, 2, "entry"),
+    (26, 2, 1, "end"),
 ]
 
 # (node_id, block_index, var_name, line)
@@ -267,6 +302,7 @@ _CFG_DEFS = [
     (21, 4, "a", 9),   # a = 2
     (25, 0, "p", 1),   # parameter
     (25, 2, "q", 2),   # const q = p + 1
+    (26, 0, "n", 18),  # parameter
 ]
 
 
@@ -824,3 +860,73 @@ def test_slice_intraprocedural_default_unchanged(tmp_path):
     assert "cross_function" not in sl
     assert set(sl["slice_lines"]) <= {9, 10, 11}
     assert [c["name"] for c in sl["call_sites"]] == ["calc_total"]
+
+
+def test_slice_interprocedural_persisted_cfg_composes(tmp_path):
+    """The persisted-CFG path composes through CALLS edges too:
+    gocaller's criterion pulls in gofn's return slice and maps the
+    formal x back to the caller's actual n."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "gocaller", "line": 19, "direction": "backward",
+             "interprocedural": True},
+        ),
+        _context(tmp_path, db),
+    )
+    assert artifact.semantics is EvidenceSemantics.INCOMPLETE
+    sl = _answer(artifact)["slices"][0]
+    assert sl["interprocedural"] is True
+    assert "interprocedural_unavailable:go" not in (
+        sl.get("limitations") or []
+    )
+    (hop,) = sl["cross_function"]
+    assert hop["caller_fn"] == "gocaller" and hop["callee_fn"] == "gofn"
+    assert hop["call_line"] == 19
+    # gofn's sole formal x is reached by the return slice; the actual is n.
+    assert hop["mapped_vars"] == {"x": "n"}
+    assert hop["reached_formals"] == ["x"]
+    merged = set(sl["per_file"]["main.go"])
+    assert {18, 19} <= merged          # caller: param n + the call line
+    assert 11 in merged                # callee gofn's `return a`
+
+
+def test_slice_interprocedural_persisted_cfg_bounded(tmp_path):
+    """The persisted composer honours the hop budget."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "gocaller", "line": 19, "direction": "backward",
+             "interprocedural": True, "max_hops": 0},
+        ),
+        _context(tmp_path, db),
+    )
+    sl = _answer(artifact)["slices"][0]
+    assert sl.get("cross_function") in (None, [])
+    assert any(
+        lim.startswith("hop_budget") for lim in (sl.get("limitations") or [])
+    )
+
+
+def test_taint_field_channel_owner_bound_and_mismatch_excluded(tmp_path):
+    """Same-named fields on different classes never join: Repo.set ->
+    Repo.get forms an owner_bound channel; Other.peek (different owner)
+    reading the same field name must not appear."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(ActionKind.TAINT, {"source": "set"}),
+        _context(tmp_path, db),
+    )
+    answer = _answer(artifact)
+    channels = [
+        c for c in answer["field_channels"] if c["field"] == "state"
+    ]
+    assert len(channels) == 1
+    (ch,) = channels
+    assert ch["identity"] == "owner_bound"
+    assert ch["owner"] == "db.Repo"
+    assert ch["writer"]["symbol"] == "set"
+    assert ch["reader"]["symbol"] == "get"
+    assert "field_flow_owner_bound" in artifact.omissions

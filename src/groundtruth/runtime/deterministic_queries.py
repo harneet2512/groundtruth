@@ -57,7 +57,7 @@ _ALLOWED_ARGUMENTS: Mapping[ActionKind, frozenset[str]] = {
     ActionKind.RENAME: frozenset({"symbol", "new_name", "path", "language"}),
     ActionKind.SHAPE_CHECK: frozenset({"symbol", "path", "language"}),
     ActionKind.TOOL_MAP: frozenset({"path", "language"}),
-    ActionKind.SLICE: frozenset({"symbol", "line", "direction", "path", "language", "variables", "interprocedural"}),
+    ActionKind.SLICE: frozenset({"symbol", "line", "direction", "path", "language", "variables", "interprocedural", "max_hops", "max_depth"}),
 }
 
 
@@ -1214,21 +1214,45 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
 
         # Field-mediated channels: a WRITES(f) → READS(f) pair is a data
         # channel CALLS cannot see (e.g. source writes request field, sink
-        # reads it). Name-matched on the field — not type-proven — so flagged.
+        # reads it). Field identity binds on (field, owner class) — the
+        # enclosing type resolved through parent_id — so same-name fields on
+        # different classes and cross-file collisions never form channels.
+        # Sites whose owner cannot be resolved join weaker (field+file) and
+        # keep the name-matched flag.
         nodes_by_id = {
             int(r[0]): {"name": str(r[1] or ""), "file_path": str(r[2] or ""),
                         "language": str(r[3] or ""), "start_line": int(r[4] or 0),
-                        "end_line": int(r[5] or 0)}
+                        "end_line": int(r[5] or 0), "label": str(r[6] or ""),
+                        "parent_id": (int(r[7]) if r[7] is not None else None),
+                        "qualified_name": str(r[8] or "")}
             for r in conn.execute(
                 "SELECT id, name, file_path, COALESCE(language,''),"
-                " COALESCE(start_line,0), COALESCE(end_line,0) FROM nodes"
+                " COALESCE(start_line,0), COALESCE(end_line,0),"
+                " COALESCE(label,''), parent_id, COALESCE(qualified_name,'')"
+                " FROM nodes"
             )
         }
         name_to_ids: dict[str, list[int]] = {}
         for nid, n in nodes_by_id.items():
             name_to_ids.setdefault(n["name"], []).append(nid)
-        field_writers: dict[str, list[dict[str, Any]]] = {}
-        field_readers: dict[str, list[dict[str, Any]]] = {}
+
+        def _owner_key(scope_node_id: int | None, fallback_id: int) -> str | None:
+            """Field owner identity: innermost Class ancestor of the access
+            scope (``self.f``/``this.f`` binds to the enclosing type), keyed
+            by qualified name else ``file::name``.  ``None`` = unresolvable
+            owner — those channels join weaker and are flagged."""
+            cur = scope_node_id if scope_node_id in nodes_by_id else fallback_id
+            depth = 0
+            while cur in nodes_by_id and depth < 12:
+                n = nodes_by_id[cur]
+                if n["label"] == "Class":
+                    return n["qualified_name"] or f"{n['file_path']}::{n['name']}"
+                cur = n["parent_id"]
+                depth += 1
+            return None
+
+        field_writers: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
+        field_readers: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
         for row in conn.execute(
             "SELECT e.type, e.source_id, e.access_sites FROM edges e"
             " WHERE e.type IN ('READS','WRITES')"
@@ -1246,26 +1270,43 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
                 "file_path": nodes_by_id.get(int(row[1]), {}).get("file_path", "?"),
                 "line": site.get("line"),
             }
+            scope_raw = site.get("scope_node_id")
+            scope_id = int(scope_raw) if isinstance(scope_raw, int) else None
+            owner = _owner_key(scope_id, int(row[1]))
             (field_writers if row[0] == "WRITES" else field_readers).setdefault(
-                field, []
+                (field, owner), []
             ).append(rec)
         data_channels: list[dict[str, Any]] = []
-        for field in sorted(set(field_writers) & set(field_readers)):
-            for w in field_writers[field][:5]:
-                for r in field_readers[field][:5]:
-                    data_channels.append(
-                        {
-                            "field": field,
-                            "writer": w,
-                            "reader": r,
-                            "same_file": w["file_path"] == r["file_path"],
-                        }
-                    )
+        # Join rule: two resolved owners must match (same-name fields on
+        # different classes never form a channel); an unresolved side joins
+        # weaker so cross-file flows still surface, flagged owner_unknown.
+        for (field, owner_w), ws in field_writers.items():
+            for (field_r, owner_r), rs in field_readers.items():
+                if field_r != field:
+                    continue
+                if owner_w is not None and owner_r is not None and owner_w != owner_r:
+                    continue
+                bound = owner_w is not None and owner_w == owner_r
+                for w in ws[:5]:
+                    for r in rs[:5]:
+                        data_channels.append(
+                            {
+                                "field": field,
+                                "owner": owner_w if bound else None,
+                                "identity": "owner_bound" if bound else "owner_unknown",
+                                "writer": w,
+                                "reader": r,
+                                "same_file": w["file_path"] == r["file_path"],
+                            }
+                        )
         data_channels.sort(
-            key=lambda c: (c["field"], c["writer"]["symbol"], c["reader"]["symbol"])
+            key=lambda c: (str(c["field"]), str(c["owner"]),
+                           c["writer"]["symbol"], c["reader"]["symbol"])
         )
         del data_channels[25:]
-        if field_writers or field_readers:
+        if any(c["identity"] == "owner_bound" for c in data_channels):
+            omissions.append("field_flow_owner_bound")
+        if any(c["identity"] == "owner_unknown" for c in data_channels):
             omissions.append("field_flow_name_matched")
 
         # Per-hop statement evidence: for Python hops, the CALLS edge's
@@ -1662,11 +1703,13 @@ def _slice(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
     made when the analysis is complete.
 
     With ``interprocedural: true`` the slice composes through graph.db CALLS
-    edges (bounded: max_depth 3, 25 cross-hops; Python only — the
-    persisted-CFG path reports ``interprocedural_unavailable:<lang>``).
-    Argument mapping is name/positional — never type-proven — so
-    interprocedural results are always INCOMPLETE
-    (``interprocedural_name_matched``).
+    edges (bounded: max_depth 3, 25 cross-hops).  Python composes over the
+    AST substrate; the persisted-CFG languages compose over cfg_* rows via
+    ``cfg_store.interprocedural_slice_stored`` — positional actual→formal
+    binding from persisted param defs with text-extracted actuals
+    (``approximate_actual_extraction``).  Argument mapping is
+    name/positional — never type-proven — so interprocedural results are
+    always INCOMPLETE (``interprocedural_name_matched``).
     """
     conn = _open_graph(context)
     if conn is None:
@@ -1676,7 +1719,11 @@ def _slice(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
         interprocedural_slice,
         slice_at_line,
     )
-    from .cfg_store import has_persisted_cfg, slice_stored
+    from .cfg_store import (
+        has_persisted_cfg,
+        interprocedural_slice_stored,
+        slice_stored,
+    )
 
     with conn:
         args = request.arguments
@@ -1702,6 +1749,18 @@ def _slice(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
         if not isinstance(variables, list):
             variables = None
         interprocedural = bool(args.get("interprocedural"))
+        try:
+            max_hops = int(args.get("max_hops"))
+            if max_hops < 0:
+                max_hops = 25
+        except (TypeError, ValueError):
+            max_hops = 25
+        try:
+            max_depth = int(args.get("max_depth"))
+            if max_depth < 1:
+                max_depth = 3
+        except (TypeError, ValueError):
+            max_depth = 3
 
         def _resolve_callees(
             file: str, function: str, call_line: int
@@ -1823,9 +1882,24 @@ def _slice(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
             if lang != "python":
                 record["substrate"] = "persisted_cfg"
             if interprocedural and lang != "python":
-                # The composition machinery is ast-bound; the persisted-CFG
-                # path stays intraprocedural and says so.
-                omissions.append(f"interprocedural_unavailable:{lang}")
+                try:
+                    ip = interprocedural_slice_stored(
+                        conn,
+                        _RepoSources(context.repository_root),
+                        node["id"],
+                        line,
+                        direction,
+                        source=source_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        ),
+                        function_name=node["name"],
+                        language=lang,
+                        max_depth=max_depth,
+                        max_hops=max_hops,
+                    )
+                except CFGAnalysisError as exc:
+                    omissions.append(f"analysis_failed:{node['name']}:{exc}")
+                    continue
             elif interprocedural:
                 try:
                     ip = interprocedural_slice(
@@ -1835,12 +1909,14 @@ def _slice(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
                         node["name"],
                         line,
                         direction,
-                        max_hops=25,
+                        max_hops=max_hops,
+                        max_depth=max_depth,
                         entry_def_line=node["start_line"],
                     )
                 except CFGAnalysisError as exc:
                     omissions.append(f"analysis_failed:{node['name']}:{exc}")
                     continue
+            if interprocedural:
                 record["interprocedural"] = True
                 record["per_file"] = ip["per_file"]
                 record["cross_function"] = ip["cross_function"]

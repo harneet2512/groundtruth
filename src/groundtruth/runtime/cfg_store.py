@@ -927,6 +927,511 @@ def _call_sites(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Interprocedural composition over persisted CFGs.
+# ---------------------------------------------------------------------------
+
+_RETURN_RE = re.compile(r"^\s*return\b")
+_SUPPORTED_INTERPROC = frozenset(
+    {"javascript", "typescript", "java", "go"}
+)
+
+
+def _return_items(
+    cfg: StoredCFG, clean: Sequence[str]
+) -> list[_Item]:
+    """Statement items whose text is a ``return`` — the stored analogue of
+    ``cfg_analysis._return_lines`` (AST Return nodes)."""
+    out: list[_Item] = []
+    for bid in sorted(cfg.blocks):
+        blk = cfg.blocks[bid]
+        if blk.kind == "entry":
+            continue
+        for item in blk.statements:
+            for ln in cfg.item_scan_lines.get(item, ()):
+                if 0 < ln <= len(clean) and _RETURN_RE.search(clean[ln - 1]):
+                    out.append(item)
+                    break
+    return out
+
+
+def _last_item_line(cfg: StoredCFG) -> int:
+    lines = [
+        item[1]
+        for bid in sorted(cfg.blocks)
+        if cfg.blocks[bid].kind != "entry"
+        for item in cfg.blocks[bid].statements
+    ]
+    return max(lines) if lines else cfg.def_line
+
+
+def _split_actuals(call_name: str, call_line: int, clean: Sequence[str]) -> list[str] | None:
+    """Actual argument expressions of ``call_name(...)`` on ``call_line``.
+
+    Locates the first ``call_name(`` occurrence on the line, paren-matches
+    the argument list, and splits top-level commas — nested parens,
+    brackets, braces, and string literals are depth/string aware.  This is
+    textual, not AST: ``approximate_actual_extraction`` always applies.
+    Returns ``None`` when the call site cannot be located on the line.
+    """
+    if not (0 < call_line <= len(clean)):
+        return None
+    text = clean[call_line - 1]
+    tail = call_name.rsplit(".", 1)[-1]
+    m = re.search(r"(?<![\w$])" + re.escape(tail) + r"\s*\(", text)
+    if m is None:
+        # Callable-value flow: the textual callee differs from the resolved
+        # target (``cb()`` bound to ``goHelper``).  Fall back to the first
+        # call-shaped identifier on the line — the graph edge already proved
+        # this line's call resolves to the callee.
+        m = next(
+            (
+                mm
+                for mm in _CALL_RE.finditer(text)
+                if mm.group(1).split(".", 1)[0] not in _CALL_STOP
+            ),
+            None,
+        )
+        if m is None:
+            return None
+    i = text.index("(", m.start())
+    depth = 0
+    in_str: str | None = None
+    arg_start = i + 1
+    args: list[str] = []
+    j = i
+    while j < len(text):
+        ch = text[j]
+        if in_str is not None:
+            if ch == "\\":
+                j += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                args.append(text[arg_start:j].strip())
+                return [a for a in args if a]
+        elif ch == "," and depth == 1:
+            args.append(text[arg_start:j].strip())
+            arg_start = j + 1
+        j += 1
+    return None
+
+
+def _actual_vars(expr: str, non_use: frozenset[str]) -> list[str]:
+    """Identifier names read by one actual expression — the stored analogue
+    of ``cfg_analysis._loads`` (AST Name/Attribute loads)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _CHAIN_RE.finditer(expr):
+        chain = m.group(0)
+        for pref in _prefixes(chain):
+            if pref not in non_use and pref not in seen:
+                seen.add(pref)
+                out.append(pref)
+    return out
+
+
+def _formal_defs(conn: sqlite3.Connection, node_id: int) -> list[tuple[str, int]]:
+    """Parameter-like defs of a persisted function, in declaration order:
+    cfg_defs rows in the entry block (block_index 0), first occurrence wins.
+    ``cfg.params`` is sorted for the public API; hops need source order."""
+    rows = conn.execute(
+        "SELECT var_name, line FROM cfg_defs"
+        " WHERE node_id = ? AND block_index = 0 ORDER BY id",
+        (node_id,),
+    ).fetchall()
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for name, ln in rows:
+        name = str(name)
+        if name not in seen:
+            seen.add(name)
+            out.append((name, int(ln)))
+    return out
+
+
+def _formal_reached_stored(
+    analysis: StoredAnalysis,
+    formal_key: tuple[str, int],
+    covered: set[_Item],
+) -> bool:
+    """True when any use of the formal (def key ``(name, line)``) lands on a
+    covered item — the stored analogue of ``_formal_reached``."""
+    use_items = _items_by_use_key(analysis.cfg)
+    for uk in analysis.chains.def_to_uses.get(formal_key, ()):
+        if any(it in covered for it in use_items.get(uk, ())):
+            return True
+    return False
+
+
+def interprocedural_slice_stored(
+    conn: sqlite3.Connection,
+    source_texts: object,
+    entry_node_id: int,
+    line: int,
+    direction: str = "backward",
+    *,
+    source: str,
+    function_name: str,
+    language: str,
+    max_depth: int = 3,
+    max_hops: int | None = None,
+) -> dict[str, object]:
+    """Bounded interprocedural slice composition over persisted CFGs —
+    the cfg_store analogue of ``cfg_analysis.interprocedural_slice``.
+
+    Hops compose through graph.db CALLS edges (``source_id`` +
+    ``source_line`` → target node), which are exactly the resolved call
+    sites — no text re-scan for target resolution.  Argument mapping is
+    positional against the callee's persisted parameter defs; actual
+    expressions and uses are text-extracted
+    (``approximate_actual_extraction`` on top of the substrate's
+    ``approximate_use_detection``).  Only callees that also carry a
+    persisted CFG and a supported language are composed; everything else is
+    a named limitation, never silently inlined.
+
+    Same bounds as the AST version: ``max_depth`` (``max_depth_cut``),
+    a ``(caller, call_line, callee)`` visited set (``recursion_cut``), and
+    ``max_hops`` (``hop_budget`` + ``truncated``).
+    """
+    if direction not in {"backward", "forward"}:
+        raise CFGAnalysisError(
+            f"direction must be 'backward' or 'forward', got {direction!r}"
+        )
+    try:
+        max_depth = int(max_depth)
+    except (TypeError, ValueError):
+        max_depth = 3
+
+    limitations: list[str] = []
+
+    def _lim(key: str) -> None:
+        if key not in limitations:
+            limitations.append(key)
+
+    def _text(file: str) -> str | None:
+        get = getattr(source_texts, "get", None)
+        if get is not None:
+            try:
+                return get(file)
+            except Exception:
+                return None
+        try:
+            return source_texts[file]  # type: ignore[index]
+        except Exception:
+            return None
+
+    _clean_cache: dict[str, list[str]] = {}
+
+    def _clean(file: str) -> list[str]:
+        if file not in _clean_cache:
+            _clean_cache[file] = _clean_source((_text(file) or "").splitlines())
+        return _clean_cache[file]
+
+    _nodes: dict[int, tuple[str, str, str, int, int] | None] = {}
+
+    def _node(node_id: int) -> tuple[str, str, str, int, int] | None:
+        """(file, name, language, start_line, end_line) for a node id."""
+        if node_id not in _nodes:
+            row = conn.execute(
+                "SELECT file_path, name, language, start_line, end_line"
+                " FROM nodes WHERE id = ?",
+                (node_id,),
+            ).fetchone()
+            _nodes[node_id] = (
+                (
+                    str(row[0]),
+                    str(row[1]),
+                    str(row[2] or "").strip().lower(),
+                    int(row[3] or 0),
+                    int(row[4] or 0),
+                )
+                if row
+                else None
+            )
+        return _nodes[node_id]
+
+    _analyses: dict[int, StoredAnalysis | None] = {}
+
+    def _analysis(node_id: int) -> StoredAnalysis | None:
+        if node_id not in _analyses:
+            info = _node(node_id)
+            text = _text(info[0]) if info is not None else None
+            if info is None or text is None:
+                _analyses[node_id] = None
+            else:
+                try:
+                    _analyses[node_id] = analyze_stored(
+                        conn,
+                        node_id,
+                        source=text,
+                        function_name=info[1],
+                        language=info[2],
+                    )
+                except CFGAnalysisError:
+                    _analyses[node_id] = None
+        return _analyses[node_id]
+
+    def _callees(caller_node_id: int, call_line: int) -> list[int]:
+        """Resolved CALLS targets at ``call_line`` — node ids, sorted."""
+        return [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT DISTINCT e.target_id FROM edges e"
+                " WHERE e.source_id = ? AND e.type = 'CALLS'"
+                " AND e.source_line = ? ORDER BY e.target_id",
+                (caller_node_id, int(call_line)),
+            )
+        ]
+
+    def _call_lines_in(analysis: StoredAnalysis, covered: set[_Item]) -> list[int]:
+        covered_lines = {it[1] for it in covered}
+        return [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT DISTINCT source_line FROM edges"
+                " WHERE source_id = ? AND type = 'CALLS'"
+                " AND source_line IS NOT NULL ORDER BY source_line",
+                (analysis.node_id,),
+            )
+            if int(r[0]) in covered_lines
+        ]
+
+    entry_info = _node(int(entry_node_id))
+    if entry_info is None:
+        raise CFGAnalysisError(f"entry node {entry_node_id} not found")
+    entry_analysis = _analysis(int(entry_node_id))
+    if entry_analysis is None:
+        raise CFGAnalysisError(
+            f"entry function {function_name!r} has no analyzable persisted CFG"
+        )
+
+    per_file: dict[str, set[int]] = {}
+    cross: list[dict[str, object]] = []
+    visited: set[tuple[int, int, int]] = set()
+    truncated = False
+
+    # Worklist: (node_id, kind, payload, depth, hop).
+    #   "entry"  -> payload = criterion line
+    #   "callee" -> payload = (mapping formal_key->actual expr,
+    #               (caller_node_id, call_line))
+    worklist: list[tuple[int, str, object, int, dict | None]] = [
+        (int(entry_node_id), "entry", int(line), 0, None)
+    ]
+    while worklist:
+        node_id, kind, payload, depth, hop = worklist.pop()
+        info = _node(node_id)
+        analysis = _analysis(node_id)
+        if info is None or analysis is None:
+            _lim(f"callee_analysis_failed:{node_id}")
+            if hop is not None:
+                hop["callee_slice_lines"] = []
+            continue
+        file, fn, lang = info[0], info[1], info[2]
+        for lim in analysis.limitations:
+            _lim(lim)
+        clean = _clean(file)
+        non_use = _LANG_KEYWORDS.get(lang, _COMMON_KEYWORDS)
+
+        forward_reached: list[str] = []
+        if kind == "entry":
+            seeds = analysis.cfg.statements_at_line(int(payload))  # type: ignore[arg-type]
+            if not seeds:
+                raise CFGAnalysisError(f"no statement covers line {payload}")
+            if direction == "backward":
+                included = _backward_included(
+                    analysis.cfg, analysis.chains, seeds,
+                    analysis.control_dependence,
+                )
+            else:
+                included = _forward_included(
+                    analysis.cfg, analysis.chains, seeds,
+                    analysis.control_dependence,
+                )
+        elif direction == "backward":
+            ret = _return_items(analysis.cfg, clean)
+            if not ret:
+                ret = analysis.cfg.statements_at_line(
+                    _last_item_line(analysis.cfg)
+                )
+            included = _backward_included(
+                analysis.cfg, analysis.chains, ret, analysis.control_dependence
+            )
+        else:
+            mapping = payload[0]  # type: ignore[index]
+            ret_set = {
+                it[1] for it in _return_items(analysis.cfg, clean)
+            } or {_last_item_line(analysis.cfg)}
+            use_items = _items_by_use_key(analysis.cfg)
+            included = set()
+            for formal_key in sorted(mapping):
+                f_seeds: list[_Item] = []
+                for uk in analysis.chains.def_to_uses.get(formal_key, ()):
+                    f_seeds.extend(use_items.get(uk, ()))
+                f_inc = _forward_included(
+                    analysis.cfg,
+                    analysis.chains,
+                    f_seeds,
+                    analysis.control_dependence,
+                )
+                if {it[1] for it in f_inc} & ret_set:
+                    forward_reached.append(formal_key[0])
+                included |= f_inc
+
+        covered = set(included)
+        lines = {it[1] for it in included}
+        per_file.setdefault(file, set()).update(lines)
+
+        if kind == "callee" and hop is not None:
+            mapping, caller = payload  # type: ignore[misc]
+            caller_node_id, call_line = caller
+            if direction == "backward":
+                reached = sorted(
+                    key[0]
+                    for key in mapping
+                    if _formal_reached_stored(analysis, key, covered)
+                )
+                hop["reached_formals"] = reached
+                caller_analysis = _analysis(caller_node_id)
+                if caller_analysis is not None:
+                    caller_info = _node(caller_node_id)
+                    def_items = _items_by_def_key(caller_analysis.cfg)
+                    for key, actual in mapping.items():
+                        if key[0] not in reached:
+                            continue
+                        for v in _actual_vars(actual, non_use):
+                            # Uses of the actual's vars at/near the call
+                            # line resolve to caller defs through chains.
+                            for (uname, uline), dk in list(
+                                caller_analysis.chains.use_to_defs.items()
+                            ):
+                                if uname != v:
+                                    continue
+                                for dkey in dk:
+                                    for it in def_items.get(dkey, ()):
+                                        per_file.setdefault(
+                                            caller_info[0], set()
+                                        ).add(it[1])
+            else:
+                hop["reached_formals"] = forward_reached
+                hop["reaches_return"] = bool(forward_reached)
+            hop["callee_slice_lines"] = sorted(lines)
+
+        call_lines = _call_lines_in(analysis, covered)
+        if not call_lines:
+            continue
+        if depth >= max_depth:
+            _lim("max_depth_cut")
+            continue
+        for cline in call_lines:
+            targets = _callees(node_id, cline)
+            if not targets:
+                _lim(f"callee_unresolved:{cline}")
+                continue
+            for c_id in targets:
+                c_info = _node(c_id)
+                if c_info is None:
+                    _lim("callee_target_malformed")
+                    continue
+                c_file, c_fn, c_lang, c_def = (
+                    c_info[0],
+                    c_info[1],
+                    c_info[2],
+                    c_info[3],
+                )
+                if c_lang not in _SUPPORTED_INTERPROC:
+                    _lim(f"callee_language_unsupported:{c_lang or 'unknown'}")
+                    continue
+                if not has_persisted_cfg(conn, c_id):
+                    _lim(f"callee_cfg_absent:{c_fn}")
+                    continue
+                if max_hops is not None and len(cross) >= max_hops:
+                    truncated = True
+                    _lim("hop_budget")
+                    break
+                hkey = (node_id, cline, c_id)
+                if hkey in visited:
+                    _lim("recursion_cut")
+                    continue
+                visited.add(hkey)
+                if _text(c_file) is None:
+                    _lim(f"callee_source_unavailable:{c_file}")
+                    continue
+                # Positional actual->formal binding over the callee's
+                # persisted parameter defs (declaration order).
+                actuals = _split_actuals(c_fn, cline, _clean(file))
+                if actuals is None:
+                    _lim(f"actuals_unmapped:{c_fn}")
+                    actuals = []
+                formals = _formal_defs(conn, c_id)
+                if len(actuals) > len(formals):
+                    _lim("actuals_unmapped")
+                mapping: dict[tuple[str, int], str] = {
+                    formals[i]: actuals[i]
+                    for i in range(min(len(formals), len(actuals)))
+                }
+                _lim("interprocedural_summary")
+                _lim("approximate_actual_extraction")
+                call_items = analysis.cfg.statements_at_line(cline)
+                call_defs: list[str] = []
+                for it in call_items:
+                    call_defs.extend(d.name for d in analysis.cfg.effects(it)[0])
+                hop2: dict[str, object] = {
+                    "caller_file": file,
+                    "caller_fn": fn,
+                    "call_line": cline,
+                    "call_name": c_fn,
+                    "callee_file": c_file,
+                    "callee_fn": c_fn,
+                    "callee_def_line": c_def,
+                    "mapped_vars": {
+                        key[0]: actual for key, actual in sorted(mapping.items())
+                    },
+                    "result_vars": sorted(set(call_defs)),
+                    "callee_slice_lines": [],
+                }
+                cross.append(hop2)
+                worklist.append(
+                    (
+                        c_id,
+                        "callee",
+                        (mapping, (node_id, cline)),
+                        depth + 1,
+                        hop2,
+                    )
+                )
+
+    cross.sort(
+        key=lambda h: (
+            str(h["caller_file"]),
+            str(h["caller_fn"]),
+            int(h["call_line"]),  # type: ignore[arg-type]
+            str(h["callee_file"]),
+            str(h["callee_fn"]),
+        )
+    )
+    return {
+        "entry": {
+            "file": entry_info[0],
+            "function": entry_info[1],
+            "line": int(line),
+            "direction": direction,
+            "max_depth": max_depth,
+            "substrate": "persisted_cfg",
+        },
+        "per_file": {p: sorted(ls) for p, ls in sorted(per_file.items())},
+        "cross_function": cross,
+        "limitations": limitations,
+        "truncated": truncated,
+    }
+
+
 def slice_stored(
     conn: sqlite3.Connection,
     node_id: int,
@@ -986,6 +1491,7 @@ __all__ = [
     "backward_slice",
     "forward_slice",
     "has_persisted_cfg",
+    "interprocedural_slice_stored",
     "load_stored_cfg",
     "slice_stored",
 ]
