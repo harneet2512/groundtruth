@@ -66,7 +66,12 @@ func TestCFGRoundTrip(t *testing.T) {
 		{NodeID: 1, BlockIndex: 3, VarName: "total", Line: 47},
 	}
 	d := &DB{db: db}
-	if err := d.ReplaceCFG(blocks, edges, defs); err != nil {
+	uses := []*CFGUse{
+		{NodeID: 1, BlockIndex: 0, VarName: "n", Line: 44},
+		{NodeID: 1, BlockIndex: 2, VarName: "items", Line: 46},
+		{NodeID: 1, BlockIndex: 3, VarName: "total", Line: 47},
+	}
+	if err := d.ReplaceCFG(blocks, edges, defs, uses); err != nil {
 		t.Fatalf("ReplaceCFG: %v", err)
 	}
 
@@ -78,6 +83,9 @@ func TestCFGRoundTrip(t *testing.T) {
 	}
 	if n := countRows(t, db, `SELECT count(*) FROM cfg_defs WHERE node_id=1`); n != 3 {
 		t.Fatalf("cfg_defs rows=%d want 3", n)
+	}
+	if n := countRows(t, db, `SELECT count(*) FROM cfg_uses WHERE node_id=1`); n != 3 {
+		t.Fatalf("cfg_uses rows=%d want 3", n)
 	}
 
 	// verify column fidelity on one block and one edge
@@ -147,6 +155,10 @@ func TestCFGReparseCleanup(t *testing.T) {
 			{NodeID: 1, BlockIndex: 0, VarName: "x", Line: 1},
 			{NodeID: 2, BlockIndex: 0, VarName: "y", Line: 1},
 		},
+		[]*CFGUse{
+			{NodeID: 1, BlockIndex: 0, VarName: "src", Line: 1},
+			{NodeID: 2, BlockIndex: 0, VarName: "src", Line: 1},
+		},
 	); err != nil {
 		t.Fatalf("ReplaceCFG: %v", err)
 	}
@@ -172,6 +184,7 @@ func TestCFGReparseCleanup(t *testing.T) {
 		[]*CFGBlock{{NodeID: newID, BlockIndex: 0, Kind: "entry", StartLine: 1, EndLine: 1, StatementLines: "[1]"}},
 		[]*CFGEdge{{NodeID: newID, FromBlock: 0, ToBlock: 1, Label: "entry"}},
 		[]*CFGDef{{NodeID: newID, BlockIndex: 0, VarName: "z", Line: 1}},
+		[]*CFGUse{{NodeID: newID, BlockIndex: 0, VarName: "src", Line: 1}},
 	); err != nil {
 		tx.Rollback()
 		t.Fatalf("InsertCFGTx: %v", err)
@@ -193,6 +206,16 @@ func TestCFGReparseCleanup(t *testing.T) {
 		`SELECT count(*) FROM cfg_defs WHERE node_id=? AND var_name='z'`, newID); n != 1 {
 		t.Fatalf("cfg_defs for new node: %d", n)
 	}
+	// cfg_uses follows the same per-file retirement: a.ts's stale use row
+	// is gone, the fresh one persists, b.ts's is untouched.
+	if n := countRows(t, db,
+		`SELECT count(*) FROM cfg_uses WHERE node_id=1`); n != 0 {
+		t.Fatalf("stale cfg_uses for a.ts: %d", n)
+	}
+	if n := countRows(t, db,
+		`SELECT count(*) FROM cfg_uses WHERE node_id=? AND var_name='src'`, newID); n != 1 {
+		t.Fatalf("cfg_uses for new node: %d", n)
+	}
 	// b.ts rows untouched
 	if n := countRows(t, db, `SELECT count(*) FROM cfg_blocks WHERE node_id=2`); n != 1 {
 		t.Fatalf("b.ts cfg_blocks clobbered: %d", n)
@@ -211,10 +234,10 @@ func TestCFGReparseCleanup(t *testing.T) {
 func TestCFGEmptyReplace(t *testing.T) {
 	db := cfgTestDB(t)
 	d := &DB{db: db}
-	if err := d.ReplaceCFG(nil, nil, nil); err != nil {
+	if err := d.ReplaceCFG(nil, nil, nil, nil); err != nil {
 		t.Fatalf("ReplaceCFG empty: %v", err)
 	}
-	for _, table := range []string{"cfg_blocks", "cfg_edges", "cfg_defs"} {
+	for _, table := range []string{"cfg_blocks", "cfg_edges", "cfg_defs", "cfg_uses"} {
 		if n := countRows(t, db, `SELECT count(*) FROM `+table); n != 0 {
 			t.Fatalf("%s not empty after empty replace: %d", table, n)
 		}

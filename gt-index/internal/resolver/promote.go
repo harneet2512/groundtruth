@@ -180,10 +180,11 @@ type fnlKey struct {
 var (
 	// 'partner:<name>@file:<line>|sig:...'  (CO_SERIALIZES)
 	serdePartnerRe = regexp.MustCompile(`^partner:([^@]+)@file:(\d+)`)
-	// 'reads: <prefix>.<field> [<ctx>]'  (READS) — capture the trailing field.
-	fieldReadRe = regexp.MustCompile(`^reads:\s*[A-Za-z_][\w.]*\.(\w+)`)
+	// 'reads: <recv>.<field> [<ctx>]'  (READS) — capture receiver chain AND the
+	// trailing field so the access-site payload can carry receiver identity.
+	fieldReadRe = regexp.MustCompile(`^reads:\s*([A-Za-z_][\w.]*)\.(\w+)`)
 	// 'mutates: <recv>.<field> = ...'  (WRITES)
-	fieldWriteRe = regexp.MustCompile(`^mutates:\s*[A-Za-z_][\w]*\.(\w+)`)
+	fieldWriteRe = regexp.MustCompile(`^mutates:\s*([A-Za-z_][\w]*)\.(\w+)`)
 	// 'WHEN ...: raise <Type>(...)'  (RAISES from exception_flow, Python). Capture the
 	// FULL dotted token (`[\w.]*`) so a qualified name (errors.New) reaches the drop-dotted
 	// guard intact instead of being silently truncated to its module prefix.
@@ -729,11 +730,14 @@ func (idx *promoteIndexes) fnlAnyFile(name string, line int) int64 {
 // never fabricated.
 // ---------------------------------------------------------------------------
 
-// accessSiteEntry is one captured field access: the field touched and the
-// statement line it happens on.
+// accessSiteEntry is one captured field access: the field touched, the
+// statement line it happens on, and the receiver chain it was read/written
+// through (``self``/``this``/named receiver — empty only when the producer
+// could not name one).
 type accessSiteEntry struct {
-	Field string `json:"field"`
-	Line  int    `json:"line"`
+	Field    string `json:"field"`
+	Line     int    `json:"line"`
+	Receiver string `json:"receiver,omitempty"`
 }
 
 // edgeAccessMeta is the JSON payload written to edges.access_sites on a
@@ -746,6 +750,7 @@ type edgeAccessMeta struct {
 	ScopeNodeID   int64             `json:"scope_node_id"` // == edges.source_id (enclosing method)
 	ScopeName     string            `json:"scope_name"`    // enclosing method name
 	ScopeStableID string            `json:"scope_stable_id,omitempty"`
+	Receiver      string            `json:"receiver,omitempty"` // primary site's receiver chain
 	Sites         []accessSiteEntry `json:"sites"`
 }
 
@@ -768,20 +773,21 @@ func newAccessSiteAccum() *accessSiteAccum {
 // primary (field/line/scope) — the same row add()'s first-writer-wins dedup
 // mints the edge from, since forEachProperty streams a fixed content order and
 // add() marks the key seen on that first call.
-func (a *accessSiteAccum) add(key edgeKey, field, access string, line int, src promoteNodeMeta) {
+func (a *accessSiteAccum) add(key edgeKey, field, access, receiver string, line int, src promoteNodeMeta) {
 	m, ok := a.byKey[key]
 	if !ok {
 		m = &edgeAccessMeta{
-			V:           1,
+			V:           2,
 			Field:       field,
 			Access:      access,
 			Line:        line,
 			ScopeNodeID: src.ID,
 			ScopeName:   src.Name,
+			Receiver:    receiver,
 		}
 		a.byKey[key] = m
 	}
-	e := accessSiteEntry{Field: field, Line: line}
+	e := accessSiteEntry{Field: field, Line: line, Receiver: receiver}
 	if a.seen[key] == nil {
 		a.seen[key] = make(map[accessSiteEntry]bool)
 	}
@@ -829,7 +835,7 @@ func promoteFieldReads(db *store.DB, idx *promoteIndexes, add addEdgeFunc) (map[
 		if m == nil {
 			return
 		}
-		field := m[1]
+		receiver, field := m[1], m[2]
 		src, ok := idx.byID[nodeID]
 		if !ok {
 			return
@@ -851,7 +857,7 @@ func promoteFieldReads(db *store.DB, idx *promoteIndexes, add addEdgeFunc) (map[
 			field, src.FilePath, line, false)
 		if nodeID != 0 && cls.ID != 0 && nodeID != cls.ID { // mirror add()'s non-invention guard
 			sites.add(edgeKey{sourceID: nodeID, targetID: cls.ID, typ: "READS"},
-				field, "read", line, src)
+				field, "read", receiver, line, src)
 		}
 	})
 	return sites.marshal(idx), err
@@ -874,7 +880,7 @@ func promoteWrites(db *store.DB, idx *promoteIndexes, add addEdgeFunc) (map[edge
 		if m == nil {
 			return // side_effect value with no resolvable field/target -> STAY property
 		}
-		field := m[1]
+		receiver, field := m[1], m[2]
 		src, ok := idx.byID[nodeID]
 		if !ok {
 			return
@@ -892,7 +898,7 @@ func promoteWrites(db *store.DB, idx *promoteIndexes, add addEdgeFunc) (map[edge
 			field, src.FilePath, line, false)
 		if nodeID != 0 && cls.ID != 0 && nodeID != cls.ID { // mirror add()'s non-invention guard
 			sites.add(edgeKey{sourceID: nodeID, targetID: cls.ID, typ: "WRITES"},
-				field, "write", line, src)
+				field, "write", receiver, line, src)
 		}
 	})
 	return sites.marshal(idx), err

@@ -516,3 +516,145 @@ func TestCFGThrowRoutesToCatch(t *testing.T) {
 		t.Errorf("uncaught throw missing 'throw' edge: %+v", fn3.Edges)
 	}
 }
+
+// ── cfg_uses (v15.3) ────────────────────────────────────────────────────────
+
+func hasUse(fn CFGFunc, varName string) bool {
+	for _, u := range fn.Uses {
+		if u.VarName == varName {
+			return true
+		}
+	}
+	return false
+}
+
+func usesOnBlock(fn CFGFunc, blk int) map[string]bool {
+	out := map[string]bool{}
+	for _, u := range fn.Uses {
+		if u.BlockIndex == blk {
+			out[u.VarName] = true
+		}
+	}
+	return out
+}
+
+// TestCFGUsesDefReadSeparation: assignments define, conditions and returns
+// read — a plain `=` LHS is never a use.
+func TestCFGUsesDefReadSeparation(t *testing.T) {
+	fn, _ := parseCFG(t, ".go", "gofn",
+		`package main
+
+func gofn(x int) int {
+	a := 0
+	if x > 0 {
+		b := 1
+		println(b)
+	} else {
+		a = 2
+	}
+	return a
+}`)
+	// reads present
+	for _, want := range []string{"x", "a", "b", "println"} {
+		if !hasUse(fn, want) {
+			t.Errorf("missing use %q: %+v", want, fn.Uses)
+		}
+	}
+	// `a = 2` plain-assign LHS is not a read of a at that line; but `a`'s
+	// reads exist elsewhere (return). Defs stay intact.
+	if !hasDef(fn, "a") || !hasDef(fn, "x") {
+		t.Errorf("defs lost: %+v", fn.Defs)
+	}
+}
+
+// TestCFGUsesAugAssignReadsLHS: `total += n` reads total AND n.
+func TestCFGUsesAugAssignReadsLHS(t *testing.T) {
+	fn, _ := parseCFG(t, ".ts", "add",
+		`class Reg {
+  add(n: number): void {
+    this.total += n;
+  }
+}`)
+	if !hasUse(fn, "this.total") || !hasUse(fn, "this") || !hasUse(fn, "n") {
+		t.Errorf("aug-assign LHS/member reads missing: %+v", fn.Uses)
+	}
+}
+
+// TestCFGUsesMemberChainPrefixes: `a.b.c` emits receiver prefixes a, a.b,
+// a.b.c so consumer chain keys line up with member-target defs.
+func TestCFGUsesMemberChainPrefixes(t *testing.T) {
+	fn, _ := parseCFG(t, ".ts", "deep",
+		`function deep(r: Root): number {
+  return r.a.b.c;
+}`)
+	for _, want := range []string{"r", "r.a", "r.a.b", "r.a.b.c"} {
+		if !hasUse(fn, want) {
+			t.Errorf("missing chain prefix %q: %+v", want, fn.Uses)
+		}
+	}
+}
+
+// TestCFGUsesDeclAndTypePositionsSkipped: declarator names, member names,
+// and declared types are not reads.
+func TestCFGUsesDeclAndTypePositionsSkipped(t *testing.T) {
+	fn, _ := parseCFG(t, ".ts", "typed",
+		`function typed(r: Repo): Repo {
+  const out: Repo = build(r);
+  return out;
+}`)
+	for _, want := range []string{"r", "build", "out"} {
+		if !hasUse(fn, want) {
+			t.Errorf("missing use %q: %+v", want, fn.Uses)
+		}
+	}
+	// `Repo` appears twice in type position + once as annotation — none is a
+	// runtime read of Repo. `const out` binds out; out is still read at
+	// `return out`.
+	var repoUses int
+	for _, u := range fn.Uses {
+		if u.VarName == "Repo" {
+			repoUses++
+		}
+	}
+	if repoUses != 0 {
+		t.Errorf("type-position names leaked as uses: %+v", fn.Uses)
+	}
+}
+
+// TestCFGUsesForHeaderReads: for-header reads — condition and update are
+// uses; the loop variable's declaration side is a def.
+func TestCFGUsesForHeaderReads(t *testing.T) {
+	fn, _ := parseCFG(t, ".ts", "loop",
+		`function loop(items: number[]): number {
+  let s = 0;
+  for (let i = 0; i < items.length; i++) { s += i; }
+  return s;
+}`)
+	header := blockByKind(fn, "for_header")
+	if header == nil {
+		t.Fatalf("missing for_header: %+v", fn.Blocks)
+	}
+	uses := usesOnBlock(fn, header.Index)
+	for _, want := range []string{"i", "items", "items.length"} {
+		if !uses[want] {
+			t.Errorf("missing header use %q: %+v", want, fn.Uses)
+		}
+	}
+}
+
+// TestCFGUsesParamDefaultAndBoundary: default-arg expressions are entry-block
+// reads; a nested function's body never leaks its reads into the outer CFG.
+func TestCFGUsesParamDefaultAndBoundary(t *testing.T) {
+	fn, _ := parseCFG(t, ".ts", "wrap",
+		`function wrap(cb = helper): () => number {
+  const inner = () => cb();
+  return inner;
+}`)
+	if !hasUse(fn, "helper") {
+		t.Errorf("param-default read missing: %+v", fn.Uses)
+	}
+	// `cb` inside the nested arrow is a different CFG — must not leak.
+	if hasUse(fn, "cb") {
+		t.Errorf("nested-function read leaked into outer uses: %+v", fn.Uses)
+	}
+}

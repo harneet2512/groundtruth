@@ -69,6 +69,18 @@ type CFGDef struct {
 	Line       int
 }
 
+// CFGUse records one variable READ anchored to a block: the parser-exact
+// complement of CFGDef. Identifier loads plus member-access chains
+// (``a.b.c`` emits the receiver prefixes ``a``, ``a.b``, ``a.b.c`` so the
+// consumer's chain keys line up with member-target defs). Augmented-assignment
+// LHS counts as a use (``x += y`` reads x); a plain ``=`` LHS does not.
+// Type positions are skipped — a declared type is not a runtime read.
+type CFGUse struct {
+	BlockIndex int
+	VarName    string
+	Line       int
+}
+
 // CFGFunc is the complete CFG payload for one emitted function/method node.
 // NodeIdx is the file-local index into ParseResult.Nodes — remapped to a
 // database node id by the caller after nodes are inserted.
@@ -77,6 +89,7 @@ type CFGFunc struct {
 	Blocks  []CFGBlock
 	Edges   []CFGEdge
 	Defs    []CFGDef
+	Uses    []CFGUse
 }
 
 // cfgLangSpec describes one language's statement-level node/field vocabulary.
@@ -246,6 +259,7 @@ type cfgBuilder struct {
 	lang     *cfgLangSpec
 	blocks   []CFGBlock
 	blockDefs [][]CFGDef // parallel to blocks: defs anchored per block
+	blockUses [][]CFGUse // parallel to blocks: parser-exact reads per block
 	edges    []CFGEdge
 	edgeSeen map[cfgEdgeKey]bool // dedupe exact (from,to,label) triples
 	current  int                 // -1 = no open block
@@ -277,6 +291,7 @@ func cfgEndLine(n *sitter.Node) int   { return int(n.EndPoint().Row) + 1 }
 func (b *cfgBuilder) newBlock(kind string) int {
 	b.blocks = append(b.blocks, CFGBlock{Index: len(b.blocks), Kind: kind})
 	b.blockDefs = append(b.blockDefs, nil)
+	b.blockUses = append(b.blockUses, nil)
 	return len(b.blocks) - 1
 }
 
@@ -347,6 +362,9 @@ func (b *cfgBuilder) anchor(s *sitter.Node) {
 	for _, d := range b.defsFor(s) {
 		b.addDef(blk, d)
 	}
+	for _, u := range b.usesFor(s) {
+		b.addUse(blk, u)
+	}
 }
 
 func (b *cfgBuilder) addDef(blk int, d CFGDef) {
@@ -356,6 +374,15 @@ func (b *cfgBuilder) addDef(blk int, d CFGDef) {
 		}
 	}
 	b.blockDefs[blk] = append(b.blockDefs[blk], CFGDef{BlockIndex: blk, VarName: d.VarName, Line: d.Line})
+}
+
+func (b *cfgBuilder) addUse(blk int, u CFGUse) {
+	for _, e := range b.blockUses[blk] {
+		if e.VarName == u.VarName && e.Line == u.Line {
+			return
+		}
+	}
+	b.blockUses[blk] = append(b.blockUses[blk], CFGUse{BlockIndex: blk, VarName: u.VarName, Line: u.Line})
 }
 
 // field returns the first non-nil named child among the given field names.
@@ -714,10 +741,24 @@ func (b *cfgBuilder) isCaseHeaderChild(clause, ch *sitter.Node) bool {
 	ct := ch.Type()
 	switch ct {
 	case "switch_label":
+		// Java label expressions are evaluated at dispatch — reads.
+		// Pattern children (``case Foo f``) BIND names — not reads.
+		for i := 0; i < int(ch.NamedChildCount()); i++ {
+			lch := ch.NamedChild(i)
+			if strings.Contains(lch.Type(), "pattern") {
+				continue
+			}
+			for _, u := range b.collectUses(lch) {
+				b.addUse(b.current, u)
+			}
+		}
 		return true
 	case "communication":
 		for _, d := range b.collectDefs(ch) {
 			b.addDef(b.current, d)
+		}
+		for _, u := range b.collectUses(ch) {
+			b.addUse(b.current, u)
 		}
 		return true
 	case "type_list":
@@ -727,6 +768,10 @@ func (b *cfgBuilder) isCaseHeaderChild(clause, ch *sitter.Node) bool {
 		return true
 	}
 	if v := field(clause, "value"); v != nil && sameNode(v, ch) {
+		// case <expr> — the case expression is read at dispatch.
+		for _, u := range b.collectUses(ch) {
+			b.addUse(b.current, u)
+		}
 		return true
 	}
 	if v := field(clause, "type"); v != nil && sameNode(v, ch) {
@@ -767,10 +812,14 @@ func (b *cfgBuilder) emitTry(s *sitter.Node) {
 	ctx := &cfgTryCtx{}
 	b.tries = append(b.tries, ctx)
 
-	// Java try_with_resources: resource bindings are defs at the try head.
+	// Java try_with_resources: resource bindings are defs at the try head;
+	// their initializer expressions are reads at the same point.
 	if res := field(s, "resources"); res != nil {
 		for _, d := range b.collectDefs(res) {
 			b.addDef(tb, d)
+		}
+		for _, u := range b.collectUses(res) {
+			b.addUse(tb, u)
 		}
 	}
 
@@ -1288,6 +1337,224 @@ func (b *cfgBuilder) paramDefs(funcNode *sitter.Node) []CFGDef {
 	return out
 }
 
+// paramUses returns the reads inside a function's parameter list — default
+// argument expressions only (``cb = helper`` reads ``helper``). Type
+// annotations are declarations, not runtime reads, and are skipped.
+func (b *cfgBuilder) paramUses(funcNode *sitter.Node) []CFGUse {
+	var out []CFGUse
+	for _, fname := range []string{"parameters", "formal_parameters"} {
+		params := funcNode.ChildByFieldName(fname)
+		if params == nil {
+			continue
+		}
+		for i := 0; i < int(params.NamedChildCount()); i++ {
+			if v := field(params.NamedChild(i), "value"); v != nil {
+				b.collectUsesInto(v, &out)
+			}
+		}
+	}
+	return out
+}
+
+// ── use extraction ─────────────────────────────────────────────────────────
+//
+// usesFor returns the reads a statement node performs at its own position —
+// header-only for compound statements (bodies anchor their own uses), deep
+// for simple statements. The scoping mirrors defsFor exactly so def/use rows
+// attach to the same block.
+
+func (b *cfgBuilder) usesFor(s *sitter.Node) []CFGUse {
+	t := s.Type()
+	var out []CFGUse
+	switch {
+	case t == b.lang.ifStmt || (b.lang.while != "" && t == b.lang.while):
+		// Go if/for initializers carry their own reads (`if x := f(); …`).
+		b.collectUsesInto(field(s, "initializer", "init"), &out)
+		b.collectUsesInto(field(s, "condition"), &out)
+	case b.lang.do != "" && t == b.lang.do:
+		b.collectUsesInto(field(s, "condition"), &out)
+	case t == b.lang.forStmt:
+		out = b.forHeaderUses(s)
+	case b.lang.forIn != "" && t == b.lang.forIn:
+		// left is the loop binding (a def); the iterable side is read.
+		b.collectUsesInto(field(s, "right", "value"), &out)
+	case b.lang.switchStmts[t]:
+		b.collectUsesInto(field(s, "value", "condition"), &out)
+	case b.lang.tryStmts[t]:
+		// resources are handled inside emitTry; the try head reads nothing.
+		return nil
+	case t == b.lang.catchClause:
+		// catch (E e): the exception type names a class — a type read that
+		// still chains to class defs for the consumer.
+		if p := field(s, "parameter"); p != nil {
+			b.collectUsesInto(field(p, "type"), &out)
+		} else {
+			for i := 0; i < int(s.NamedChildCount()); i++ {
+				if ch := s.NamedChild(i); ch.Type() == "catch_formal_parameter" {
+					b.collectUsesInto(field(ch, "type"), &out)
+				}
+			}
+		}
+	case t == b.lang.labeled:
+		return nil
+	default:
+		out = b.collectUses(s)
+	}
+	return out
+}
+
+// forHeaderUses collects reads from a for header's initializer/condition/
+// update (JS/Java) or for_clause/range_clause/bare-expression children (Go).
+func (b *cfgBuilder) forHeaderUses(s *sitter.Node) []CFGUse {
+	var out []CFGUse
+	for _, fname := range []string{"initializer", "init", "condition", "increment", "update"} {
+		b.collectUsesInto(s.ChildByFieldName(fname), &out)
+	}
+	if len(out) > 0 {
+		return out
+	}
+	for i := 0; i < int(s.NamedChildCount()); i++ {
+		ch := s.NamedChild(i)
+		ct := ch.Type()
+		if ct == "body" || b.lang.blockTypes[ct] {
+			continue
+		}
+		switch ct {
+		case "for_clause":
+			for _, fname := range []string{"initializer", "condition", "update"} {
+				b.collectUsesInto(ch.ChildByFieldName(fname), &out)
+			}
+		case "range_clause":
+			// left binds; right (the range expression) is read.
+			b.collectUsesInto(field(ch, "right"), &out)
+		default:
+			b.collectUsesInto(ch, &out)
+		}
+	}
+	return out
+}
+
+// collectUses walks a subtree harvesting reads, pruning nested scopes.
+func (b *cfgBuilder) collectUses(n *sitter.Node) []CFGUse {
+	var out []CFGUse
+	b.collectUsesInto(n, &out)
+	return out
+}
+
+// augAssign reports whether an assignment-shaped node's operator mutates —
+// `x += y` reads x; `x = y` does not. The operator text sits between the
+// left child's end byte and the right child's start byte across grammars.
+func (b *cfgBuilder) augAssign(n *sitter.Node) bool {
+	l := field(n, "left")
+	r := field(n, "right")
+	if l == nil || r == nil || l.EndByte() > r.StartByte() {
+		return false
+	}
+	op := strings.TrimSpace(string(b.src[l.EndByte():r.StartByte()]))
+	return op != "" && op != "=" && op != ":="
+}
+
+// collectUsesInto is the recursive worker: identifier loads and member-access
+// chains are reads; def positions (plain-assignment LHS, declarator names,
+// binding patterns) are not; member names after a receiver are not; declared
+// types are not.
+func (b *cfgBuilder) collectUsesInto(n *sitter.Node, out *[]CFGUse) {
+	if n == nil || !n.IsNamed() {
+		return
+	}
+	t := n.Type()
+	if b.lang.boundary[t] {
+		// A nested callable/class body is a different CFG; the declaration
+		// name itself is not read here either (it binds, it isn't loaded).
+		return
+	}
+	switch t {
+	case "assignment_expression", "assignment_statement", "assignment":
+		if b.augAssign(n) {
+			// `x += y` — the LHS is read AND written.
+			b.collectUsesInto(field(n, "left"), out)
+		}
+		b.collectUsesInto(field(n, "right"), out)
+		return
+	case "augmented_assignment_expression", "update_expression",
+		"inc_statement", "dec_statement":
+		// `x += …`, `x++` — the operand is read (and written by the def pass).
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			b.collectUsesInto(n.NamedChild(i), out)
+		}
+		return
+	case "short_var_declaration", "var_spec", "const_spec",
+		"local_variable_declaration", "variable_declaration",
+		"lexical_declaration", "const_declaration":
+		// Declaration: names/types bind or declare — only initializers read.
+		b.collectUsesInto(field(n, "right", "value"), out)
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			b.collectUsesInto(field(n.NamedChild(i), "value"), out)
+		}
+		return
+	case "variable_declarator":
+		b.collectUsesInto(field(n, "value"), out)
+		return
+	case "range_clause", "receive_statement":
+		// left binds; right/channel is read.
+		b.collectUsesInto(field(n, "right", "value"), out)
+		return
+	case "send_statement":
+		// `ch <- v` — channel and value are both read.
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			b.collectUsesInto(n.NamedChild(i), out)
+		}
+		return
+	case "member_expression":
+		// a.b(.c): emit the rendered chain, then recurse the object — each
+		// nested level emits its own prefix (a, a.b, a.b.c).
+		*out = append(*out, CFGUse{VarName: nodeText(n, b.src), Line: cfgStartLine(n)})
+		b.collectUsesInto(field(n, "object"), out)
+		return
+	case "field_access", "scoped_identifier":
+		*out = append(*out, CFGUse{VarName: nodeText(n, b.src), Line: cfgStartLine(n)})
+		b.collectUsesInto(field(n, "object", "scope"), out)
+		return
+	case "selector_expression":
+		*out = append(*out, CFGUse{VarName: nodeText(n, b.src), Line: cfgStartLine(n)})
+		b.collectUsesInto(field(n, "operand"), out)
+		return
+	case "subscript_expression", "index_expression", "array_access",
+		"slice_expression":
+		// a[i]: object AND index are both read; the rendered chain keeps
+		// parity with member-target defs (`a[i]` can be a def).
+		*out = append(*out, CFGUse{VarName: nodeText(n, b.src), Line: cfgStartLine(n)})
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			b.collectUsesInto(n.NamedChild(i), out)
+		}
+		return
+	case "identifier", "this", "self", "super",
+		"shorthand_property_identifier", "type_identifier":
+		// Leaf read. shorthand `obj = {x}` reads x; `this`/`self`/`super`
+		// load the receiver; a type_identifier in expression position
+		// (conversion, `new T()`, composite literal) reads the type name.
+		*out = append(*out, CFGUse{VarName: nodeText(n, b.src), Line: cfgStartLine(n)})
+		return
+	case "field_identifier", "property_identifier",
+		"private_property_identifier", "label_name", "statement_identifier":
+		// Pure name positions — member names, labels — never a read.
+		return
+	case "object_pattern", "array_pattern", "pair_pattern",
+		"object_assignment_pattern", "assignment_pattern", "rest_pattern",
+		"spread_pattern", "list_splat_pattern", "dictionary_splat_pattern",
+		"required_parameter", "optional_parameter", "formal_parameter",
+		"spread_parameter", "catch_formal_parameter",
+		"parameter_declaration", "variadic_parameter_declaration":
+		// Binding positions — defs, not reads. Spread/rest inside a CALL is
+		// a read of its operand though, so call sites never reach this case
+		// (argument positions aren't binding patterns in these grammars).
+		return
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		b.collectUsesInto(n.NamedChild(i), out)
+	}
+}
+
 // extractCFG builds the statement-level CFG for one function/method node and
 // records it on the parse result. Called once per emitted function node where
 // a body exists. Per-function isolation is inherent: nested function scopes
@@ -1311,6 +1578,9 @@ func extractCFG(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src []byt
 	b.blocks[entry].EndLine = cfgStartLine(funcNode)
 	for _, d := range b.paramDefs(funcNode) {
 		b.addDef(entry, d)
+	}
+	for _, u := range b.paramUses(funcNode) {
+		b.addUse(entry, u)
 	}
 	b.exitID = b.newBlock("exit")
 	b.exits = []cfgPending{{from: entry, label: "entry"}}
@@ -1340,6 +1610,9 @@ func extractCFG(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src []byt
 	fn := CFGFunc{NodeIdx: nodeIdx, Blocks: b.blocks, Edges: b.edges}
 	for _, ds := range b.blockDefs {
 		fn.Defs = append(fn.Defs, ds...)
+	}
+	for _, us := range b.blockUses {
+		fn.Uses = append(fn.Uses, us...)
 	}
 	result.CFGs = append(result.CFGs, fn)
 }

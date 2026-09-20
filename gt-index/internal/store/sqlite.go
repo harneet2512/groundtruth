@@ -98,6 +98,10 @@ type Edge struct {
 	// which stays the bare field name for the consumers' field-exact `metadata = ?`
 	// match (contract_map.py, promote_test assertTier). Empty -> NULL.
 	AccessSites string
+	// ActualArgs carries the parser-exact top-level argument texts of a CALLS
+	// edge's callsite (JSON array, call order). Empty -> NULL; consumers fall
+	// back to re-splitting the call text when absent.
+	ActualArgs string
 }
 
 // ResolutionCandidate preserves one resolver-produced viable target. The
@@ -794,7 +798,8 @@ func createSchema(db *sql.DB) error {
 		selection_rule_id TEXT,
 		resolution_reason TEXT,
 		resolution_step INTEGER,
-		access_sites TEXT
+		access_sites TEXT,
+		actual_args TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS resolution_symbols (
@@ -976,6 +981,20 @@ func createSchema(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_cfg_defs_node ON cfg_defs(node_id);
 
+	-- cfg_uses: parser-exact identifier reads per statement, symmetric to
+	-- cfg_defs (v15.3). Member-access chains persist the rendered text plus
+	-- each receiver prefix row; augmented-assignment LHS is a read. Type
+	-- positions and member names after a receiver are not reads. Consumers
+	-- that predate it keep lexical use extraction — additive only.
+	CREATE TABLE IF NOT EXISTS cfg_uses (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		node_id INTEGER NOT NULL REFERENCES nodes(id),
+		block_index INTEGER NOT NULL,
+		var_name TEXT NOT NULL,
+		line INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_cfg_uses_node ON cfg_uses(node_id);
+
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -1016,6 +1035,7 @@ func createSchema(db *sql.DB) error {
 		{"exclusion_fact_ids", `ALTER TABLE edges ADD COLUMN exclusion_fact_ids TEXT`},
 		{"selection_rule_id", `ALTER TABLE edges ADD COLUMN selection_rule_id TEXT`},
 		{"access_sites", `ALTER TABLE edges ADD COLUMN access_sites TEXT`},
+		{"actual_args", `ALTER TABLE edges ADD COLUMN actual_args TEXT`},
 	}
 	for _, column := range typedColumns {
 		var count int
@@ -1239,10 +1259,11 @@ func (d *DB) InsertNode(n *Node) (int64, error) {
 func (d *DB) InsertEdge(e *Edge) error {
 	_, err := d.db.Exec(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file, resolution_method, confidence, metadata,
-		 trust_tier, candidate_count, evidence_type, verification_status, access_sites)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 trust_tier, candidate_count, evidence_type, verification_status, access_sites, actual_args)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile, e.ResolutionMethod, e.Confidence, e.Metadata,
 		e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus, nullableText(e.AccessSites),
+		nullableText(e.ActualArgs),
 	)
 	return err
 }
@@ -1351,8 +1372,8 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
-		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status, access_sites)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status, access_sites, actual_args)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -1365,7 +1386,7 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 			e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
 			e.ResolutionMethod, e.Confidence, e.Metadata,
 			e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
-			nullableText(e.AccessSites),
+			nullableText(e.AccessSites), nullableText(e.ActualArgs),
 		)
 		if err != nil {
 			tx.Rollback()

@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any, Callable, Mapping, Sequence
 
@@ -1116,6 +1117,77 @@ _SINK_NAME_MARKERS = frozenset(
     }
 )
 
+_CLASS_FIELD_MODS = frozenset(
+    {
+        "private", "public", "protected", "static", "final", "readonly",
+        "abstract", "override", "virtual", "const", "let", "var", "val",
+        "mut", "transient", "volatile", "lateinit", "internal", "open",
+        "sealed", "inline", "weak", "lazy", "pub", "export", "declare",
+    }
+)
+
+_FIELD_ANNOTATION_RE = re.compile(r"^@[\w.]+(?:\s*\([^)]*\))?\s*")
+_FIELD_COLON_RE = re.compile(
+    r"^([A-Za-z_][\w$]*)\s*:\s*([\w.*<>\[\]]+)"
+)
+
+
+def _class_field_name_type(decl: str) -> tuple[str, str] | None:
+    """Extract ``(field_name, declared_type)`` from a persisted
+    ``class_field`` property value — the producer keeps the declaration
+    text verbatim (``private ItemService itemService;``,
+    ``@Autowired\\n private Repo repo;``, ``state: int = 0``,
+    ``items []Item``).  Returns ``None`` when no type is provable — a
+    name without a type cannot bind a receiver chain.
+
+    Disambiguation for the two-token ``A B`` shape: Java/TS put the
+    type first (``ItemService itemService``), Go/C the name first
+    (``items []Item``, ``r *Repo``).  Casing decides: a leading
+    punctuation/uppercase second token marks Go order; otherwise the
+    first token is the type.
+    """
+    text = decl.strip().splitlines()[-1].strip()
+    while True:
+        m = _FIELD_ANNOTATION_RE.match(text)
+        if m is None:
+            break
+        text = text[m.end():].strip()
+    words = [
+        w for w in text.replace("=", " = ").split()
+        if w not in _CLASS_FIELD_MODS and not w.startswith("@")
+    ]
+    if "=" in words:
+        words = words[: words.index("=")]
+    if not words:
+        return None
+    # Colon-typed: ``name: Type`` (Python/TS/Kotlin after modifier strip —
+    # the colon may share a token with the name).
+    joined = " ".join(words).rstrip(";")
+    m = _FIELD_COLON_RE.match(joined)
+    if m is not None:
+        return m.group(1), m.group(2)
+    # Two-token ``A B`` shapes.
+    words = [w.rstrip(";") for w in words if w.rstrip(";")]
+    if len(words) == 2:
+        a, b = words
+        ident_a = re.match(r"^[A-Za-z_][\w$]*$", a)
+        ident_b = re.match(r"^[A-Za-z_][\w$]*$", b)
+        if b.startswith(("[", "*", "map[")):
+            # Unambiguous name-first — ``items []Item``, ``r *Repo``.
+            return (a, b) if ident_a else None
+        if a[:1].isupper() and ident_b:
+            # Type-first — ``ItemService itemService``, ``String NAME``,
+            # ``List<Item> items``, ``Repo* repo``.
+            return b, a
+        if b[:1].isupper() and ident_a:
+            # Name-first by casing — ``r Repo``.
+            return a, b
+        if ident_a and ident_b:
+            # Both lowercase — ``int count`` / ``count int`` bind the same
+            # (name, type) pair either way.
+            return b, a
+    return None
+
 
 def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produced:
     """Symbol-level source→sink reachability over resolved CALLS.
@@ -1236,19 +1308,138 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
         for nid, n in nodes_by_id.items():
             name_to_ids.setdefault(n["name"], []).append(nid)
 
-        def _owner_key(scope_node_id: int | None, fallback_id: int) -> str | None:
-            """Field owner identity: innermost Class ancestor of the access
-            scope (``self.f``/``this.f`` binds to the enclosing type), keyed
-            by qualified name else ``file::name``.  ``None`` = unresolvable
-            owner — those channels join weaker and are flagged."""
+        # Receiver/type evidence persisted by the producer, loaded once:
+        # field_read/side_effect props carry ``reads: <recv>.<field>`` /
+        # ``mutates: <recv>.<field>``; param props carry ``name[:type]``;
+        # class_field props carry declared field text per class.
+        _RECV_PROP_RE = re.compile(
+            r"^(?:reads|mutates):\s*([A-Za-z_][\w.]*)\.(\w+)"
+        )
+        recv_by_scope_field: dict[tuple[int, str], str] = {}
+        param_types: dict[int, dict[str, str]] = {}
+        class_field_types: dict[int, dict[str, str]] = {}
+        try:
+            prop_rows = conn.execute(
+                "SELECT node_id, kind, value FROM properties"
+                " WHERE kind IN"
+                " ('field_read','side_effect','param','class_field')"
+            ).fetchall()
+        except sqlite3.Error:
+            prop_rows = []
+        for prow in prop_rows:
+            node_i, kind_p, value_p = int(prow[0]), str(prow[1]), str(prow[2])
+            if kind_p in ("field_read", "side_effect"):
+                m = _RECV_PROP_RE.match(value_p.strip())
+                if m is not None:
+                    recv_by_scope_field.setdefault(
+                        (node_i, m.group(2)), m.group(1)
+                    )
+            elif kind_p == "param":
+                m = re.match(
+                    r"^(?:\*{1,2}|\.{3})?([A-Za-z_][\w$]*)"
+                    r"(?::+(.*?))?"
+                    r"(?:\s+\[required\]|\s+opt(?:=.*)?)?$",
+                    value_p.strip(),
+                )
+                if m is not None and m.group(2):
+                    param_types.setdefault(node_i, {})[m.group(1)] = m.group(
+                        2
+                    ).strip()
+            else:
+                parsed_cf = _class_field_name_type(value_p)
+                if parsed_cf is not None:
+                    class_field_types.setdefault(node_i, {})[
+                        parsed_cf[0]
+                    ] = parsed_cf[1]
+
+        def _class_key(node_id: int) -> str:
+            n = nodes_by_id[node_id]
+            return n["qualified_name"] or f"{n['file_path']}::{n['name']}"
+
+        class_by_simple: dict[str, int] = {}
+        for nid, n in nodes_by_id.items():
+            if n["label"] == "Class":
+                class_by_simple.setdefault(n["name"], nid)
+
+        def _enclosing_class(scope_node_id: int | None, fallback_id: int) -> int | None:
             cur = scope_node_id if scope_node_id in nodes_by_id else fallback_id
             depth = 0
             while cur in nodes_by_id and depth < 12:
-                n = nodes_by_id[cur]
-                if n["label"] == "Class":
-                    return n["qualified_name"] or f"{n['file_path']}::{n['name']}"
-                cur = n["parent_id"]
+                if nodes_by_id[cur]["label"] == "Class":
+                    return cur
+                cur = nodes_by_id[cur]["parent_id"]
                 depth += 1
+            return None
+
+        def _type_name_to_class(type_name: str) -> int | None:
+            """Resolve a declared type name to a Class node id — simple or
+            qualified-name match, decorations stripped."""
+            t = (
+                type_name.strip()
+                .lstrip("*")
+                .strip("[]")
+                .split("<")[0]
+                .split("[")[0]
+            )
+            if not t:
+                return None
+            simple = t.rsplit(".", 1)[-1]
+            for nid, n in nodes_by_id.items():
+                if n["label"] != "Class":
+                    continue
+                if n["qualified_name"] == t or n["qualified_name"].endswith(
+                    "." + t
+                ):
+                    return nid
+            return class_by_simple.get(simple)
+
+        def _owner_key(
+            scope_node_id: int | None,
+            fallback_id: int,
+            field: str = "",
+            persisted_receiver: str = "",
+        ) -> str | None:
+            """Field owner identity — the stack-graph paused-lookup rule:
+            receiver name resolves first, then the field belongs to that
+            binding.  ``self``/``this``/``cls`` and ``self.<f>`` bind to the
+            enclosing class (or its declared field type); named receivers
+            resolve through param annotations then class name-match.
+            ``None`` = unresolvable — those channels join weaker."""
+            cls_id = _enclosing_class(scope_node_id, fallback_id)
+            scope = scope_node_id if scope_node_id in nodes_by_id else fallback_id
+            # Producer-persisted receiver (access_sites v2) beats property-
+            # text correlation; the correlation map is the v1 fallback.
+            recv = persisted_receiver or recv_by_scope_field.get(
+                (scope, field), ""
+            )
+            if recv:
+                parts = recv.split(".")
+                head = parts[0]
+                if head in ("self", "this", "cls"):
+                    if len(parts) == 1:
+                        return _class_key(cls_id) if cls_id is not None else None
+                    # self.<a>.<b>.field — walk declared field types from
+                    # the enclosing class; unresolved hops are unknown,
+                    # never silently the enclosing class.
+                    cur_cls = cls_id
+                    for seg in parts[1:]:
+                        if cur_cls is None:
+                            return None
+                        ftype = class_field_types.get(cur_cls, {}).get(seg)
+                        cur_cls = _type_name_to_class(ftype) if ftype else None
+                    return _class_key(cur_cls) if cur_cls is not None else None
+                # Named receiver: param annotation on the scope, then
+                # class name-match on the receiver itself.  Unresolved is
+                # unknown — binding it to the enclosing class would
+                # fabricate a cross-class join.
+                ptype = param_types.get(scope, {}).get(head)
+                tgt = _type_name_to_class(ptype) if ptype else None
+                if tgt is not None:
+                    return _class_key(tgt)
+                tgt = _type_name_to_class(head)
+                return _class_key(tgt) if tgt is not None else None
+            if cls_id is not None:
+                return _class_key(cls_id)
             return None
 
         field_writers: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
@@ -1262,20 +1453,50 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
                 site = json.loads(str(row[2]))
             except (TypeError, ValueError):
                 continue
-            field = str(site.get("field") or "")
-            if not field:
-                continue
-            rec = {
-                "symbol": nodes_by_id.get(int(row[1]), {}).get("name", "?"),
-                "file_path": nodes_by_id.get(int(row[1]), {}).get("file_path", "?"),
-                "line": site.get("line"),
-            }
+            # v2 payloads carry a ``sites`` array — one entry per field
+            # access on the edge, each with its own receiver.  v1 payloads
+            # have only the top-level field/line; fall back to those.
+            sub_sites = site.get("sites")
+            if isinstance(sub_sites, list) and sub_sites:
+                accesses = [
+                    (
+                        str(s.get("field") or ""),
+                        s.get("line"),
+                        str(s.get("receiver") or site.get("receiver") or ""),
+                    )
+                    for s in sub_sites
+                    if isinstance(s, dict)
+                ]
+            else:
+                accesses = [
+                    (
+                        str(site.get("field") or ""),
+                        site.get("line"),
+                        str(site.get("receiver") or ""),
+                    )
+                ]
             scope_raw = site.get("scope_node_id")
             scope_id = int(scope_raw) if isinstance(scope_raw, int) else None
-            owner = _owner_key(scope_id, int(row[1]))
-            (field_writers if row[0] == "WRITES" else field_readers).setdefault(
-                (field, owner), []
-            ).append(rec)
+            node = nodes_by_id.get(int(row[1]), {})
+            seen_access: set[tuple[str, object]] = set()
+            for field, aline, arecv in accesses:
+                if not field or (field, aline) in seen_access:
+                    continue
+                seen_access.add((field, aline))
+                rec = {
+                    "symbol": node.get("name", "?"),
+                    "file_path": node.get("file_path", "?"),
+                    "line": aline,
+                }
+                owner = _owner_key(
+                    scope_id,
+                    int(row[1]),
+                    field,
+                    persisted_receiver=arecv,
+                )
+                (field_writers if row[0] == "WRITES" else field_readers).setdefault(
+                    (field, owner), []
+                ).append(rec)
         data_channels: list[dict[str, Any]] = []
         # Join rule: two resolved owners must match (same-name fields on
         # different classes never form a channel); an unresolved side joins

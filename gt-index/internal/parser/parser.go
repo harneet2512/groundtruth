@@ -107,7 +107,11 @@ type CallRef struct {
 	// Anything that reasons about arity must abstain when this is set.
 	ArgumentSpread bool
 	ArgumentNames  []string // source-visible variable arguments, in call order
-	DispatchForm   string
+	// ArgumentTexts is the raw source text of each top-level argument
+	// expression, in call order — parser-exact, so consumers never re-split
+	// the call text (kwargs, spreads, nested parens all survive verbatim).
+	ArgumentTexts []string
+	DispatchForm  string
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
@@ -1337,12 +1341,15 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				}
 			}
 			argumentNames := []string(nil)
+			argumentTexts := []string(nil)
 			if arguments := argumentsNode; arguments != nil {
 				for i := 0; i < int(arguments.NamedChildCount()); i++ {
 					arg := arguments.NamedChild(i)
 					if arg == nil {
 						continue
 					}
+					argumentTexts = append(argumentTexts,
+						strings.TrimSpace(arg.Content(src)))
 					if arg.Type() == "value_argument" { // Kotlin wraps each arg
 						for j := 0; j < int(arg.ChildCount()); j++ {
 							if c := arg.Child(j); c != nil && c.IsNamed() {
@@ -1404,6 +1411,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				ArgumentArity:   argumentArity,
 				ArgumentSpread:  argumentSpread,
 				ArgumentNames:   argumentNames,
+				ArgumentTexts:   argumentTexts,
 				DispatchForm:    dispatchForm,
 			})
 

@@ -92,6 +92,15 @@ CREATE TABLE cfg_defs (
     line INTEGER
 );
 CREATE INDEX idx_cfg_defs_node ON cfg_defs(node_id);
+CREATE TABLE properties (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id INTEGER NOT NULL REFERENCES nodes(id),
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    line INTEGER,
+    confidence REAL DEFAULT 1.0
+);
+CREATE INDEX idx_properties_node ON properties(node_id, kind);
 """
 
 # The route decorator line must exist on disk at api.py line 11.
@@ -150,10 +159,33 @@ func gocaller(n int) int {
 """
 
 # tsfn: straight-line function — def chain only, no control dependence.
+# Svc.use: named-receiver field read (r: Repo) for owner-bound taint via
+# param annotation.  tsSpread: variadic callee for signature-proven
+# actual binding; tsCaller calls it with extra positionals.
 _TS_SOURCE = """\
 function tsfn(p: number): number {
 	const q = p + 1;
 	return q;
+}
+
+class Svc {
+	use(r: Repo): number {
+		return r.state;
+	}
+}
+
+function tsSpread(first: number, ...rest: number[]): number {
+	let total = first;
+	for (const n of rest) { total += n; }
+	return total;
+}
+
+function tsCaller(): number {
+	return tsSpread(1, 2, 3);
+}
+
+function check(r: Repo): number {
+	return r.state ? 1 : 0;
 }
 """
 
@@ -228,6 +260,23 @@ _NODES = [
      "class Other", "", 0, 0, "python", None),
     (31, "Method", "peek", "db.Other.peek", "db.py", 12, 14,
      "def peek(self)", "", 0, 0, "python", 30),
+    # Named-receiver taint: Svc.use reads r.state where param r: Repo —
+    # owner resolves through the param annotation to class Repo.
+    (32, "Class", "Svc", "app.Svc", "app.ts", 6, 10,
+     "class Svc", "", 0, 0, "typescript", None),
+    (33, "Method", "use", "app.Svc.use", "app.ts", 7, 9,
+     "use(r: Repo): number", "number", 0, 0, "typescript", 32),
+    # Variadic callee + caller for signature-proven actual binding.
+    (34, "Function", "tsSpread", "app.tsSpread", "app.ts", 12, 16,
+     "function tsSpread(first: number, ...rest: number[]): number",
+     "number", 1, 0, "typescript"),
+    (35, "Function", "tsCaller", "app.tsCaller", "app.ts", 18, 20,
+     "function tsCaller(): number", "number", 1, 0, "typescript"),
+    # Persisted-receiver taint: check(r: Repo) reads r.state — the v2
+    # access_sites JSON carries "receiver":"r" and there is deliberately
+    # NO field_read prop, so only the persisted receiver can bind it.
+    (36, "Function", "check", "app.check", "app.ts", 22, 24,
+     "function check(r: Repo): number", "number", 1, 0, "typescript"),
 ]
 
 # (src, dst, type, line, file, method, tier, confidence, metadata)
@@ -258,6 +307,16 @@ _EDGES = [
     # Same field name, different owner — must never join Repo's channel.
     (31, 31, "READS", 13, "db.py", "field_read", "CERTIFIED", 1.0, "",
      '{"v":1,"field":"state","access":"read","line":13,"scope_node_id":31}'),
+    # Named receiver r: Repo — joins Repo.set's writer via the param type.
+    (33, 33, "READS", 8, "app.ts", "field_read", "CERTIFIED", 1.0, "",
+     '{"v":1,"field":"state","access":"read","line":8,"scope_node_id":33}'),
+    # tsCaller calls tsSpread at line 19 — variadic binding hop.
+    (35, 34, "CALLS", 19, "app.ts", "same_file", "CERTIFIED", 1.0, ""),
+    # v2 access site: receiver persisted, no field_read prop — binds only
+    # through the persisted-receiver path (owner Repo via param r: Repo).
+    (36, 36, "READS", 23, "app.ts", "field_read", "CERTIFIED", 1.0, "",
+     '{"v":2,"field":"state","access":"read","line":23,"scope_node_id":36,'
+     '"receiver":"r"}'),
 ]
 
 # Persisted CFG rows mirroring what gt-index emits for the fixtures above.
@@ -278,6 +337,14 @@ _CFG_BLOCKS = [
     (26, 0, "entry", 18, 18, "[18]"),
     (26, 1, "exit", None, None, "[]"),
     (26, 2, "block", 19, 19, "[19]"),
+    # tsSpread: entry -> block(body) -> exit
+    (34, 0, "entry", 12, 12, "[12]"),
+    (34, 1, "exit", None, None, "[]"),
+    (34, 2, "block", 13, 15, "[13, 14, 15]"),
+    # tsCaller: entry -> block(return tsSpread(1,2,3)) -> exit
+    (35, 0, "entry", 18, 18, "[18]"),
+    (35, 1, "exit", None, None, "[]"),
+    (35, 2, "block", 19, 19, "[19]"),
 ]
 
 # (node_id, from_block, to_block, label)
@@ -292,6 +359,10 @@ _CFG_EDGES = [
     (25, 2, 1, "end"),
     (26, 0, 2, "entry"),
     (26, 2, 1, "end"),
+    (34, 0, 2, "entry"),
+    (34, 2, 1, "end"),
+    (35, 0, 2, "entry"),
+    (35, 2, 1, "end"),
 ]
 
 # (node_id, block_index, var_name, line)
@@ -303,6 +374,48 @@ _CFG_DEFS = [
     (25, 0, "p", 1),   # parameter
     (25, 2, "q", 2),   # const q = p + 1
     (26, 0, "n", 18),  # parameter
+    (34, 0, "first", 12),  # parameter
+    (34, 0, "rest", 12),   # ...rest variadic parameter
+    (34, 2, "total", 13),  # let total = first
+]
+
+# Persisted properties mirroring the producer's param / data_flow /
+# field_read / side_effect kinds — consumed by signature-proven formal
+# binding, receiver-bound taint, and supplemental use evidence.
+# (node_id, kind, value, line)
+_PROPERTIES = [
+    (21, "param", "x:int [required]", 3),
+    (25, "param", "p:number [required]", 1),
+    (26, "param", "n:int [required]", 18),
+    (33, "param", "r:Repo [required]", 7),
+    (34, "param", "first:number [required]", 12),
+    (34, "param", "...rest:number[] [required]", 12),
+    (28, "side_effect", "mutates: self.state = v", 3),
+    (29, "field_read", "reads: self.state", 6),
+    (31, "field_read", "reads: self.state", 13),
+    (33, "field_read", "reads: r.state", 8),
+    (36, "param", "r:Repo [required]", 22),
+    (26, "data_flow", "n -> gofn(n)", 19),
+]
+
+# Persisted cfg_uses rows (schema v15.3+) — parser-exact identifier reads,
+# mirroring what the Go producer emits for the fixture functions.
+# (node_id, block_index, var_name, line)
+_CFG_USES = [
+    (21, 2, "x", 5),         # if x > 0
+    (21, 3, "println", 7),   # println(b)
+    (21, 3, "b", 7),
+    (21, 5, "a", 11),        # return a
+    (25, 2, "p", 2),         # const q = p + 1
+    (25, 2, "q", 3),         # return q
+    (26, 2, "gofn", 19),     # return gofn(n)
+    (26, 2, "n", 19),
+    (34, 2, "first", 13),    # let total = first
+    (34, 2, "rest", 14),     # for (const n of rest)
+    (34, 2, "total", 14),    # total += n (aug LHS read)
+    (34, 2, "n", 14),
+    (34, 2, "total", 15),    # return total
+    (35, 2, "tsSpread", 19), # return tsSpread(1, 2, 3)
 ]
 
 
@@ -341,6 +454,45 @@ def _build_graph(tmp_path: Path) -> Path:
         "INSERT INTO cfg_defs (node_id, block_index, var_name, line)"
         " VALUES (?,?,?,?)",
         _CFG_DEFS,
+    )
+    conn.executemany(
+        "INSERT INTO properties (node_id, kind, value, line)"
+        " VALUES (?,?,?,?)",
+        _PROPERTIES,
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _build_graph_v15x(tmp_path: Path) -> Path:
+    """The shared fixture migrated to the v15.4 substrate: cfg_uses rows +
+    edges.actual_args populated, exactly what the new producer writes."""
+    db = _build_graph(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE cfg_uses ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " node_id INTEGER NOT NULL,"
+        " block_index INTEGER NOT NULL,"
+        " var_name TEXT NOT NULL,"
+        " line INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO cfg_uses (node_id, block_index, var_name, line)"
+        " VALUES (?,?,?,?)",
+        _CFG_USES,
+    )
+    conn.execute("ALTER TABLE edges ADD COLUMN actual_args TEXT")
+    conn.execute(
+        "UPDATE edges SET actual_args = ?"
+        " WHERE source_id = 26 AND target_id = 21 AND source_line = 19",
+        ('["n"]',),
+    )
+    conn.execute(
+        "UPDATE edges SET actual_args = ?"
+        " WHERE source_id = 35 AND target_id = 34 AND source_line = 19",
+        ('["1","2","3"]',),
     )
     conn.commit()
     conn.close()
@@ -912,8 +1064,9 @@ def test_slice_interprocedural_persisted_cfg_bounded(tmp_path):
 
 def test_taint_field_channel_owner_bound_and_mismatch_excluded(tmp_path):
     """Same-named fields on different classes never join: Repo.set ->
-    Repo.get forms an owner_bound channel; Other.peek (different owner)
-    reading the same field name must not appear."""
+    Repo.get and Repo.set -> Svc.use (receiver r: Repo via param type)
+    form owner_bound channels; Other.peek (different owner) reading the
+    same field name must not appear."""
     db = _build_graph(tmp_path)
     artifact = execute_query(
         _request(ActionKind.TAINT, {"source": "set"}),
@@ -923,10 +1076,237 @@ def test_taint_field_channel_owner_bound_and_mismatch_excluded(tmp_path):
     channels = [
         c for c in answer["field_channels"] if c["field"] == "state"
     ]
-    assert len(channels) == 1
+    readers = {c["reader"]["symbol"] for c in channels}
+    assert readers == {"get", "use", "check"}
+    for ch in channels:
+        assert ch["identity"] == "owner_bound"
+        assert ch["owner"] == "db.Repo"
+        assert ch["writer"]["symbol"] == "set"
+
+
+def test_taint_named_receiver_binds_via_param_annotation(tmp_path):
+    """r.state where param r: Repo — the receiver name resolves through
+    the persisted param annotation, so the channel is owner_bound to
+    Repo, not owner_unknown and not enclosing-class Svc."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(ActionKind.TAINT, {"source": "set"}),
+        _context(tmp_path, db),
+    )
+    channels = [
+        c
+        for c in _answer(artifact)["field_channels"]
+        if c["field"] == "state" and c["reader"]["symbol"] == "use"
+    ]
     (ch,) = channels
     assert ch["identity"] == "owner_bound"
     assert ch["owner"] == "db.Repo"
-    assert ch["writer"]["symbol"] == "set"
-    assert ch["reader"]["symbol"] == "get"
-    assert "field_flow_owner_bound" in artifact.omissions
+
+
+def test_taint_persisted_receiver_binds_without_prop(tmp_path):
+    """access_sites v2 carries ``receiver`` — check(r: Repo) has NO
+    field_read prop, so only the persisted receiver can resolve its owner.
+    Without it the owner falls back to unresolved (owner_unknown)."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(ActionKind.TAINT, {"source": "set"}),
+        _context(tmp_path, db),
+    )
+    channels = [
+        c
+        for c in _answer(artifact)["field_channels"]
+        if c["field"] == "state" and c["reader"]["symbol"] == "check"
+    ]
+    (ch,) = channels
+    assert ch["identity"] == "owner_bound"
+    assert ch["owner"] == "db.Repo"
+
+
+def test_slice_interprocedural_persisted_cfg_variadic_binding(tmp_path):
+    """Signature-proven formals: tsSpread's ``...rest`` absorbs the extra
+    positionals — mapped_vars carries first/rest with no arity flag."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "tsCaller", "line": 19, "direction": "backward",
+             "interprocedural": True},
+        ),
+        _context(tmp_path, db),
+    )
+    sl = _answer(artifact)["slices"][0]
+    (hop,) = sl["cross_function"]
+    assert hop["callee_fn"] == "tsSpread"
+    assert hop["mapped_vars"] == {"first": "1", "rest": "2,3"}
+    assert not any(
+        lim.startswith("arity_mismatch")
+        for lim in (sl.get("limitations") or [])
+    )
+
+
+# ---------------------------------------------------------------------------
+# signature-proven formal/actual binding — unit level
+# (kwargs/spreads never occur in go/java/ts/js source, so these exercise
+# _bind_actuals / _param_properties / _split_actuals directly)
+# ---------------------------------------------------------------------------
+
+
+def _props_conn(rows):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE properties (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " node_id INT, kind TEXT, value TEXT, line INT)"
+    )
+    conn.executemany(
+        "INSERT INTO properties (node_id, kind, value, line)"
+        " VALUES (?,?,?,?)",
+        rows,
+    )
+    return conn
+
+
+def test_param_properties_parses_kinds_and_order():
+    from groundtruth.runtime.cfg_store import _param_properties
+
+    conn = _props_conn(
+        [
+            (1, "param", "cb:func() string [required]", 2),
+            (1, "param", "db opt=Depends(get_db)", 2),
+            (1, "param", "...rest:number[] [required]", 2),
+            (1, "param", "**opts [required]", 2),
+            (2, "param", "args:...int [required]", 2),
+        ]
+    )
+    props = _param_properties(conn, 1)
+    assert [p["name"] for p in props] == ["cb", "db", "rest", "opts"]
+    assert [p["kind"] for p in props] == [
+        "required",
+        "optional",
+        "variadic",
+        "kw_variadic",
+    ]
+    assert props[0]["type"] == "func() string"
+    assert props[1]["default"] == "Depends(get_db)"
+    go_props = _param_properties(conn, 2)
+    assert go_props[0]["name"] == "args"
+    assert go_props[0]["kind"] == "variadic"
+
+
+def test_bind_actuals_keyword_positional_and_variadic():
+    from groundtruth.runtime.cfg_store import _bind_actuals
+
+    formals = [
+        {"name": "a", "kind": "required"},
+        {"name": "b", "kind": "required"},
+        {"name": "c", "kind": "optional"},
+    ]
+    bound, reasons = _bind_actuals(formals, ["1", "b=2"])
+    assert bound == {"a": "1", "b": "2"}
+    assert reasons == []
+
+    bound, reasons = _bind_actuals(formals, ["1", "zzz=9"])
+    assert "unknown_kw:zzz" in reasons
+
+    bound, reasons = _bind_actuals(formals, ["1", "2", "3", "4"])
+    assert "arity_mismatch" in reasons
+
+    formals_var = formals + [{"name": "rest", "kind": "variadic"}]
+    bound, reasons = _bind_actuals(formals_var, ["1", "2", "3", "4", "5"])
+    assert bound["rest"] == "4,5"
+    assert reasons == []
+
+    formals_kw = formals + [{"name": "kw", "kind": "kw_variadic"}]
+    bound, reasons = _bind_actuals(formals_kw, ["1", "x=7", "y=8"])
+    assert bound["kw"] == "x=7,y=8"
+    assert reasons == []
+
+    bound, reasons = _bind_actuals(formals_var, ["*seq", "1"])
+    assert bound["rest"] == "*seq,1" or bound["rest"] == "*seq"
+
+
+def test_split_actuals_prefers_caller_formal_on_multicall_line():
+    from groundtruth.runtime.cfg_store import _split_actuals
+
+    # Resolved callee is `goHelper` but the text calls the caller's formal
+    # `cb` — the callable-value fallback must pick cb(), not helper().
+    clean = ["\tres := helper(); cb(arg1)", ""]
+    actuals = _split_actuals("goHelper", 1, clean, prefer_names=frozenset({"cb"}))
+    assert actuals == ["arg1"]
+
+    # Without the preference the first call on the line wins — helper()
+    # carries no args, so the mapping degrades honestly to empty.
+    actuals = _split_actuals("goHelper", 1, clean)
+    assert actuals == []
+
+
+def test_split_actuals_comparison_is_not_keyword():
+    from groundtruth.runtime.cfg_store import _split_actuals
+
+    clean = ["\tif check(x == y, flag) {", ""]
+    actuals = _split_actuals("check", 1, clean)
+    assert actuals == ["x == y", "flag"]
+
+
+# ---------------------------------------------------------------------------
+# schema v15.4 substrate — persisted cfg_uses + actual_args + access receiver
+# ---------------------------------------------------------------------------
+
+
+def test_slice_persisted_cfg_uses_parser_exact(tmp_path):
+    """With cfg_uses persisted, uses come from the producer's parser-exact
+    rows — the limitation narrows from approximate_use_detection to
+    approximate_use_coverage, and the slice itself is unchanged."""
+    db = _build_graph_v15x(tmp_path)
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "gofn", "line": 11, "direction": "backward"},
+        ),
+        _context(tmp_path, db),
+    )
+    sl = _answer(artifact)["slices"][0]
+    assert "approximate_use_coverage" in sl["limitations"]
+    assert "approximate_use_detection" not in sl["limitations"]
+    # The slice is the same set the lexical path found: return a pulls in
+    # a's defs in both arms plus the if-condition line.
+    merged = set(sl["slice_lines"])
+    assert {4, 5, 9, 11} <= merged
+
+
+def test_slice_interprocedural_actual_args_exact(tmp_path):
+    """edges.actual_args carries the callsite's argument texts — the hop
+    binds without re-splitting source text, so the extraction flag is
+    gone while the mapping is identical."""
+    db = _build_graph_v15x(tmp_path)
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "gocaller", "line": 19, "direction": "backward",
+             "interprocedural": True},
+        ),
+        _context(tmp_path, db),
+    )
+    sl = _answer(artifact)["slices"][0]
+    (hop,) = sl["cross_function"]
+    assert hop["mapped_vars"] == {"x": "n"}
+    assert "approximate_actual_extraction" not in (
+        sl.get("limitations") or []
+    )
+
+
+def test_slice_interprocedural_text_fallback_flag(tmp_path):
+    """On a pre-v15.4 graph (no actual_args column) the text-splitting
+    fallback runs and stays honestly flagged."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "gocaller", "line": 19, "direction": "backward",
+             "interprocedural": True},
+        ),
+        _context(tmp_path, db),
+    )
+    sl = _answer(artifact)["slices"][0]
+    (hop,) = sl["cross_function"]
+    assert hop["mapped_vars"] == {"x": "n"}
+    assert "approximate_actual_extraction" in (sl.get("limitations") or [])

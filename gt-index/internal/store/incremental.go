@@ -438,7 +438,7 @@ func DeleteFileEdgesAndNodesTx(tx *sql.Tx, filePath string) (int64, int64, error
 	// keyed on node_id, so the same file-membership subquery applies — and the
 	// delete must precede the node delete below for it to resolve. createSchema
 	// guarantees the tables exist on every open, including incremental ones.
-	for _, table := range []string{"cfg_blocks", "cfg_edges", "cfg_defs"} {
+	for _, table := range []string{"cfg_blocks", "cfg_edges", "cfg_defs", "cfg_uses"} {
 		if _, err := tx.Exec(
 			fmt.Sprintf(`DELETE FROM %s WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?)`, table),
 			filePath,
@@ -1152,8 +1152,8 @@ func BatchInsertEdgesTx(tx *sql.Tx, edges []*Edge) error {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO edges (source_id, target_id, type, source_line, source_file,
-		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status, access_sites)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 resolution_method, confidence, metadata, trust_tier, candidate_count, evidence_type, verification_status, access_sites, actual_args)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("prepare insert edges: %w", err)
@@ -1165,7 +1165,7 @@ func BatchInsertEdgesTx(tx *sql.Tx, edges []*Edge) error {
 			e.SourceID, e.TargetID, e.Type, e.SourceLine, e.SourceFile,
 			e.ResolutionMethod, e.Confidence, e.Metadata,
 			e.TrustTier, e.CandidateCount, e.EvidenceType, e.VerificationStatus,
-			nullableText(e.AccessSites),
+			nullableText(e.AccessSites), nullableText(e.ActualArgs),
 		); err != nil {
 			return fmt.Errorf("insert edge %d: %w", i, err)
 		}

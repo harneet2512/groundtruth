@@ -9,6 +9,7 @@ parity failure this module exists to prevent.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +81,23 @@ def probe(db_path: str | Path) -> SchemaProbe:
         conn.close()
 
 
+_SCHEMA_VERSION_NUM_RE = re.compile(r"^v(\d+)(?:\.(\d+))?")
+
+
+def _version_tuple(version: str) -> tuple[int, int] | None:
+    """``v15.4-callsite-actuals`` -> ``(15, 4)``; unparseable -> ``None``.
+
+    Producer versions are monotonically increasing ``v<major>[.<minor>]-<tag>``
+    stamps — the tag names the change, the numbers order it. Schema changes
+    are additive-only (new columns/tables), so a NEWER graph satisfies a
+    reader whose required floor is older.
+    """
+    m = _SCHEMA_VERSION_NUM_RE.match(version)
+    if m is None:
+        return None
+    return (int(m.group(1)), int(m.group(2) or 0))
+
+
 def verify_graph_db_schema(
     db_path: str | Path,
     *,
@@ -90,7 +108,8 @@ def verify_graph_db_schema(
 
     Raises ``SchemaMismatch`` when:
       - ``schema_version`` is missing from project_meta (pre-stamping binary).
-      - ``schema_version`` differs from the required version.
+      - ``schema_version`` orders BELOW the required floor (ordered compare —
+        additive schema bumps like ``v15.4`` satisfy a ``v15.2`` floor).
       - Any required edges column is absent.
 
     Set ``strict=False`` to only return the probe without raising — useful for
@@ -105,10 +124,13 @@ def verify_graph_db_schema(
             "project_meta.schema_version is missing — binary predates "
             "FINAL_ARCH_V2 provenance stamping"
         )
-    elif p.schema_version != required_schema_version:
-        reasons.append(
-            f"schema_version={p.schema_version!r} != required={required_schema_version!r}"
-        )
+    else:
+        have = _version_tuple(p.schema_version)
+        want = _version_tuple(required_schema_version)
+        if have is None or want is None or have < want:
+            reasons.append(
+                f"schema_version={p.schema_version!r} below required={required_schema_version!r}"
+            )
     if p.missing_columns:
         reasons.append(
             "edges table missing required columns: " + ", ".join(sorted(p.missing_columns))

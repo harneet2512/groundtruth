@@ -102,8 +102,9 @@ func TestPromote_ReadsWritesAccessSites(t *testing.T) {
 
 	// ---- access_sites payload: mutate's READS edge 11->10. ----
 	type siteEntry struct {
-		Field string `json:"field"`
-		Line  int    `json:"line"`
+		Field    string `json:"field"`
+		Line     int    `json:"line"`
+		Receiver string `json:"receiver"`
 	}
 	var raw string
 	tx, err := db.BeginTx()
@@ -123,8 +124,8 @@ func TestPromote_ReadsWritesAccessSites(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatalf("access_sites is not valid JSON: %v\n%s", err, raw)
 	}
-	if m["v"] != float64(1) {
-		t.Errorf("access_sites v: want 1, got %v", m["v"])
+	if m["v"] != float64(2) {
+		t.Errorf("access_sites v: want 2, got %v", m["v"])
 	}
 	if m["field"] != "count" {
 		t.Errorf("access_sites field: want 'count' (== metadata), got %v", m["field"])
@@ -152,7 +153,10 @@ func TestPromote_ReadsWritesAccessSites(t *testing.T) {
 	if b, err := json.Marshal(m["sites"]); err == nil {
 		_ = json.Unmarshal(b, &sites)
 	}
-	wantSites := []siteEntry{{Field: "count", Line: 6}, {Field: "size", Line: 7}}
+	wantSites := []siteEntry{{Field: "count", Line: 6, Receiver: "self"}, {Field: "size", Line: 7, Receiver: "self"}}
+	if m["receiver"] != "self" {
+		t.Errorf("access_sites receiver: want 'self' (persisted v2 receiver), got %v", m["receiver"])
+	}
 	for i, w := range wantSites {
 		if sites[i] != w {
 			t.Errorf("sites[%d]: want %+v, got %+v", i, w, sites[i])
@@ -183,7 +187,10 @@ func TestPromote_ReadsWritesAccessSites(t *testing.T) {
 	if b, err := json.Marshal(wm["sites"]); err == nil {
 		_ = json.Unmarshal(b, &wsites)
 	}
-	wantW := []siteEntry{{Field: "count", Line: 8}, {Field: "count", Line: 9}, {Field: "size", Line: 12}}
+	wantW := []siteEntry{{Field: "count", Line: 8, Receiver: "self"}, {Field: "count", Line: 9, Receiver: "self"}, {Field: "size", Line: 12, Receiver: "self"}}
+	if wm["receiver"] != "self" {
+		t.Errorf("WRITES access_sites receiver: want 'self', got %v", wm["receiver"])
+	}
 	if len(wsites) != len(wantW) {
 		t.Fatalf("WRITES sites: want %d (count@8, count@9, size@12), got %v", len(wantW), wsites)
 	}
@@ -201,7 +208,7 @@ func TestPromote_ReadsWritesAccessSites(t *testing.T) {
 		 WHERE type='READS' AND source_id=12 AND target_id=10`).Scan(&raw); err != nil {
 		t.Fatalf("read access_sites for READS 12->10: %v", err)
 	}
-	wantRaw := `{"v":1,"field":"size","access":"read","line":21,"scope_node_id":12,"scope_name":"read_only","sites":[{"field":"size","line":21}]}`
+	wantRaw := `{"v":2,"field":"size","access":"read","line":21,"scope_node_id":12,"scope_name":"read_only","receiver":"self","sites":[{"field":"size","line":21,"receiver":"self"}]}`
 	if raw != wantRaw {
 		t.Errorf("access_sites byte-exact (no scope_stable_id):\n want %s\n got  %s", wantRaw, raw)
 	}

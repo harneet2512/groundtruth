@@ -717,3 +717,64 @@ func TestCallableAlias_LambdaSkipped_Kotlin(t *testing.T) {
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ArgumentTexts (v15.4): parser-exact top-level argument texts per callsite —
+// the substrate consumers use instead of re-splitting call text.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Keyword args, spreads, and nested calls all survive verbatim, in order.
+func TestArgumentTexts_KwargsAndSpreads_Python(t *testing.T) {
+	src := "def main():\n" +
+		"    f(1, x=2, *seq, g(a, b), **opts)\n"
+	res := parseFixture(t, "m.py", src)
+	call := findCall(res, "f", 2)
+	if call == nil {
+		t.Fatalf("f() callsite missing; calls=%+v", res.Calls)
+	}
+	want := []string{"1", "x=2", "*seq", "g(a, b)", "**opts"}
+	if len(call.ArgumentTexts) != len(want) {
+		t.Fatalf("ArgumentTexts = %v, want %v", call.ArgumentTexts, want)
+	}
+	for i, w := range want {
+		if call.ArgumentTexts[i] != w {
+			t.Fatalf("ArgumentTexts[%d] = %q, want %q (all=%v)",
+				i, call.ArgumentTexts[i], w, call.ArgumentTexts)
+		}
+	}
+}
+
+// Multi-call line: each callsite carries only its own arguments.
+func TestArgumentTexts_PerCallsiteOnSharedLine_Go(t *testing.T) {
+	src := "package main\n" +
+		"func line() int {\n" +
+		"	return helper(1) + cb(arg1, arg2)\n" +
+		"}\n"
+	res := parseFixture(t, "m.go", src)
+	h := findCall(res, "helper", 3)
+	c := findCall(res, "cb", 3)
+	if h == nil || c == nil {
+		t.Fatalf("calls=%+v, want helper@3 and cb@3", res.Calls)
+	}
+	if len(h.ArgumentTexts) != 1 || h.ArgumentTexts[0] != "1" {
+		t.Fatalf("helper ArgumentTexts = %v, want [1]", h.ArgumentTexts)
+	}
+	if len(c.ArgumentTexts) != 2 || c.ArgumentTexts[0] != "arg1" || c.ArgumentTexts[1] != "arg2" {
+		t.Fatalf("cb ArgumentTexts = %v, want [arg1 arg2]", c.ArgumentTexts)
+	}
+}
+
+// Empty arg list: ArgumentTexts stays nil/empty — never fabricated.
+func TestArgumentTexts_EmptyCall_TS(t *testing.T) {
+	src := "function main(): void {\n" +
+		"	f();\n" +
+		"}\n"
+	res := parseFixture(t, "m.ts", src)
+	call := findCall(res, "f", 2)
+	if call == nil {
+		t.Fatalf("f() callsite missing; calls=%+v", res.Calls)
+	}
+	if len(call.ArgumentTexts) != 0 {
+		t.Fatalf("ArgumentTexts = %v, want empty", call.ArgumentTexts)
+	}
+}

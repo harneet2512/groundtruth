@@ -50,16 +50,26 @@ type CFGDef struct {
 	Line       int
 }
 
+// CFGUse is one row of cfg_uses: a parser-exact identifier read anchored to
+// a block — the read complement of CFGDef (v15.3).
+type CFGUse struct {
+	NodeID     int64
+	BlockIndex int
+	VarName    string
+	Line       int
+}
+
 // ReplaceCFG rewrites the cfg_* sidecar wholesale in one transaction. Used by
 // the full-index path (fresh staged DB, or an amend build whose retained
 // nodes re-emit identical rows). Incremental reparses instead delete the
 // file's rows inside DeleteFileEdgesAndNodesTx and insert via InsertCFGTx.
-func (d *DB) ReplaceCFG(blocks []*CFGBlock, edges []*CFGEdge, defs []*CFGDef) error {
+func (d *DB) ReplaceCFG(blocks []*CFGBlock, edges []*CFGEdge, defs []*CFGDef, uses []*CFGUse) error {
 	tx, err := d.db.Begin()
 	if err != nil {
 		return fmt.Errorf("cfg replace begin: %w", err)
 	}
 	for _, stmt := range []string{
+		`DELETE FROM cfg_uses`,
 		`DELETE FROM cfg_defs`,
 		`DELETE FROM cfg_edges`,
 		`DELETE FROM cfg_blocks`,
@@ -69,7 +79,7 @@ func (d *DB) ReplaceCFG(blocks []*CFGBlock, edges []*CFGEdge, defs []*CFGDef) er
 			return fmt.Errorf("cfg replace clear: %w", err)
 		}
 	}
-	if err := InsertCFGTx(tx, blocks, edges, defs); err != nil {
+	if err := InsertCFGTx(tx, blocks, edges, defs, uses); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -82,7 +92,7 @@ func (d *DB) ReplaceCFG(blocks []*CFGBlock, edges []*CFGEdge, defs []*CFGDef) er
 // InsertCFGTx inserts cfg rows inside the caller's transaction. Caller owns
 // commit — the incremental path runs this alongside node re-insertion so the
 // reparsed file's blocks/edges/defs swap atomically.
-func InsertCFGTx(tx *sql.Tx, blocks []*CFGBlock, edges []*CFGEdge, defs []*CFGDef) error {
+func InsertCFGTx(tx *sql.Tx, blocks []*CFGBlock, edges []*CFGEdge, defs []*CFGDef, uses []*CFGUse) error {
 	if len(blocks) > 0 {
 		stmt, err := tx.Prepare(
 			`INSERT INTO cfg_blocks (node_id, block_index, kind, start_line, end_line, statement_lines)
@@ -128,6 +138,20 @@ func InsertCFGTx(tx *sql.Tx, blocks []*CFGBlock, edges []*CFGEdge, defs []*CFGDe
 			if _, err := stmt.Exec(df.NodeID, df.BlockIndex, df.VarName, nullableLine(df.Line)); err != nil {
 				stmt.Close()
 				return fmt.Errorf("cfg_defs insert: %w", err)
+			}
+		}
+		stmt.Close()
+	}
+	if len(uses) > 0 {
+		stmt, err := tx.Prepare(
+			`INSERT INTO cfg_uses (node_id, block_index, var_name, line) VALUES (?, ?, ?, ?)`)
+		if err != nil {
+			return fmt.Errorf("cfg_uses prepare: %w", err)
+		}
+		for _, u := range uses {
+			if _, err := stmt.Exec(u.NodeID, u.BlockIndex, u.VarName, nullableLine(u.Line)); err != nil {
+				stmt.Close()
+				return fmt.Errorf("cfg_uses insert: %w", err)
 			}
 		}
 		stmt.Close()

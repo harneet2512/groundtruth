@@ -369,24 +369,138 @@ def load_stored_cfg(
                 target = earlier[-1] if earlier else items[0]
             item_defs[target].append(d)
 
+    # Parser-exact persisted uses (schema v15.3+): the producer emits one
+    # cfg_uses row per identifier read, anchored to (block, line).  When the
+    # table exists it REPLACES the lexical scan — reads are compiler-adjacent
+    # evidence, not regex guesses.  Attribution to items uses the same span
+    # rule as defs.  Absent table (older graph) -> lexical fallback below.
+    persisted_uses: list[tuple[int, str, int]] | None = None
+    try:
+        persisted_uses = [
+            (int(b), str(n), int(l or 0))
+            for b, n, l in conn.execute(
+                "SELECT block_index, var_name, COALESCE(line, 0)"
+                " FROM cfg_uses WHERE node_id = ?"
+                " ORDER BY block_index, line, var_name",
+                (int(node_id),),
+            ).fetchall()
+        ]
+    except sqlite3.Error:
+        persisted_uses = None
+
     item_effects: dict[_Item, tuple[list[_Def], list[_Use]]] = {}
     any_call = False
+    if persisted_uses is not None:
+        for item in all_starts:
+            item_effects[item] = (
+                sorted(item_defs[item], key=lambda d: (d.line, d.name)),
+                [],
+            )
+        # Persisted uses attribute to the item whose span covers their line;
+        # multi-line statements map to their start item (same rule as defs).
+        call_re = re.compile(r"[A-Za-z_][\w.$]*\s*\(")
+        for _bid, uname, uline in persisted_uses:
+            if not uname or uline <= 0:
+                continue
+            target = next(
+                (item for item in all_starts
+                 if item_span[item][0] <= uline <= item_span[item][1]),
+                None,
+            )
+            if target is None:
+                earlier = [
+                    item for item in all_starts if item[1] <= uline
+                ]
+                target = earlier[-1] if earlier else None
+            if target is None:
+                continue
+            defs_here, uses = item_effects[target]
+            uses.append(_Use(uname, uline))
+            item_effects[target] = (defs_here, uses)
+        # Call detection still comes from the source text — a `f(` shape on
+        # any scan line marks the call-site limitation exactly as before.
+        for item in all_starts:
+            for ln2 in item_scan_lines[item]:
+                text_line = (
+                    clean[ln2 - 1] if 0 < ln2 <= len(clean) else ""
+                )
+                if call_re.search(text_line):
+                    any_call = True
+                    break
+            if any_call:
+                break
+    else:
+        for item in all_starts:
+            defs_here = item_defs[item]
+            uses, call_found = _scan_uses(
+                item, defs_here, item_scan_lines[item], clean, non_use,
+                function_name=function_name,
+            )
+            if call_found:
+                any_call = True
+            item_effects[item] = (
+                sorted(defs_here, key=lambda d: (d.line, d.name)),
+                uses,
+            )
+
+    # Parser-exact supplemental uses: the producer persists flow/access
+    # evidence as properties — ``data_flow`` (``var -> expr``), field
+    # reads (``reads: <recv>.<field>``) and mutations
+    # (``mutates: <recv>.<field>``).  The left/receiver variable is
+    # provably read at the property's line; merge it where the lexical
+    # scan missed it.  Coverage is partial, so the flag stays — this
+    # only sharpens the chains that exist.
+    try:
+        sup_rows = conn.execute(
+            "SELECT kind, value, line FROM properties"
+            " WHERE node_id = ?"
+            " AND kind IN ('data_flow','field_read','side_effect')",
+            (int(node_id),),
+        ).fetchall()
+    except sqlite3.Error:
+        sup_rows = []
+    line_items: dict[int, list[_Item]] = {}
     for item in all_starts:
-        defs_here = item_defs[item]
-        uses, call_found = _scan_uses(
-            item, defs_here, item_scan_lines[item], clean, non_use,
-            function_name=function_name,
-        )
-        if call_found:
-            any_call = True
-        item_effects[item] = (
-            sorted(defs_here, key=lambda d: (d.line, d.name)),
-            uses,
-        )
+        for ln in item_scan_lines.get(item, ()):
+            line_items.setdefault(ln, []).append(item)
+    for kind, value, sline in sup_rows:
+        line = int(sline or 0)
+        names: list[str] = []
+        v = str(value).strip()
+        if kind == "data_flow":
+            head = v.split("->", 1)[0].strip()
+            m = _CHAIN_RE.match(head)
+            if m is not None:
+                names.extend(_prefixes(m.group(0)))
+        else:
+            m = re.match(
+                r"^(reads|mutates):\s*([A-Za-z_][\w.]*)", v
+            )
+            if m is not None:
+                # reads: whole receiver chain is loaded.  mutates: the
+                # field is WRITTEN — only the receiver head is a use.
+                if m.group(1) == "reads":
+                    names.extend(_prefixes(m.group(2)))
+                else:
+                    names.append(m.group(2).split(".", 1)[0])
+        for name in names:
+            if name in non_use:
+                continue
+            for item in line_items.get(line, ()):
+                defs_here, uses = item_effects[item]
+                if (name, line) not in {(u.name, u.line) for u in uses}:
+                    uses.append(_Use(name, line))
+                item_effects[item] = (defs_here, uses)
+
     if any_call:
         _lim("call_sites_not_inlined")
 
-    _lim("approximate_use_detection")
+    if persisted_uses is not None:
+        # Reads are parser-exact where emitted; coverage of exotic positions
+        # (await exprs, decorators, nested-function bodies) is the residual.
+        _lim("approximate_use_coverage")
+    else:
+        _lim("approximate_use_detection")
 
     # Unreachable blocks still get dominator sets (the ported algorithm
     # handles them), but they are named so callers can mark the evidence.
@@ -965,7 +1079,13 @@ def _last_item_line(cfg: StoredCFG) -> int:
     return max(lines) if lines else cfg.def_line
 
 
-def _split_actuals(call_name: str, call_line: int, clean: Sequence[str]) -> list[str] | None:
+def _split_actuals(
+    call_name: str,
+    call_line: int,
+    clean: Sequence[str],
+    *,
+    prefer_names: frozenset[str] = frozenset(),
+) -> list[str] | None:
     """Actual argument expressions of ``call_name(...)`` on ``call_line``.
 
     Locates the first ``call_name(`` occurrence on the line, paren-matches
@@ -973,6 +1093,11 @@ def _split_actuals(call_name: str, call_line: int, clean: Sequence[str]) -> list
     brackets, braces, and string literals are depth/string aware.  This is
     textual, not AST: ``approximate_actual_extraction`` always applies.
     Returns ``None`` when the call site cannot be located on the line.
+
+    ``prefer_names`` ranks fallback candidates when the textual callee
+    differs from the resolved target (callable-value flow: ``cb()``
+    resolved to ``goHelper``).  Passing the caller's formal names picks
+    the parameter callback over an unrelated call on a multi-call line.
     """
     if not (0 < call_line <= len(clean)):
         return None
@@ -981,17 +1106,16 @@ def _split_actuals(call_name: str, call_line: int, clean: Sequence[str]) -> list
     m = re.search(r"(?<![\w$])" + re.escape(tail) + r"\s*\(", text)
     if m is None:
         # Callable-value flow: the textual callee differs from the resolved
-        # target (``cb()`` bound to ``goHelper``).  Fall back to the first
-        # call-shaped identifier on the line — the graph edge already proved
-        # this line's call resolves to the callee.
-        m = next(
-            (
-                mm
-                for mm in _CALL_RE.finditer(text)
-                if mm.group(1).split(".", 1)[0] not in _CALL_STOP
-            ),
-            None,
-        )
+        # target (``cb()`` bound to ``goHelper``).  The graph edge already
+        # proved this line's call resolves to the callee — prefer a
+        # call-shaped caller formal, else the first candidate.
+        candidates = [
+            mm
+            for mm in _CALL_RE.finditer(text)
+            if mm.group(1).split(".", 1)[0] not in _CALL_STOP
+        ]
+        preferred = [mm for mm in candidates if mm.group(1) in prefer_names]
+        m = preferred[0] if preferred else (candidates[0] if candidates else None)
         if m is None:
             return None
     i = text.index("(", m.start())
@@ -1037,10 +1161,69 @@ def _actual_vars(expr: str, non_use: frozenset[str]) -> list[str]:
     return out
 
 
+_PARAM_VALUE_RE = re.compile(
+    r"^(?P<name>(?:\*{1,2}|\.{3})?[A-Za-z_][\w$]*)"
+    r"(?::+(?P<type>.*?))?"
+    r"(?:\s+\[required\]|\s+opt(?:=(?P<default>.*))?)?$"
+)
+
+
+def _param_properties(
+    conn: sqlite3.Connection, node_id: int
+) -> list[dict[str, object]]:
+    """Signature-proven formals from persisted ``param`` properties —
+    declaration order (rowid), with type annotations and optionality
+    markers (``name[:type] [required]`` / ``name[:type] opt[=default]``).
+    Variadics surface as ``*args`` / ``**kw`` / ``...rest`` name prefixes
+    or a ``...``-prefixed type (Go ``args ...int``); older graphs emit
+    them unmarked and they bind as ordinary formals.  Returns [] when
+    the producer emitted no param rows for the node."""
+    try:
+        rows = conn.execute(
+            "SELECT value, line FROM properties"
+            " WHERE kind = 'param' AND node_id = ? ORDER BY id",
+            (node_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    out: list[dict[str, object]] = []
+    for value, line in rows:
+        m = _PARAM_VALUE_RE.match(str(value).strip())
+        if m is None:
+            continue
+        raw_name = m.group("name")
+        ptype = (m.group("type") or "").strip()
+        kind = (
+            "required"
+            if m.group("default") is None and " opt" not in str(value)
+            else "optional"
+        )
+        if raw_name.startswith("**"):
+            kind = "kw_variadic"
+        elif raw_name.startswith(("*", "...")) or ptype.startswith("..."):
+            kind = "variadic"
+        out.append(
+            {
+                "name": raw_name.lstrip("*."),
+                "type": ptype,
+                "kind": kind,
+                "default": m.group("default"),
+                "line": int(line or 0),
+            }
+        )
+    return out
+
+
 def _formal_defs(conn: sqlite3.Connection, node_id: int) -> list[tuple[str, int]]:
-    """Parameter-like defs of a persisted function, in declaration order:
-    cfg_defs rows in the entry block (block_index 0), first occurrence wins.
-    ``cfg.params`` is sorted for the public API; hops need source order."""
+    """Parameter-like defs of a persisted function, in declaration order.
+
+    Prefers signature-proven ``param`` properties (exact names + declared
+    positions); falls back to cfg_defs rows in the entry block
+    (block_index 0) when no param rows exist.  ``cfg.params`` is sorted
+    for the public API; hops need source order."""
+    props = _param_properties(conn, node_id)
+    if props:
+        return [(str(p["name"]), int(p["line"])) for p in props]
     rows = conn.execute(
         "SELECT var_name, line FROM cfg_defs"
         " WHERE node_id = ? AND block_index = 0 ORDER BY id",
@@ -1054,6 +1237,80 @@ def _formal_defs(conn: sqlite3.Connection, node_id: int) -> list[tuple[str, int]
             seen.add(name)
             out.append((name, int(ln)))
     return out
+
+
+_KW_ACTUAL_RE = re.compile(r"^(?P<kw>[A-Za-z_][\w$]*)\s*=(?!=)")
+
+
+def _bind_actuals(
+    formals: list[dict[str, object]],
+    actuals: list[str],
+) -> tuple[dict[str, str], list[str]]:
+    """Bind actual expressions to signature-proven formals.
+
+    Keyword actuals (``name=expr``) bind by formal name; positional
+    actuals bind to the remaining required-then-optional formals in
+    declaration order; a variadic formal absorbs the rest.  Returns
+    ``(formal_name -> actual_expr, unbound_reasons)`` — reasons name the
+    binding failures honestly (``arity_mismatch``, ``unknown_kw``)."""
+    bound: dict[str, str] = {}
+    reasons: list[str] = []
+    kw_actuals: dict[str, str] = {}
+    pos_actuals: list[str] = []
+    formal_names = {str(f["name"]) for f in formals}
+    kw_variadic = next((f for f in formals if f["kind"] == "kw_variadic"), None)
+    variadic = next((f for f in formals if f["kind"] == "variadic"), None)
+    for a in actuals:
+        if a.startswith("**"):
+            # ``f(**opts)`` spreads into the keyword formals — it can only
+            # bind to ``**kw``; elsewhere the spread is unresolvable.
+            if kw_variadic is not None:
+                bound[str(kw_variadic["name"])] = a
+            else:
+                reasons.append(f"spread_actual:{a[:16]}")
+            continue
+        if a.startswith("*"):
+            # ``f(*seq)`` spreads an unknown count — binds only to a
+            # positional variadic.
+            if variadic is not None:
+                bound[str(variadic["name"])] = a
+            else:
+                reasons.append(f"spread_actual:{a[:16]}")
+            continue
+        km = _KW_ACTUAL_RE.match(a)
+        if km is not None:
+            kw = km.group("kw")
+            if kw in formal_names:
+                kw_actuals[kw] = a[km.end():].strip()
+            elif kw_variadic is not None:
+                kv = str(kw_variadic["name"])
+                extra = f"{kw}={a[km.end():].strip()}"
+                kw_actuals[kv] = (
+                    f"{kw_actuals[kv]},{extra}" if kv in kw_actuals else extra
+                )
+            else:
+                reasons.append(f"unknown_kw:{kw}")
+        else:
+            pos_actuals.append(a)
+    pos_formals = [
+        f for f in formals if f["kind"] not in ("variadic", "kw_variadic")
+    ]
+    remaining = [f for f in pos_formals if str(f["name"]) not in kw_actuals]
+    for f in formals:
+        name = str(f["name"])
+        if name in kw_actuals:
+            bound[name] = kw_actuals[name]
+    for i, f in enumerate(remaining):
+        if i < len(pos_actuals):
+            bound[str(f["name"])] = pos_actuals[i]
+    if len(pos_actuals) > len(remaining):
+        if variadic is not None:
+            vn = str(variadic["name"])
+            extra = ",".join(pos_actuals[len(remaining):])
+            bound[vn] = f"{bound[vn]},{extra}" if vn in bound else extra
+        else:
+            reasons.append("arity_mismatch")
+    return bound, reasons
 
 
 def _formal_reached_stored(
@@ -1178,17 +1435,54 @@ def interprocedural_slice_stored(
                     _analyses[node_id] = None
         return _analyses[node_id]
 
-    def _callees(caller_node_id: int, call_line: int) -> list[int]:
-        """Resolved CALLS targets at ``call_line`` — node ids, sorted."""
-        return [
-            int(r[0])
-            for r in conn.execute(
-                "SELECT DISTINCT e.target_id FROM edges e"
+    edge_cols = {
+        str(r[1]) for r in conn.execute("PRAGMA table_info(edges)")
+    }
+    has_actual_args = "actual_args" in edge_cols
+
+    def _callees(
+        caller_node_id: int, call_line: int
+    ) -> list[tuple[int, list[str] | None]]:
+        """Resolved CALLS targets at ``call_line`` — ``(node_id, actuals)``.
+
+        ``actuals`` is the parser-exact argument text list persisted on the
+        edge (schema v15.4+) or ``None`` when the graph predates it — the
+        caller falls back to source-text splitting, flagged approximate.
+        """
+        if has_actual_args:
+            rows = conn.execute(
+                "SELECT e.target_id, e.actual_args FROM edges e"
                 " WHERE e.source_id = ? AND e.type = 'CALLS'"
                 " AND e.source_line = ? ORDER BY e.target_id",
                 (caller_node_id, int(call_line)),
-            )
-        ]
+            ).fetchall()
+        else:
+            rows = [
+                (r[0], None)
+                for r in conn.execute(
+                    "SELECT DISTINCT e.target_id FROM edges e"
+                    " WHERE e.source_id = ? AND e.type = 'CALLS'"
+                    " AND e.source_line = ? ORDER BY e.target_id",
+                    (caller_node_id, int(call_line)),
+                ).fetchall()
+            ]
+        out: list[tuple[int, list[str] | None]] = []
+        seen_t: set[int] = set()
+        for target_id, raw_args in rows:
+            tid = int(target_id)
+            if tid in seen_t:
+                continue
+            seen_t.add(tid)
+            actuals: list[str] | None = None
+            if raw_args:
+                try:
+                    parsed = json.loads(str(raw_args))
+                except (TypeError, ValueError):
+                    parsed = None
+                if isinstance(parsed, list):
+                    actuals = [str(a) for a in parsed]
+            out.append((tid, actuals))
+        return out
 
     def _call_lines_in(analysis: StoredAnalysis, covered: set[_Item]) -> list[int]:
         covered_lines = {it[1] for it in covered}
@@ -1334,7 +1628,7 @@ def interprocedural_slice_stored(
             if not targets:
                 _lim(f"callee_unresolved:{cline}")
                 continue
-            for c_id in targets:
+            for c_id, persisted_actuals in targets:
                 c_info = _node(c_id)
                 if c_info is None:
                     _lim("callee_target_malformed")
@@ -1363,21 +1657,61 @@ def interprocedural_slice_stored(
                 if _text(c_file) is None:
                     _lim(f"callee_source_unavailable:{c_file}")
                     continue
-                # Positional actual->formal binding over the callee's
-                # persisted parameter defs (declaration order).
-                actuals = _split_actuals(c_fn, cline, _clean(file))
-                if actuals is None:
-                    _lim(f"actuals_unmapped:{c_fn}")
-                    actuals = []
-                formals = _formal_defs(conn, c_id)
-                if len(actuals) > len(formals):
-                    _lim("actuals_unmapped")
-                mapping: dict[tuple[str, int], str] = {
-                    formals[i]: actuals[i]
-                    for i in range(min(len(formals), len(actuals)))
-                }
+                # Signature-proven actual->formal binding: persisted
+                # ``param`` properties give declared order/types/kinds;
+                # kw actuals bind by name, positionals fill the rest.
+                if persisted_actuals is not None:
+                    # Parser-exact arg texts persisted on the edge — no
+                    # text re-splitting, no extraction approximation.
+                    actuals = persisted_actuals
+                    actuals_exact = True
+                else:
+                    caller_formals = frozenset(
+                        str(p["name"])
+                        for p in _param_properties(conn, node_id)
+                    )
+                    actuals = _split_actuals(
+                        c_fn, cline, _clean(file),
+                        prefer_names=caller_formals,
+                    )
+                    actuals_exact = False
+                    if actuals is None:
+                        _lim(f"actuals_unmapped:{c_fn}")
+                        actuals = []
+                formals_meta = _param_properties(conn, c_id)
+                if formals_meta:
+                    bound, reasons = _bind_actuals(formals_meta, actuals)
+                    for r in reasons:
+                        _lim(r if ":" in r else f"binding_{r}:{c_fn}")
+                    # Chain lookups key on cfg_defs rows — resolve each bound
+                    # formal name to its persisted def key.
+                    key_by_name = {
+                        str(r[0]): (str(r[0]), int(r[1]))
+                        for r in conn.execute(
+                            "SELECT var_name, line FROM cfg_defs"
+                            " WHERE node_id = ? AND block_index = 0"
+                            " ORDER BY id",
+                            (c_id,),
+                        )
+                    }
+                    mapping: dict[tuple[str, int], str] = {}
+                    for fname, aexpr in sorted(bound.items()):
+                        k = key_by_name.get(fname)
+                        if k is None:
+                            _lim(f"formal_def_absent:{fname}")
+                            continue
+                        mapping[k] = aexpr
+                else:
+                    formals = _formal_defs(conn, c_id)
+                    if len(actuals) > len(formals):
+                        _lim("actuals_unmapped")
+                    mapping = {
+                        formals[i]: actuals[i]
+                        for i in range(min(len(formals), len(actuals)))
+                    }
                 _lim("interprocedural_summary")
-                _lim("approximate_actual_extraction")
+                if not actuals_exact:
+                    _lim("approximate_actual_extraction")
                 call_items = analysis.cfg.statements_at_line(cline)
                 call_defs: list[str] = []
                 for it in call_items:

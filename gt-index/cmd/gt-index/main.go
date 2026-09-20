@@ -111,7 +111,7 @@ func setRequiredMetadata(db *store.DB, values map[string]string) error {
 
 // FINAL_ARCH_V2 schema contract.
 // Bump when edges/nodes columns change; Python readers gate on >= this.
-const schemaVersion = "v15.2-trust-tier"
+const schemaVersion = "v15.4-callsite-actuals"
 
 // fileParseResult holds the output of parsing a single file.
 type fileParseResult struct {
@@ -480,7 +480,7 @@ func main() {
 	var allAssignments []parser.AssignmentRef
 	var allModDecls []parser.ModDecl
 	var allReExports []parser.ReExportRef
-	var allCFGs []parser.CFGFunc // HAR-90 items 5-8: per-function statement CFGs
+	var allCFGs []parser.CFGFunc            // HAR-90 items 5-8: per-function statement CFGs
 	callerNodeIndexMap := make(map[int]int) // call index → global node index
 
 	globalNodeIdx := 0
@@ -837,6 +837,7 @@ func main() {
 			CandidateCount:     rc.CandidateCount,
 			EvidenceType:       rc.EvidenceType,
 			VerificationStatus: "unverified",
+			ActualArgs:         actualArgsJSON(allCalls, rc.CallsiteOrdinal),
 		}
 	}
 	// Phase 1 (core): the files and symbols are already durable, and the
@@ -1029,6 +1030,7 @@ func main() {
 	cfgBlocks := make([]*store.CFGBlock, 0, 256)
 	cfgEdges := make([]*store.CFGEdge, 0, 256)
 	cfgDefs := make([]*store.CFGDef, 0, 128)
+	cfgUses := make([]*store.CFGUse, 0, 256)
 	for _, cf := range allCFGs {
 		if cf.NodeIdx < 0 || cf.NodeIdx >= len(nodeDBIDs) {
 			continue
@@ -1061,12 +1063,20 @@ func main() {
 				Line:       d.Line,
 			})
 		}
+		for _, u := range cf.Uses {
+			cfgUses = append(cfgUses, &store.CFGUse{
+				NodeID:     nodeID,
+				BlockIndex: u.BlockIndex,
+				VarName:    u.VarName,
+				Line:       u.Line,
+			})
+		}
 	}
-	if err := db.ReplaceCFG(cfgBlocks, cfgEdges, cfgDefs); err != nil {
+	if err := db.ReplaceCFG(cfgBlocks, cfgEdges, cfgDefs, cfgUses); err != nil {
 		abortStagedBuild(db, stagedOutput, "persist CFG facts: %v", err)
 	}
-	fmt.Fprintf(os.Stderr, "  CFG: %d blocks, %d edges, %d defs across %d functions in %s\n",
-		len(cfgBlocks), len(cfgEdges), len(cfgDefs), len(allCFGs), time.Since(cfgStart).Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  CFG: %d blocks, %d edges, %d defs, %d uses across %d functions in %s\n",
+		len(cfgBlocks), len(cfgEdges), len(cfgDefs), len(cfgUses), len(allCFGs), time.Since(cfgStart).Round(time.Millisecond))
 
 	// ── Pass 4b: API EDGES — cross-service route matching ───────────────
 	apiStart := time.Now()
@@ -1219,6 +1229,12 @@ func main() {
 	// is missing (= old binary) or older than the version the reader expects.
 	// Bump on every breaking edges/nodes schema change.
 	requiredMetadata["schema_version"] = schemaVersion
+	// Additive-substrate capability flags: each names a fact family this
+	// build persisted, letting consumers gate on capability rather than
+	// probing table existence. Older graphs simply lack the key.
+	requiredMetadata["capability_cfg_uses"] = "v1"
+	requiredMetadata["capability_callsite_actuals"] = "v1"
+	requiredMetadata["capability_access_receiver"] = "v1"
 	// RC-17 (F-003): forensics-grade provenance. commitSHA / buildTimeUTC
 	// / goToolchain are injected by the build script via -ldflags. With
 	// "unknown" defaults, callers can still distinguish a stamped binary
@@ -1775,6 +1791,7 @@ func runIncremental(root, relpath, dbPath string) error {
 			CandidateCount:     rc.CandidateCount,
 			EvidenceType:       rc.EvidenceType,
 			VerificationStatus: "unverified",
+			ActualArgs:         actualArgsJSON(pr.Calls, rc.CallsiteOrdinal),
 		}
 	}
 	if err := store.BatchInsertEdgesTx(tx, edgePtrs); err != nil {
@@ -1823,6 +1840,7 @@ func runIncremental(root, relpath, dbPath string) error {
 		var cfgBlocks []*store.CFGBlock
 		var cfgEdges []*store.CFGEdge
 		var cfgDefs []*store.CFGDef
+		var cfgUses []*store.CFGUse
 		for _, cf := range pr.CFGs {
 			if cf.NodeIdx < 0 || cf.NodeIdx >= len(newDBIDs) {
 				continue
@@ -1855,8 +1873,16 @@ func runIncremental(root, relpath, dbPath string) error {
 					Line:       d.Line,
 				})
 			}
+			for _, u := range cf.Uses {
+				cfgUses = append(cfgUses, &store.CFGUse{
+					NodeID:     nodeID,
+					BlockIndex: u.BlockIndex,
+					VarName:    u.VarName,
+					Line:       u.Line,
+				})
+			}
 		}
-		if err := store.InsertCFGTx(tx, cfgBlocks, cfgEdges, cfgDefs); err != nil {
+		if err := store.InsertCFGTx(tx, cfgBlocks, cfgEdges, cfgDefs, cfgUses); err != nil {
 			return fmt.Errorf("insert cfg facts: %w", err)
 		}
 	}
@@ -2036,6 +2062,21 @@ func runIncremental(root, relpath, dbPath string) error {
 // readers via project_meta.min_confidence. Falls back to 0.5 (parity with
 // gt_intel.MIN_CONFIDENCE in the brief layer) on empty input so the floor
 // never collapses to 0 on tiny / failed indexes.
+// actualArgsJSON renders the callsite's parser-exact top-level argument
+// texts as a JSON array for edges.actual_args. CallsiteOrdinal indexes the
+// same allCalls slice the resolver consumed; an out-of-range ordinal or an
+// arg-free call persists NULL (consumers keep the text-splitting fallback).
+func actualArgsJSON(calls []parser.CallRef, ord int) string {
+	if ord < 0 || ord >= len(calls) || len(calls[ord].ArgumentTexts) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(calls[ord].ArgumentTexts)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func computeMedianConfidence(rcs []resolver.ResolvedCall) float64 {
 	if len(rcs) == 0 {
 		return 0.5
