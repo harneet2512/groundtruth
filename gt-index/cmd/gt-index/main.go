@@ -120,13 +120,25 @@ type fileParseResult struct {
 	err     error
 }
 
-func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseResult) ([]*parser.ParseResult, int, []string) {
+// collectParseResults returns the per-file results, the number of files that
+// did not parse cleanly, the number whose facts were RETAINED, and a bounded
+// sample of failures.
+//
+// The failure count and the retained count are not complements. A file with a
+// recoverable tree is counted a failure - its resolution is not authoritative -
+// and its facts are still kept, which is the contract ParseResult states:
+// "Partial facts remain inspectable, but callers must not treat resolution
+// derived from this file as authoritative." Only the retained count answers
+// whether there is a graph to build.
+func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseResult) ([]*parser.ParseResult, int, int, []string) {
 	results := make([]*parser.ParseResult, len(files))
 	parseFailures := 0
+	retained := 0
 	var failSample []string
 	for pr := range resultCh {
 		if pr.err == nil && pr.result != nil && !pr.result.ParserIncomplete {
 			results[pr.fileIdx] = pr.result
+			retained++
 			continue
 		}
 		parseFailures++
@@ -134,6 +146,7 @@ func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseRes
 			// Keep recoverable partial AST facts, but account for the damaged
 			// source and let ParserIncomplete suppress target authority.
 			results[pr.fileIdx] = pr.result
+			retained++
 		}
 		if len(failSample) >= 10 || pr.fileIdx < 0 || pr.fileIdx >= len(files) {
 			continue
@@ -146,7 +159,7 @@ func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseRes
 			failSample = append(failSample, fmt.Sprintf("%s: parser returned no result", files[pr.fileIdx].Path))
 		}
 	}
-	return results, parseFailures, failSample
+	return results, parseFailures, retained, failSample
 }
 
 func selectedTargetForDispatch(dispatchState string, selected *int64) *int64 {
@@ -448,7 +461,7 @@ func main() {
 	}()
 
 	// Collect results and preserve parser failures in project_meta.
-	results, parseFailures, failSample := collectParseResults(files, resultCh)
+	results, parseFailures, retained, failSample := collectParseResults(files, resultCh)
 	fmt.Fprintf(os.Stderr, "  Parse cache: %d hits, %d misses\n", cacheHits, len(files)-cacheHits)
 
 	parseElapsed := time.Since(parseStart)
@@ -464,8 +477,22 @@ func main() {
 			fmt.Fprintf(os.Stderr, "    - %s\n", sample)
 		}
 	}
-	if len(files) > 0 && parsedOK == 0 {
-		abortStagedBuild(db, stagedOutput, "INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
+	// The guard is against an EMPTY graph, so it has to ask whether anything
+	// was retained - not whether anything parsed cleanly. Those differ exactly
+	// when every file has a recoverable tree, and on a small repository that is
+	// one file away: TB2 write-compressor (run 35560215706) is a single C file
+	// whose tree carried an ERROR node, so parsedOK was 0 while `results` held
+	// four functions, eleven callsites and thirteen properties. gt-index threw
+	// that graph away and the agent worked blind for the whole episode - three
+	// times the turns and five times the input tokens of the stock scaffold on
+	// a task it otherwise finished in sixteen turns. Incomplete files already
+	// lose their authority per callsite in the resolver; they must not also
+	// cost the repository its index.
+	if len(files) > 0 && retained == 0 {
+		abortStagedBuild(db, stagedOutput, "INDEX FAILED: no parse result retained from %d file(s) — graph would be empty (sample: %v)", len(files), failSample)
+	}
+	if parsedOK == 0 && retained > 0 {
+		fmt.Fprintf(os.Stderr, "  [WARN] every file has a recoverable syntax tree; building from %d partial result(s), resolution authority suppressed\n", retained)
 	}
 	if requiredRate := os.Getenv("GT_REQUIRE_PARSE_RATE"); requiredRate != "" {
 		var minimumRate float64
