@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -307,18 +308,8 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 					vtaStatus = "partial_no_match"
 				}
 			}
-			vtaStableIDs := make([]string, 0, len(vta.CandidateNodeIDs))
-			for _, id := range vta.CandidateNodeIDs {
-				if symbol, exists := symbolByID[id]; exists {
-					vtaStableIDs = append(vtaStableIDs, symbol.StableID)
-				}
-			}
-			flowStableIDs := make([]string, 0, len(vta.FlowTypeNodeIDs))
-			for _, id := range vta.FlowTypeNodeIDs {
-				if symbol, exists := symbolByID[id]; exists {
-					flowStableIDs = append(flowStableIDs, symbol.StableID)
-				}
-			}
+			vtaStableIDs := symbolStableIDs(contentOrderedSymbols(vta.CandidateNodeIDs, symbolByID))
+			flowStableIDs := symbolStableIDs(contentOrderedSymbols(vta.FlowTypeNodeIDs, symbolByID))
 			flowReason := vta.AbstentionReason
 			if len(flowStableIDs) > 0 {
 				flowReason = "flow_type_stable_ids=" + strings.Join(flowStableIDs, ",") + "; " + flowReason
@@ -350,13 +341,7 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 				}
 			}
 			stableIDs := func(ids []int64) []string {
-				out := make([]string, 0, len(ids))
-				for _, id := range ids {
-					if symbol, exists := symbolByID[id]; exists {
-						out = append(out, symbol.StableID)
-					}
-				}
-				return out
+				return symbolStableIDs(contentOrderedSymbols(ids, symbolByID))
 			}
 			passCoverage = append(passCoverage,
 				store.ResolutionPassCoverage{PassKind: "cha", Version: "1", Status: chaStatus, Reason: chaReason, CandidateStableIDs: stableIDs(hierarchy.CHACandidateNodeIDs)},
@@ -384,13 +369,11 @@ func publishAnalysisPhase(in analysisPhaseInput) (result analysisPhaseResult) {
 			importChain := marshalResolutionStringList(c.CandidateImportChains[targetID])
 			receiverType, receiverOrigin := c.ReceiverType, c.ReceiverOrigin
 			if vta, ok := vtaByOrdinal[c.CallsiteOrdinal]; ok && vta.Completeness != "not_run" && len(vta.FlowTypeNodeIDs) > 0 {
-				flowStableIDs := make([]string, 0, len(vta.FlowTypeNodeIDs))
-				flowNames := make([]string, 0, len(vta.FlowTypeNodeIDs))
-				for _, flowID := range vta.FlowTypeNodeIDs {
-					if symbol, exists := symbolByID[flowID]; exists {
-						flowStableIDs = append(flowStableIDs, symbol.StableID)
-						flowNames = append(flowNames, symbol.QualifiedName)
-					}
+				flowSymbols := contentOrderedSymbols(vta.FlowTypeNodeIDs, symbolByID)
+				flowStableIDs := symbolStableIDs(flowSymbols)
+				flowNames := make([]string, 0, len(flowSymbols))
+				for _, symbol := range flowSymbols {
+					flowNames = append(flowNames, symbol.QualifiedName)
 				}
 				receiverType = strings.Join(flowNames, ",")
 				receiverOrigin = "vta_flow_stable_ids=" + strings.Join(flowStableIDs, ",")
@@ -529,4 +512,29 @@ func injectAnalysisFault(db *store.DB, stagedOutput string, rows []store.Attache
 		return
 	}
 	abortStagedBuild(db, stagedOutput, "GT_INJECT_ANALYSIS_FAILURE=1 but no candidate was published to poison")
+}
+
+// contentOrderedSymbols resolves a node-id SET to its resolution symbols in
+// stable-id order. The analyses return these sets in rowid order, and rowids
+// are not amend-stable: a batch amend keeps unchanged rows at their parent ids
+// and re-inserts changed ones at the top of the id space, so rowid order made
+// an amend and a clean rebuild publish the same set in different orders
+// (pass_coverage, receiver_type/receiver_origin, reachable_stable_ids).
+func contentOrderedSymbols(ids []int64, symbolByID map[int64]store.ResolutionSymbol) []store.ResolutionSymbol {
+	out := make([]store.ResolutionSymbol, 0, len(ids))
+	for _, id := range ids {
+		if symbol, exists := symbolByID[id]; exists {
+			out = append(out, symbol)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].StableID < out[j].StableID })
+	return out
+}
+
+func symbolStableIDs(symbols []store.ResolutionSymbol) []string {
+	out := make([]string, 0, len(symbols))
+	for _, symbol := range symbols {
+		out = append(out, symbol.StableID)
+	}
+	return out
 }
