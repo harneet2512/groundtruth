@@ -402,7 +402,7 @@ func TestDeriveIsDeterministic(t *testing.T) {
 	// Ids must be a pure function of the witness and the path, not of
 	// insertion order or map iteration.
 	for _, p := range first.Processes {
-		if got := processID(p.WitnessAssertionID, p.Path); got != p.ID {
+		if got := processIDForWitnessRow(t, db, p); got != p.ID {
 			t.Fatalf("id %s is not the content hash %s of its own contents", p.ID, got)
 		}
 	}
@@ -619,4 +619,16 @@ func TestClosureCarriesNoPathDetail(t *testing.T) {
 		t.Fatalf("closure columns = %v; want %v -- if the closure now carries "+
 			"intermediate nodes, Derive should walk it instead of `edges`", cols, want)
 	}
+}
+
+// processIDForWitnessRow recomputes a process id from its own witness row and
+// path: the id is a content hash, never a function of a rowid.
+func processIDForWitnessRow(t *testing.T, db *sql.DB, p Process) string {
+	t.Helper()
+	var a assertionRow
+	if err := db.QueryRow(`SELECT id, test_node_id, target_node_id, COALESCE(kind,''), COALESCE(line,0), COALESCE(expression,'') FROM assertions WHERE id=?`,
+		p.WitnessAssertionID).Scan(&a.id, &a.testNodeID, &a.targetID, &a.kind, &a.line, &a.expression); err != nil {
+		t.Fatal(err)
+	}
+	return processID(witnessKey(p.TestStableID, a), p.Path)
 }

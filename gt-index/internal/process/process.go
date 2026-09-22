@@ -55,7 +55,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -218,6 +217,8 @@ type assertionRow struct {
 	testNodeID int64
 	targetID   int64
 	kind       string
+	line       int64
+	expression string
 }
 
 // Derive reads the graph and returns every test-witnessed process it can
@@ -256,6 +257,7 @@ func Derive(ctx context.Context, db *sql.DB, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
+	orderAdjacencyByContent(adj, stableIDs)
 
 	maxDepth := opts.maxDepth()
 	maxProcesses := opts.maxProcesses()
@@ -299,8 +301,9 @@ func Derive(ctx context.Context, db *sql.DB, opts Options) (Result, error) {
 				missingStableID = true
 				continue
 			}
+			witness := witnessKey(testSID, a)
 			out = append(out, Process{
-				ID:                 processID(a.id, sids),
+				ID:                 processID(witness, sids),
 				EntryStableID:      sids[0],
 				TerminalStableID:   sids[len(sids)-1],
 				Path:               sids,
@@ -337,7 +340,8 @@ func Derive(ctx context.Context, db *sql.DB, opts Options) (Result, error) {
 // schema, so 0 — not NULL alone — is the "unlinked" sentinel.
 func readAssertions(ctx context.Context, db *sql.DB) ([]assertionRow, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, test_node_id, target_node_id, COALESCE(kind, '')
+		SELECT id, test_node_id, target_node_id, COALESCE(kind, ''),
+		       COALESCE(line, 0), COALESCE(expression, '')
 		FROM assertions
 		WHERE target_node_id IS NOT NULL AND target_node_id <> 0
 		  AND test_node_id IS NOT NULL AND test_node_id <> 0
@@ -350,7 +354,7 @@ func readAssertions(ctx context.Context, db *sql.DB) ([]assertionRow, error) {
 	var out []assertionRow
 	for rows.Next() {
 		var a assertionRow
-		if err := rows.Scan(&a.id, &a.testNodeID, &a.targetID, &a.kind); err != nil {
+		if err := rows.Scan(&a.id, &a.testNodeID, &a.targetID, &a.kind, &a.line, &a.expression); err != nil {
 			return nil, fmt.Errorf("scan assertion: %w", err)
 		}
 		out = append(out, a)
@@ -510,11 +514,11 @@ func stableIDPath(path []int64, stableIDs map[int64]string) ([]string, bool) {
 // processID is a deterministic content hash over the witness and the ordered
 // path. Two runs over the same graph produce the same id; two different flows
 // witnessed by the same assertion produce different ids.
-func processID(witnessID int64, path []string) string {
+func processID(witness string, path []string) string {
 	h := sha256.New()
 	h.Write([]byte(processIDDomain))
 	h.Write([]byte{0})
-	h.Write([]byte(strconv.FormatInt(witnessID, 10)))
+	h.Write([]byte(witness))
 	for _, sid := range path {
 		h.Write([]byte{0})
 		h.Write([]byte(sid))
@@ -540,6 +544,44 @@ func sortProcesses(ps []Process) {
 		if pa, pb := strings.Join(a.Path, ">"), strings.Join(b.Path, ">"); pa != pb {
 			return pa < pb
 		}
+		// The id hashes the witness's content identity (witnessKey), so it
+		// orders two witnesses of one path identically in every build; the
+		// rowid is only the last resort for an exact duplicate assertion.
+		if a.ID != b.ID {
+			return a.ID < b.ID
+		}
 		return a.WitnessAssertionID < b.WitnessAssertionID
 	})
+}
+
+// witnessKey renders the witnessing assertion's CONTENT identity: its test's
+// stable id, line, kind and expression. processID hashes this rather than the
+// assertion rowid, which a batch amend and a clean rebuild of the same tree
+// assign differently (the process id must be amend-invariant).
+func witnessKey(testStableID string, a assertionRow) string {
+	return fmt.Sprintf("%q|%d|%q|%q", testStableID, a.line, a.kind, a.expression)
+}
+
+// orderAdjacencyByContent re-sorts every adjacency list by the target's
+// stable id. The BFS keeps ONE shortest path per terminal, the first found,
+// so when two equally short paths exist the published one is decided by
+// adjacency order; rowid order made that decision differ between a batch
+// amend and a clean rebuild of the same tree. Unnamed targets sort after
+// named ones by rowid (they can never appear on a published path).
+func orderAdjacencyByContent(adj map[int64][]int64, stableIDs map[int64]string) {
+	for src, targets := range adj {
+		sorted := append([]int64(nil), targets...)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			si, oki := stableIDs[sorted[i]]
+			sj, okj := stableIDs[sorted[j]]
+			if oki != okj {
+				return oki
+			}
+			if si != sj {
+				return si < sj
+			}
+			return sorted[i] < sorted[j]
+		})
+		adj[src] = sorted
+	}
 }
