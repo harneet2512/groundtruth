@@ -12,8 +12,11 @@ func init() {
 
 		FunctionNodes: []string{"function_definition", "method_declaration"},
 		ClassNodes:    []string{"class_declaration", "interface_declaration"},
-		CallNodes:     []string{"function_call_expression", "member_call_expression"},
-		ImportNodes:   []string{"namespace_use_declaration"},
+		// scoped_call_expression = `Foo::bar()` / `self::bar()` static calls;
+		// nullsafe_member_call_expression = `$x?->run()`.
+		CallNodes: []string{"function_call_expression", "member_call_expression",
+			"nullsafe_member_call_expression", "scoped_call_expression"},
+		ImportNodes: []string{"namespace_use_declaration"},
 
 		NameField:       "name",
 		ReturnTypeField: "return_type",

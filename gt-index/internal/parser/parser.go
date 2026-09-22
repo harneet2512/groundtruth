@@ -261,7 +261,34 @@ func markFunctionValueCallsites(result *ParseResult, lang string) {
 	// Keying by ObjectScope keeps a `this.f` write in class A from re-marking
 	// an unrelated `this.f()` in class B.
 	fields := make(map[string]map[string]struct{})
+	// samParams[scope][varName]: Java/Kotlin formals whose declared type is a
+	// functional (single-abstract-method / function) type — `cb.run()` on one
+	// invokes the bound callable. A formal of an ordinary class type
+	// (`Base x`) is a receiver, not a callable value, and must not mark.
+	samParams := make(map[string]map[string]struct{})
+	// aliases[scope][varName]: ViaSymbol callable aliases only (no formals) —
+	// a Java/Kotlin receiver holding a method/callable reference. The bare
+	// twin of a class-field alias (Scope "", ObjectScope set) lives in the
+	// class-scoped fields map instead, so it cannot leak to sibling classes.
+	aliases := make(map[string]map[string]struct{})
 	for _, a := range result.Assignments {
+		isFieldTwin := a.Scope == "" && a.ObjectScope != ""
+		if a.ViaSymbol && !isFieldTwin {
+			m := aliases[a.Scope]
+			if m == nil {
+				m = make(map[string]struct{})
+				aliases[a.Scope] = m
+			}
+			m[a.VarName] = struct{}{}
+		}
+		if a.IsParameter && (lang == "java" || lang == "kotlin") && jvmFunctionalParamType(a.TypeName) {
+			m := samParams[a.Scope]
+			if m == nil {
+				m = make(map[string]struct{})
+				samParams[a.Scope] = m
+			}
+			m[a.VarName] = struct{}{}
+		}
 		switch {
 		case a.ViaSymbol && (strings.HasPrefix(a.VarName, "self.") || strings.HasPrefix(a.VarName, "this.")):
 			m := fields[a.ObjectScope]
@@ -349,6 +376,10 @@ func markFunctionValueCallsites(result *ParseResult, lang string) {
 			}
 		case "virtual":
 			q := c.CalleeQualified
+			if (lang == "java" || lang == "kotlin") && jvmCallableReceiverCall(c, fields, samParams, aliases) {
+				c.DispatchForm = "function_value"
+				continue
+			}
 			if strings.HasPrefix(q, "self.") || strings.HasPrefix(q, "this.") {
 				// A recorded `self.f`/`this.f` field write in the caller's
 				// class is the concrete evidence — an instance attribute
@@ -1125,6 +1156,18 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		}
 	}
 
+	// JS/TS module-scope CommonJS require(): calls are otherwise extracted only
+	// from function bodies, so a top-level `const h = require('./h')` never
+	// became an import and every `h.helper()` / destructured `helper()` in the
+	// file fell to a cross-file name guess. walkNode never descends into a
+	// function body (it returns after extraction), so this cannot double-count
+	// a require that extractCallsWithParent already recorded.
+	if (sf.Language == "javascript" || sf.Language == "typescript") && spec.IsCallNode(nodeType) {
+		if simple, _ := extractCalleeInfo(node, src); simple == "require" {
+			extractRequireImport(node, sf, src, result)
+		}
+	}
+
 	// Recurse into children
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -1239,66 +1282,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 			// JS/TS CommonJS require(): const X = require('./module')
 			// Convert to import ref so the module path feeds into import resolution.
 			if simple == "require" && (sf.Language == "javascript" || sf.Language == "typescript") {
-				argsNode := node.ChildByFieldName("arguments")
-				if argsNode == nil {
-					for k := 0; k < int(node.ChildCount()); k++ {
-						if c := node.Child(k); c.Type() == "arguments" {
-							argsNode = c
-							break
-						}
-					}
-				}
-				if argsNode != nil {
-					for k := 0; k < int(argsNode.ChildCount()); k++ {
-						arg := argsNode.Child(k)
-						if arg.Type() == "string" || arg.Type() == "template_string" {
-							modPath := stripQuotes(arg.Content(src))
-							if modPath != "" {
-								name := modPath
-								if slashIdx := strings.LastIndex(modPath, "/"); slashIdx >= 0 {
-									name = modPath[slashIdx+1:]
-								}
-								// Derive binding names from parent assignment
-								if p := node.Parent(); p != nil {
-									if p.Type() == "variable_declarator" || p.Type() == "assignment_expression" {
-										nameNode := p.ChildByFieldName("name")
-										if nameNode == nil {
-											nameNode = p.ChildByFieldName("left")
-										}
-										if nameNode != nil {
-											if nameNode.Type() == "object_pattern" || nameNode.Type() == "object" {
-												// Destructured: const {a, b} = require('...')
-												for di := 0; di < int(nameNode.ChildCount()); di++ {
-													dc := nameNode.Child(di)
-													if dc.Type() == "shorthand_property_identifier_pattern" || dc.Type() == "shorthand_property_identifier" || dc.Type() == "identifier" {
-														result.Imports = append(result.Imports, ImportRef{
-															ImportedName: dc.Content(src),
-															ModulePath:   modPath,
-															File:         sf.Path,
-															Line:         int(node.StartPoint().Row) + 1,
-														})
-													}
-												}
-												name = ""
-											} else {
-												name = nameNode.Content(src)
-											}
-										}
-									}
-								}
-								if name != "" {
-									result.Imports = append(result.Imports, ImportRef{
-										ImportedName: name,
-										ModulePath:   modPath,
-										File:         sf.Path,
-										Line:         int(node.StartPoint().Row) + 1,
-									})
-								}
-							}
-							break
-						}
-					}
-				}
+				extractRequireImport(node, sf, src, result)
 			}
 
 			var argumentArity *uint16
@@ -1445,6 +1429,75 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, callerScope, nodeType, fmt.Sprintf("%s/%d", astPath, i))
+	}
+}
+
+// extractRequireImport records a CommonJS `require('<path>')` call as import
+// refs: `const X = require(p)` binds X, `const {a, b} = require(p)` binds a
+// and b, and a bare `require(p)` binds the module's basename. It runs for
+// require calls inside function bodies (extractCallsWithParent) AND at module
+// scope (walkNode) — the dominant CommonJS shape is a top-of-file
+// `const h = require('./h')`, which no function body contains.
+func extractRequireImport(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
+	argsNode := node.ChildByFieldName("arguments")
+	if argsNode == nil {
+		for k := 0; k < int(node.ChildCount()); k++ {
+			if c := node.Child(k); c.Type() == "arguments" {
+				argsNode = c
+				break
+			}
+		}
+	}
+	if argsNode != nil {
+		for k := 0; k < int(argsNode.ChildCount()); k++ {
+			arg := argsNode.Child(k)
+			if arg.Type() == "string" || arg.Type() == "template_string" {
+				modPath := stripQuotes(arg.Content(src))
+				if modPath != "" {
+					name := modPath
+					if slashIdx := strings.LastIndex(modPath, "/"); slashIdx >= 0 {
+						name = modPath[slashIdx+1:]
+					}
+					// Derive binding names from parent assignment
+					if p := node.Parent(); p != nil {
+						if p.Type() == "variable_declarator" || p.Type() == "assignment_expression" {
+							nameNode := p.ChildByFieldName("name")
+							if nameNode == nil {
+								nameNode = p.ChildByFieldName("left")
+							}
+							if nameNode != nil {
+								if nameNode.Type() == "object_pattern" || nameNode.Type() == "object" {
+									// Destructured: const {a, b} = require('...')
+									for di := 0; di < int(nameNode.ChildCount()); di++ {
+										dc := nameNode.Child(di)
+										if dc.Type() == "shorthand_property_identifier_pattern" || dc.Type() == "shorthand_property_identifier" || dc.Type() == "identifier" {
+											result.Imports = append(result.Imports, ImportRef{
+												ImportedName: dc.Content(src),
+												ModulePath:   modPath,
+												File:         sf.Path,
+												Line:         int(node.StartPoint().Row) + 1,
+											})
+										}
+									}
+									name = ""
+								} else {
+									name = nameNode.Content(src)
+								}
+							}
+						}
+					}
+					if name != "" {
+						result.Imports = append(result.Imports, ImportRef{
+							ImportedName: name,
+							ModulePath:   modPath,
+							File:         sf.Path,
+							Line:         int(node.StartPoint().Row) + 1,
+						})
+					}
+				}
+				break
+			}
+		}
 	}
 }
 
@@ -1604,6 +1657,18 @@ func extractAssignmentsMode(node *sitter.Node, sf walker.SourceFile, src []byte,
 									len(qual) > 0 && qual[0] >= 'A' && qual[0] <= 'Z' {
 									typeName = qual
 								}
+							}
+						}
+						// Heuristic 3: Ruby constructor `C.new(...)` — the receiver is the
+						// class. (Before receiver calls kept their method name, the Ruby
+						// callee WAS the receiver `C` and Heuristic 1 typed it by accident.)
+						if typeName == "" && sf.Language == "ruby" && simple == "new" {
+							if recv, ok := strings.CutSuffix(qualified, ".new"); ok && recv != "" &&
+								recv[0] >= 'A' && recv[0] <= 'Z' && !strings.ContainsAny(recv, " (") {
+								if i := strings.LastIndex(recv, "::"); i >= 0 {
+									recv = recv[i+2:]
+								}
+								typeName = recv
 							}
 						}
 						if typeName != "" {
@@ -2144,17 +2209,7 @@ func extractFunctionParams(funcNode *sitter.Node, sf walker.SourceFile, src []by
 	default:
 		return
 	}
-	params := funcNode.ChildByFieldName(sf.Spec.ParamsField)
-	if params == nil && sf.Spec.ParamsField != "" {
-		// Some grammars (Kotlin) expose the parameter list as an unnamed
-		// child typed `function_value_parameters` — match on node type.
-		for i := 0; i < int(funcNode.ChildCount()); i++ {
-			if c := funcNode.Child(i); c != nil && c.Type() == sf.Spec.ParamsField {
-				params = c
-				break
-			}
-		}
-	}
+	params := functionParamsNode(funcNode, sf.Spec)
 	if params == nil {
 		// JS bare-parameter arrow `x => x()`: the lone formal sits on the
 		// `parameter` field, not under a `parameters` list.
@@ -2207,6 +2262,28 @@ func extractFunctionParams(funcNode *sitter.Node, sf walker.SourceFile, src []by
 		}
 		index++
 	}
+}
+
+// functionParamsNode returns a function node's formal-parameter list. The
+// spec's ParamsField is a tree-sitter FIELD name for most grammars, but for
+// some it names the list's node TYPE instead (Java/PHP `formal_parameters`,
+// whose field is `parameters`; Kotlin `function_value_parameters`, which has
+// no field) — so a failed field lookup falls back to the first direct child
+// of that type. Both param extractors share this so neither silently drops a
+// grammar's parameters.
+func functionParamsNode(funcNode *sitter.Node, spec *specs.Spec) *sitter.Node {
+	if funcNode == nil || spec == nil || spec.ParamsField == "" {
+		return nil
+	}
+	if params := funcNode.ChildByFieldName(spec.ParamsField); params != nil {
+		return params
+	}
+	for i := 0; i < int(funcNode.ChildCount()); i++ {
+		if c := funcNode.Child(i); c != nil && c.Type() == spec.ParamsField {
+			return c
+		}
+	}
+	return nil
 }
 
 // nestedFuncOwner derives the name a nested function node is invocable under:
@@ -2627,6 +2704,14 @@ func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) s
 func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	if callNode.ChildCount() == 0 {
 		return "", ""
+	}
+	// Grammars whose receiver call is NOT `<member-expr>(args)` with the member
+	// expression as Child(0): the method name and receiver live on named
+	// fields of the call node itself (Java/Ruby/PHP) or on a navigation /
+	// member-access child (C#/Kotlin/Swift). Taking Child(0) there named the
+	// RECEIVER (`x.run()` → "x") or the whole text (`x.Run`) as the callee.
+	if simple, qualified, handled := receiverCallInfo(callNode, src); handled {
+		return simple, qualified
 	}
 	funcNode := callNode.Child(0)
 	if funcNode == nil {
@@ -4711,11 +4796,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 // extractStructuredParams extracts function parameters with type annotations and defaults.
 // Kind: param. Value: "name:type [required]" or "name:type opt=default_value".
 func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, result *ParseResult, nodeIdx int) {
-	paramsField := spec.ParamsField
-	if paramsField == "" {
-		return
-	}
-	paramsNode := node.ChildByFieldName(paramsField)
+	paramsNode := functionParamsNode(node, spec)
 	if paramsNode == nil {
 		return
 	}
@@ -4752,10 +4833,15 @@ func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, re
 			name = param.Content(src)
 
 		case "typed_parameter", "typed_default_parameter":
-			// Python: x: int or x: int = 5
+			// Python: x: int or x: int = 5. tree-sitter-python gives a
+			// REQUIRED typed_parameter no `name` field (the identifier is a
+			// bare child) — fall back to the first identifier child, the same
+			// rule paramBinding applies, or `def use(p: P)` emits no param fact.
 			nameNode := param.ChildByFieldName("name")
 			if nameNode != nil {
 				name = nameNode.Content(src)
+			} else {
+				name = firstIdentifierChild(param, src)
 			}
 			typeNode := param.ChildByFieldName("type")
 			if typeNode != nil {
@@ -4791,7 +4877,10 @@ func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, re
 			}
 			typeNode := param.ChildByFieldName("type")
 			if typeNode != nil {
-				typeAnnotation = typeNode.Content(src)
+				// TS `type_annotation` text carries its leading colon
+				// (": P"), which made the fact "p:: P" and the declared
+				// type parse as ":". Store the type itself.
+				typeAnnotation = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(typeNode.Content(src)), ":"))
 			}
 			defNode := param.ChildByFieldName("value")
 			if defNode != nil {

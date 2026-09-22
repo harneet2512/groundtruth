@@ -405,8 +405,9 @@ func TestCallableAlias_ConservativeSkips_Python(t *testing.T) {
 
 // Java: `Runnable r = this::work` inside a method records a ViaSymbol binding
 // whose qualified RHS is the method reference; `r.run()` is marked
-// function_value (Java collapses `r.run()` to callee "r" — the SAM method
-// name is irrelevant, the alias variable is the lookup key).
+// function_value. `r.run()` extracts as callee "run" with qualifier "r.run"
+// (the receiver-call contract every language shares); the SAM method name is
+// irrelevant — the receiver's callable binding is what marks the call.
 func TestCallableAlias_MethodRef_Java(t *testing.T) {
 	src := "class Items {\n" +
 		"    void handle() {\n" +
@@ -426,9 +427,9 @@ func TestCallableAlias_MethodRef_Java(t *testing.T) {
 	if a.Scope != "Items.handle" || a.ObjectScope != "Items" {
 		t.Fatalf("r binding scope/obj = %q/%q, want Items.handle/Items", a.Scope, a.ObjectScope)
 	}
-	c := findCall(res, "r", 4)
-	if c == nil {
-		t.Fatalf("r.run() callsite missing; calls=%+v", res.Calls)
+	c := findCall(res, "run", 4)
+	if c == nil || c.CalleeQualified != "r.run" {
+		t.Fatalf("r.run() callsite missing or not qualified r.run; calls=%+v", res.Calls)
 	}
 	if c.DispatchForm != "function_value" {
 		t.Fatalf("r.run() DispatchForm = %q, want function_value", c.DispatchForm)
@@ -437,8 +438,9 @@ func TestCallableAlias_MethodRef_Java(t *testing.T) {
 
 // Java: a class-level `private Runnable r = this::work;` field declaration is
 // a callable alias — the per-function extractor never sees class bodies, so
-// the field is harvested separately and binds BOTH the bare name (`r.run()`
-// extracts callee "r") and the `this.`-prefixed form (`this.r.run()`).
+// the field is harvested separately and binds BOTH the bare name (`r.run()`,
+// receiver "r") and the `this.`-prefixed form (`this.r.run()`, receiver
+// "this.r").
 func TestCallableAlias_FieldDecl_Java(t *testing.T) {
 	src := "class Items {\n" +
 		"    private Runnable r = this::work;\n" +
@@ -466,12 +468,12 @@ func TestCallableAlias_FieldDecl_Java(t *testing.T) {
 		field.TypeName != "work" || field.TypeQualified != "this.work" {
 		t.Fatalf("this.r field alias = %+v, want ViaSymbol work/this.work obj=Items", field)
 	}
-	c := findCall(res, "r", 4)
-	if c == nil || c.DispatchForm != "function_value" {
+	c := findCall(res, "run", 4)
+	if c == nil || c.CalleeQualified != "r.run" || c.DispatchForm != "function_value" {
 		t.Fatalf("r.run() = %+v, want function_value", c)
 	}
-	c2 := findCall(res, "this.r", 5)
-	if c2 == nil || c2.DispatchForm != "function_value" {
+	c2 := findCall(res, "run", 5)
+	if c2 == nil || c2.CalleeQualified != "this.r.run" || c2.DispatchForm != "function_value" {
 		t.Fatalf("this.r.run() = %+v, want function_value", c2)
 	}
 }
@@ -495,8 +497,8 @@ func TestCallableParam_Java(t *testing.T) {
 		a.Scope != "Items.register" || a.ObjectScope != "Items" {
 		t.Fatalf("cb binding = %+v, want IsParameter idx=0 owner=Items.register obj=Items", a)
 	}
-	c := findCall(res, "cb", 2)
-	if c == nil || c.DispatchForm != "function_value" {
+	c := findCall(res, "run", 2)
+	if c == nil || c.CalleeQualified != "cb.run" || c.DispatchForm != "function_value" {
 		t.Fatalf("cb.run() = %+v, want function_value", c)
 	}
 	call := findCall(res, "register", 3)
@@ -520,7 +522,7 @@ func TestCallableAlias_LambdaSkipped_Java(t *testing.T) {
 			t.Fatalf("lambda RHS must not be a callable alias: %+v", a)
 		}
 	}
-	if c := findCall(res, "r", 4); c != nil && c.DispatchForm == "function_value" {
+	if c := findCall(res, "run", 4); c != nil && c.DispatchForm == "function_value" {
 		t.Fatalf("r.run() on a lambda binding must stay %q", c.DispatchForm)
 	}
 }
