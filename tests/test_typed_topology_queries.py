@@ -1310,3 +1310,29 @@ def test_slice_interprocedural_text_fallback_flag(tmp_path):
     (hop,) = sl["cross_function"]
     assert hop["mapped_vars"] == {"x": "n"}
     assert "approximate_actual_extraction" in (sl.get("limitations") or [])
+
+
+# ---------------------------------------------------------------------------
+# cfg_uses present but empty for a function (W3)
+# ---------------------------------------------------------------------------
+
+
+def test_slice_empty_persisted_uses_falls_back_to_lexical(tmp_path):
+    """cfg_uses exists (v15.3+) but carries no rows for tsfn: that is
+    missing evidence, not proof of no reads -- the lexical scan must run and
+    say so, instead of slicing as if nothing were read."""
+    db = _build_graph_v15x(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("DELETE FROM cfg_uses WHERE node_id = 25")
+    conn.commit()
+    conn.close()
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "tsfn", "line": 3, "direction": "backward"},
+        ),
+        _context(tmp_path, db),
+    )
+    sl = _answer(artifact)["slices"][0]
+    assert sl["slice_lines"] == [1, 2, 3]
+    assert "approximate_use_detection" in sl["limitations"]
