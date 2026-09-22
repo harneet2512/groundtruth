@@ -388,14 +388,14 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 						object = meta[method.ParentID].Name
 					}
 					thisKey := vtaValueKey{File: method.File, Scope: methodScope(methodID), Object: object, Name: thisName, Line: method.StartLine}
-					if addValue(thisKey, sortedStringSet(receiverEvidence.Types), sortedStringSet(receiverEvidence.Sources), append(sortedStringSet(receiverEvidence.Edges), vtaReceiverToThisStableID(call, receiver, methodID, thisName))) {
+					if addValue(thisKey, sortedStringSet(receiverEvidence.Types), sortedStringSet(receiverEvidence.Sources), append(sortedStringSet(receiverEvidence.Edges), vtaReceiverToThisStableID(call, receiver, vtaTargetIdentity(meta, methodID), thisName))) {
 						changed = true
 					}
 					// The source set is filtered again at result construction by the
 					// candidate's parent type. Keep only this target's edge here;
 					// copying receiverEvidence would reintroduce a callsite-wide source
 					// union into every candidate proof.
-					addCandidateEvidence(ordinal, methodID, nil, vtaReceiverToThisStableID(call, receiver, methodID, thisName))
+					addCandidateEvidence(ordinal, methodID, nil, vtaReceiverToThisStableID(call, receiver, vtaTargetIdentity(meta, methodID), thisName))
 					for index, argument := range call.ArgumentNames {
 						argumentEvidence := callValue(call, argument)
 						if len(argumentEvidence.Types) == 0 {
@@ -413,7 +413,7 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 								break
 							}
 						}
-						edge := vtaArgumentToFormalStableID(call, argument, index, methodID, formal)
+						edge := vtaArgumentToFormalStableID(call, argument, index, vtaTargetIdentity(meta, methodID), formal)
 						if formal != nil && addValue(vtaValueKey{File: formal.File, Scope: formal.Scope, Object: formal.ObjectScope, Name: formal.VarName, Line: formal.Line}, sortedStringSet(argumentEvidence.Types), sortedStringSet(argumentEvidence.Sources), append(sortedStringSet(argumentEvidence.Edges), edge)) {
 							changed = true
 						}
@@ -496,7 +496,7 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 					// Without this candidate-bound edge, return-type inference would
 					// look indistinguishable from a direct constructor assignment.
 					proof.EdgeStableIDs = append(proof.EdgeStableIDs,
-						vtaReturnToResultStableID(parser.AssignmentRef{File: assignment.File, Scope: assignment.Scope, VarName: assignment.Name, TypeName: assignment.TypeName, Line: assignment.Line, ViaReturn: true}, methodID))
+						vtaReturnToResultStableID(parser.AssignmentRef{File: assignment.File, Scope: assignment.Scope, VarName: assignment.Name, TypeName: assignment.TypeName, Line: assignment.Line, ViaReturn: true}, vtaTargetIdentity(meta, methodID)))
 				}
 			}
 			if byTarget := candidateEvidence[ordinal]; byTarget != nil {
@@ -505,14 +505,14 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 					proof.EdgeStableIDs = append(proof.EdgeStableIDs, sortedStringSet(targetEvidence.Edges)...)
 				}
 			}
-			proof.EdgeStableIDs = append(proof.EdgeStableIDs, vtaReceiverToThisStableID(call, qualifier, methodID, methodReceiver(methodID)))
+			proof.EdgeStableIDs = append(proof.EdgeStableIDs, vtaReceiverToThisStableID(call, qualifier, vtaTargetIdentity(meta, methodID), methodReceiver(methodID)))
 			if call.FlowAnalysisComplete && !call.ParserIncomplete {
 				// The explicit closed boundary is the producer's witness that the
 				// monotone value/constraint worklist reached its fixed point for the
 				// candidate body.  Bind it to the call and target so it cannot be
 				// reused for another candidate or callsite.
 				proof.EdgeStableIDs = append(proof.EdgeStableIDs,
-					vtaBodyConvergenceStableID(call, methodID))
+					vtaBodyConvergenceStableID(call, vtaTargetIdentity(meta, methodID)))
 			}
 			proof.SourceStableIDs = dedupeSorted(proof.SourceStableIDs)
 			proof.EdgeStableIDs = dedupeSorted(proof.EdgeStableIDs)
@@ -543,32 +543,47 @@ func vtaCallEdgeStableID(call parser.CallRef, argument string, index int, parame
 // The method ID is part of the identity: two viable implementations at one
 // callsite must never share a receiver proof merely because their type names
 // are equal or their callsite evidence is the same.
-func vtaReceiverToThisStableID(call parser.CallRef, receiver string, methodID int64, receiverName string) string {
-	return vtaStableFactID("edge", "receiver_to_this", call.File, call.CallerScope, strconv.Itoa(call.Line), receiver, strconv.FormatInt(methodID, 10), receiverName)
+func vtaReceiverToThisStableID(call parser.CallRef, receiver string, target string, receiverName string) string {
+	return vtaStableFactID("edge", "receiver_to_this", call.File, call.CallerScope, strconv.Itoa(call.Line), receiver, target, receiverName)
+}
+
+// vtaTargetIdentity is the candidate component of a VTA fact id. It is the
+// candidate's CONTENT identity (file, label, owner-qualified name, definition
+// line) and never its row id: row ids depend on insertion order, which a
+// batch amend (retained rows keep their ids, changed rows re-enter at the
+// top of the id space) and a clean rebuild assign differently, so a row-id
+// component made the same proof carry two different "stable" ids.
+func vtaTargetIdentity(meta map[int64]NodeMeta, id int64) string {
+	method := meta[id]
+	owner := ""
+	if method.ParentID != 0 {
+		owner = meta[method.ParentID].Name
+	}
+	return strings.Join([]string{method.File, method.Label, owner, method.Name, strconv.Itoa(method.StartLine)}, "|")
 }
 
 // vtaReturnToResultStableID identifies the candidate-specific transfer from a
 // factory's return value to the caller's result variable.  The candidate ID is
 // part of the identity so two viable targets cannot share a return proof.
-func vtaReturnToResultStableID(assignment parser.AssignmentRef, methodID int64) string {
+func vtaReturnToResultStableID(assignment parser.AssignmentRef, target string) string {
 	return vtaStableFactID("edge", "return_to_result", assignment.File, assignment.Scope,
-		assignment.VarName, assignment.TypeName, strconv.Itoa(assignment.Line), strconv.FormatInt(methodID, 10))
+		assignment.VarName, assignment.TypeName, strconv.Itoa(assignment.Line), target)
 }
 
 // vtaBodyConvergenceStableID identifies the closed fixed-point boundary for a
 // particular callsite/target pair.  It is emitted only when CallRef carries the
 // explicit complete-analysis proof and parser completeness is intact.
-func vtaBodyConvergenceStableID(call parser.CallRef, methodID int64) string {
+func vtaBodyConvergenceStableID(call parser.CallRef, target string) string {
 	return vtaStableFactID("edge", "body_convergence", call.File, call.CallerScope,
-		strconv.Itoa(call.Line), call.CalleeName, strconv.FormatInt(methodID, 10))
+		strconv.Itoa(call.Line), call.CalleeName, target)
 }
 
 // vtaArgumentToFormalStableID identifies a candidate-specific argument edge.
 // A missing parsed formal is represented by empty fields; the edge remains
 // deterministic while the caller can keep the candidate conservative until a
 // later parser-completeness unit supplies the formal binding.
-func vtaArgumentToFormalStableID(call parser.CallRef, argument string, index int, methodID int64, formal *parser.AssignmentRef) string {
-	fields := []string{"argument_to_formal", call.File, call.CallerScope, strconv.Itoa(call.Line), argument, strconv.Itoa(index), strconv.FormatInt(methodID, 10)}
+func vtaArgumentToFormalStableID(call parser.CallRef, argument string, index int, target string, formal *parser.AssignmentRef) string {
+	fields := []string{"argument_to_formal", call.File, call.CallerScope, strconv.Itoa(call.Line), argument, strconv.Itoa(index), target}
 	if formal != nil {
 		fields = append(fields, formal.File, formal.Scope, formal.VarName, strconv.Itoa(formal.Line))
 	}
