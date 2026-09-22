@@ -518,6 +518,13 @@ func runCouplingLayers(ctx context.Context, db *store.DB, repoPath string, out *
 		digest, derr := community.CertifiedCallGraphDigest(ctx, tx)
 		keepCommunity = derr == nil && digest == reuse.meta[metaCommunityCallDigest]
 	}
+	if keepCommunity {
+		// The partition is carried, but its call evidence cites edges.id
+		// values of the PARENT; the amend re-inserted every edge. Re-cite it
+		// against the amended edges, or rebuild the partition when the
+		// evidence shape cannot be proven unchanged.
+		keepCommunity = rebindCarriedCommunityEvidence(ctx, tx) == nil
+	}
 	var reused []string
 	if keepCochange {
 		reused = append(reused, layerCochange)
@@ -708,4 +715,29 @@ func boolMeta(v bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+// rebindCarriedCommunityEvidence rewrites the carried communities' evidence
+// lists against the amended graph's edge ids inside the publication
+// transaction. Any error leaves the rows untouched and tells the caller to
+// rebuild the partition instead of carrying it.
+func rebindCarriedCommunityEvidence(ctx context.Context, tx *sql.Tx) error {
+	if err := community.EnsureSchema(tx); err != nil {
+		return err
+	}
+	rebound, err := community.ReboundCallEvidence(ctx, tx)
+	if err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(rebound))
+	for id := range rebound {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE communities SET evidence_edge_ids = ? WHERE id = ?`, rebound[id], id); err != nil {
+			return fmt.Errorf("rebind community evidence %s: %w", id, err)
+		}
+	}
+	return nil
 }

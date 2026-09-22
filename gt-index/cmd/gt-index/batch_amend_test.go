@@ -241,7 +241,12 @@ func TestBatchAmendReusesCouplingOverPinnedHistory(t *testing.T) {
 	}
 
 	parentCochange := batchQueryRows(t, parent, "SELECT * FROM cochanges")
-	parentCommunities := batchQueryRows(t, parent, "SELECT * FROM communities")
+	// evidence_edge_ids is excluded: it cites edges.id values, and the amend
+	// re-inserts every edge, so a carried partition must RE-CITE its evidence
+	// against the amended graph (pinned by
+	// TestBatchAmendCarriedCommunityEvidenceCitesLiveEdges). Every other
+	// column must be carried byte-for-byte.
+	parentCommunities := batchQueryRows(t, parent, carriedCommunityColumnsQuery)
 	parentMembers := batchQueryRows(t, parent, "SELECT * FROM community_members")
 	if len(parentCochange) < 4 || len(parentCommunities) < 2 || len(parentMembers) < 3 {
 		t.Fatalf("fixture parent lacks coupling data to reuse: %d cochanges, %d communities, %d members",
@@ -270,7 +275,11 @@ func TestBatchAmendReusesCouplingOverPinnedHistory(t *testing.T) {
 		"communities":       parentCommunities,
 		"community_members": parentMembers,
 	} {
-		if got := batchQueryRows(t, candidate, "SELECT * FROM "+table); !reflect.DeepEqual(got, want) {
+		query := "SELECT * FROM " + table
+		if table == "communities" {
+			query = carriedCommunityColumnsQuery
+		}
+		if got := batchQueryRows(t, candidate, query); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s was rewritten over an identical history window\ncandidate: %v\nparent:    %v", table, got, want)
 		}
 	}
@@ -333,6 +342,8 @@ func TestBatchAmendReusesCouplingOverPinnedHistory(t *testing.T) {
 		t.Errorf("derived_coupling_reused under a moved HEAD = %q, %v; want empty", reused, err)
 	}
 }
+
+const carriedCommunityColumnsQuery = `SELECT id, label, heuristic_label, keywords, description, enriched_by, cohesion, cohesion_lo, cohesion_hi, cohesion_n, cohesion_reason, structural_cohesion, member_count, internal_weight, external_weight, evidence_truncated, algorithm, resolution, w_call, w_cochange, holdout_commits FROM communities`
 
 func batchQueryRows(t *testing.T, path, query string) []string {
 	t.Helper()
