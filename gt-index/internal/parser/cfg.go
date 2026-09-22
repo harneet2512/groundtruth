@@ -1076,7 +1076,9 @@ func (b *cfgBuilder) defsFor(s *sitter.Node) []CFGDef {
 	var out []CFGDef
 	switch {
 	case t == b.lang.ifStmt || (b.lang.while != "" && t == b.lang.while):
-		out = b.collectDefs(field(s, "condition"))
+		// Go if initializers bind in the header (`if v, ok := m[k]; ok`).
+		out = b.collectDefs(field(s, "initializer"))
+		out = append(out, b.collectDefs(field(s, "condition"))...)
 	case b.lang.do != "" && t == b.lang.do:
 		out = b.collectDefs(field(s, "condition"))
 	case t == b.lang.forStmt:
@@ -1084,8 +1086,14 @@ func (b *cfgBuilder) defsFor(s *sitter.Node) []CFGDef {
 	case b.lang.forIn != "" && t == b.lang.forIn:
 		out = b.forInDefs(s)
 	case b.lang.switchStmts[t]:
-		// discriminant defs (rare assignments inside switch (x = f()))
-		out = b.collectDefs(field(s, "value", "condition"))
+		// Go initializer (`switch x := f(); x`) and type-switch alias
+		// (`switch v := x.(type)`) bind at the dispatch head; discriminant
+		// defs are rare assignments inside switch (x = f()).
+		out = b.collectDefs(field(s, "initializer"))
+		if a := field(s, "alias"); a != nil {
+			b.bindPattern(a, &out)
+		}
+		out = append(out, b.collectDefs(field(s, "value", "condition"))...)
 	case b.lang.tryStmts[t]:
 		// try bodies/handlers are separate blocks; nothing binds at the try head
 		return nil
@@ -1137,8 +1145,10 @@ func (b *cfgBuilder) forHeaderDefs(s *sitter.Node) []CFGDef {
 				}
 			}
 		case "range_clause":
+			// `for k, v := range` / `for k = range`: the left list is a
+			// binding/assignment target, never a read.
 			if l := field(ch, "left"); l != nil {
-				out = append(out, b.collectDefs(l)...)
+				b.bindTarget(l, &out)
 			}
 			out = append(out, b.collectDefs(field(ch, "right"))...)
 		default:
@@ -1240,12 +1250,26 @@ func (b *cfgBuilder) collectDefsInto(n *sitter.Node, out *[]CFGDef) {
 		}
 		b.collectDefsInto(field(n, "right"), out)
 		return
-	case "expression_list":
-		for i := 0; i < int(n.NamedChildCount()); i++ {
-			b.bindPattern(n.NamedChild(i), out)
+	case "resource":
+		// Java try-with-resources: `R r = open()` binds r; `try (existing)`
+		// (no name) only reads.
+		if nm := field(n, "name"); nm != nil {
+			b.bindPattern(nm, out)
+		}
+		b.collectDefsInto(field(n, "value"), out)
+		return
+	case "instanceof_expression":
+		// Java 16 pattern binding: `o instanceof Foo foo` binds foo.
+		b.collectDefsInto(field(n, "left"), out)
+		if nm := field(n, "name"); nm != nil {
+			b.bindPattern(nm, out)
 		}
 		return
 	}
+	// An expression_list reached here is in READ position (RHS values,
+	// var_spec values, return operands): binding positions route through
+	// bindPattern/bindTarget explicitly, so it falls through to the generic
+	// descent, which only harvests nested assignments.
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		b.collectDefsInto(n.NamedChild(i), out)
 	}
@@ -1260,7 +1284,8 @@ func (b *cfgBuilder) bindPattern(n *sitter.Node, out *[]CFGDef) {
 	switch n.Type() {
 	case "identifier", "shorthand_property_identifier_pattern", "field_identifier":
 		*out = append(*out, CFGDef{VarName: nodeText(n, b.src), Line: cfgStartLine(n)})
-	case "object_pattern", "array_pattern":
+	case "object_pattern", "array_pattern", "expression_list":
+		// expression_list: Go `a, b :=` / `v, ok := <-ch` left side.
 		for i := 0; i < int(n.NamedChildCount()); i++ {
 			b.bindPattern(n.NamedChild(i), out)
 		}
@@ -1386,6 +1411,8 @@ func (b *cfgBuilder) usesFor(s *sitter.Node) []CFGUse {
 		// left is the loop binding (a def); the iterable side is read.
 		b.collectUsesInto(field(s, "right", "value"), &out)
 	case b.lang.switchStmts[t]:
+		// Go `switch x := f(); x` reads its initializer at the head.
+		b.collectUsesInto(field(s, "initializer"), &out)
 		b.collectUsesInto(field(s, "value", "condition"), &out)
 	case b.lang.tryStmts[t]:
 		// resources are handled inside emitTry; the try head reads nothing.
