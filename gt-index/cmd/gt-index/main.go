@@ -264,7 +264,11 @@ func main() {
 	buildInfo := flag.Bool("build-info", false, "Print the gt-index.build.v1 binary identity JSON and exit")
 	frameworkValidation := flag.Bool("framework-validation", false, "Print the HAR-70 framework overlay validation report and exit")
 	inspectJSONL := flag.Bool("inspect-jsonl", false, "Parse caller-supplied source bytes as pure JSONL without graph mutation")
+	sourceRevision := flag.String("source-revision", "", "Workspace revision the graph describes; written to project_meta.source_revision on full, -amend-parent and -file builds (absent when not given). Distinct from git_commit, the producer build commit.")
 	flag.Parse()
+	if err := validateSourceRevision(*sourceRevision); err != nil {
+		log.Fatalf("source-revision: %v", err)
+	}
 	if *amendParent != "" && (*file != "" || *rebuildClosure) {
 		log.Fatal("amend-parent cannot be combined with file or rebuild-closure")
 	}
@@ -302,7 +306,7 @@ func main() {
 	// Incremental single-file mode: file-keyed delete-and-replace against an
 	// existing graph.db. Does not rebuild from scratch; expects -output to exist.
 	if *file != "" {
-		if err := runIncremental(*root, *file, *output); err != nil {
+		if err := runIncremental(*root, *file, *output, *sourceRevision); err != nil {
 			log.Fatalf("incremental: %v", err)
 		}
 		return
@@ -1285,6 +1289,12 @@ func main() {
 	requiredMetadata["build_time_utc"] = buildTimeUTC
 	requiredMetadata["go_toolchain"] = goToolchain
 	requiredMetadata["workers"] = fmt.Sprintf("%d", *workers)
+	// The indexed workspace revision, when the caller names one. A batch amend
+	// starts from a cleared project_meta (ReplaceParsedStructure), so without
+	// the flag the parent's value cannot survive into the amended graph.
+	if *sourceRevision != "" {
+		requiredMetadata[store.SourceRevisionKey] = *sourceRevision
+	}
 
 	// RC-04: per-repo MIN_CONFIDENCE — write the median (P50) of resolved edge
 	// confidences so downstream readers can stop hardcoding 0.7. Writing to
@@ -1524,7 +1534,7 @@ func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) str
 //  9. INSERT OR REPLACE INTO file_hashes.
 //  10. COMMIT.
 //  11. Print one JSON line to stdout.
-func runIncremental(root, relpath, dbPath string) error {
+func runIncremental(root, relpath, dbPath, sourceRevision string) error {
 	startWall := time.Now()
 	timing := os.Getenv("GT_INCREMENTAL_TIMING") != ""
 	mark := func(label string) {
@@ -1566,6 +1576,12 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Step 3 — short-circuit if hash matches stored value.
 	storedHash := db.GetFileHash(relSlash)
 	if storedHash == newHash {
+		// The graph content is unchanged for this path, but the caller is
+		// naming the revision it now describes: rebind (or clear) it.
+		if err := db.BindSourceRevision(sourceRevision); err != nil {
+			return err
+		}
+		db.CheckpointWAL()
 		dur := time.Since(startWall)
 		fmt.Printf(
 			`{"file":%q,"nodes_replaced":0,"edges_replaced":0,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":true}`+"\n",
@@ -2066,6 +2082,10 @@ func runIncremental(root, relpath, dbPath string) error {
 	if err := store.InsertFileHashTx(tx, relSlash, newHash, spec.Name); err != nil {
 		return fmt.Errorf("update file_hashes: %w", err)
 	}
+	// The revision identity commits atomically with the content it names.
+	if err := store.BindSourceRevisionTx(tx, sourceRevision); err != nil {
+		return err
+	}
 
 	// Step 10 — COMMIT.
 	if err := tx.Commit(); err != nil {
@@ -2132,6 +2152,25 @@ func runIncremental(root, relpath, dbPath string) error {
 		`{"file":%q,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
 		relSlash, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
 	)
+	return nil
+}
+
+// maxSourceRevisionBytes bounds -source-revision: it is an identity token
+// (a commit id or a content digest), never free text.
+const maxSourceRevisionBytes = 256
+
+// validateSourceRevision refuses a revision that is not a single printable
+// token: it is compared byte-for-byte by consumers, so a stray newline or NUL
+// would make two identical revisions compare unequal.
+func validateSourceRevision(revision string) error {
+	if len(revision) > maxSourceRevisionBytes {
+		return fmt.Errorf("longer than %d bytes", maxSourceRevisionBytes)
+	}
+	for _, r := range revision {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("contains control character %q", r)
+		}
+	}
 	return nil
 }
 

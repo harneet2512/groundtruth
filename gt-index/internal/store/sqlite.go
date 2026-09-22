@@ -1398,6 +1398,41 @@ func (d *DB) MetaValue(key string) string {
 	return value
 }
 
+// SourceRevisionKey is the project_meta key holding the indexed workspace
+// revision the caller named with -source-revision. It is distinct from
+// git_commit, which is the PRODUCER's build commit (provenance).
+const SourceRevisionKey = "source_revision"
+
+// sqlExecer is the write surface shared by *sql.DB and *sql.Tx.
+type sqlExecer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+// BindSourceRevisionTx binds the graph to the workspace revision it now
+// describes: an empty revision DELETES the key, because a graph whose content
+// just changed can no longer vouch for the revision a previous build named.
+func BindSourceRevisionTx(tx *sql.Tx, revision string) error {
+	return bindSourceRevision(tx, revision)
+}
+
+// BindSourceRevision is BindSourceRevisionTx outside a transaction.
+func (d *DB) BindSourceRevision(revision string) error {
+	return bindSourceRevision(d.db, revision)
+}
+
+func bindSourceRevision(x sqlExecer, revision string) error {
+	var err error
+	if revision == "" {
+		_, err = x.Exec(`DELETE FROM project_meta WHERE key = ?`, SourceRevisionKey)
+	} else {
+		_, err = x.Exec(`INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?)`, SourceRevisionKey, revision)
+	}
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", SourceRevisionKey, err)
+	}
+	return nil
+}
+
 // GetFileHash returns the stored hash for a file, or empty string if not found.
 func (d *DB) GetFileHash(filePath string) string {
 	var hash string
