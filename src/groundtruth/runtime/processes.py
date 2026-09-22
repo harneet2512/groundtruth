@@ -83,9 +83,22 @@ class DetectedProcess:
         return certified / len(self.edges)
 
     @property
+    def is_lower_bound(self) -> bool:
+        """True when any hop is not CERTIFIED (the flow may not exist as
+        drawn — a guessed edge can fabricate or reroute it)."""
+        return self.certified_ratio < 1.0
+
+    @property
+    def display_label(self) -> str:
+        """``label`` plus the lower-bound marker, for every caller that
+        surfaces a flow by name.  ``label`` itself stays the bare
+        ``entry -> terminal`` identity."""
+        return f"{self.label} (lower bound)" if self.is_lower_bound else self.label
+
+    @property
     def rendered(self) -> str:
         chain = " -> ".join(n.name for n in self.nodes)
-        mark = "" if self.certified_ratio >= 1.0 else " (lower bound)"
+        mark = " (lower bound)" if self.is_lower_bound else ""
         return f"{self.label}: {chain}{mark}"
 
 
@@ -335,24 +348,27 @@ def find_entry_points(
             incoming[target.node_id] += 1
 
     exported_ids: set[int] = set()
-    candidates: list[tuple[int, ProcessNode, str]] = []
+    candidates: list[tuple[tuple[int, int, str, str], ProcessNode, str]] = []
     for node in nodes.values():
         if node.is_test or node.label not in _ENTRY_LABELS:
             continue
         deg = incoming.get(node.node_id, 0)
         if deg == 0:
             kind = _entry_kind(node, deg, node.node_id in exported_ids)
-            # Score: prefer declared mains, then no-caller roots; longer
-            # reachable subtree proxy = own out-degree.
+            # Rank (used, not decorative): declared mains first, then the
+            # no-caller root with the most direct callees — out-degree is the
+            # cheap proxy for the larger reachable subtree, so the entry cap
+            # and the trace budget keep the roots that span most flows — then
+            # file path and name for determinism.
             rank = (
                 0 if kind == "declared_main" else 1,
                 -len(adjacency.get(node.node_id, ())),
                 node.file_path,
                 node.name,
             )
-            candidates.append((0 if kind == "declared_main" else 1, node, kind))
+            candidates.append((rank, node, kind))
 
-    candidates.sort(key=lambda item: (item[0], item[1].file_path, item[1].name))
+    candidates.sort(key=lambda item: item[0])
     kept = [(node, kind) for _rank, node, kind in candidates[:max_candidates]]
     dropped = max(0, len(candidates) - max_candidates)
     return kept, dropped

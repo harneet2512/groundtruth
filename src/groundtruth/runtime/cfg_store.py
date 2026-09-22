@@ -17,20 +17,28 @@ Provenance / honesty rules (same discipline as cfg_analysis.py):
   sites (declarations, assignments, updates, loop/catch/param bindings).
   The dominator/control-dependence/reaching-definition algorithms are
   reused verbatim from ``cfg_analysis`` — they are graph-generic.
-- There is NO persisted use table.  Per-statement uses are approximated by
-  scanning the statement's source lines for identifier tokens — string
-  literals and comments stripped, keywords and common builtins excluded,
-  member selectors folded into dotted chains, and each persisted def's own
-  occurrence subtracted (an ``x =`` LHS is not a use; an augmented/update
-  statement's target still reads, so ``+=``/``++`` and friends keep it).
-  Every result therefore carries ``approximate_use_detection``.
+- Uses come from the persisted ``cfg_uses`` table (schema v15.3+) when it
+  exists and holds rows for the function: parser-emitted identifier reads
+  anchored to (block, line), flagged ``approximate_use_coverage`` because
+  exotic read positions are still uncovered.  When the table is absent
+  (older graph) or holds no rows for the function, per-statement uses are
+  approximated by scanning the statement's source lines for identifier
+  tokens — string literals and comments stripped, keywords and common
+  builtins excluded, member selectors folded into dotted chains, and each
+  persisted def's own occurrence subtracted (an ``x =`` LHS is not a use; an
+  augmented/update statement's target still reads, so ``+=``/``++`` and
+  friends keep it) — flagged ``approximate_use_detection``.  Either way a
+  stored-CFG slice is never EXACT.
 - Def strength is not persisted either: ``cfg_defs`` names containing ``.``
   or ``[`` are treated as weak (mutation, not rebinding), and subscript
   targets additionally weak-define their base, mirroring the Python
   analyzer — ``approximate_def_strength``.
-- Slices are intraprocedural only.  Calls are detected by the same text
+- ``slice_stored`` is intraprocedural.  Calls are detected by a source-text
   scan (identifier immediately before ``(``), reported under
   ``call_sites``, never inlined — ``call_sites_not_inlined``.
+  ``interprocedural_slice_stored`` composes callee slices through graph
+  CALLS edges (name-resolved, never type-proven) and says so in its
+  limitations.
 """
 
 from __future__ import annotations
@@ -386,6 +394,13 @@ def load_stored_cfg(
             ).fetchall()
         ]
     except sqlite3.Error:
+        persisted_uses = None
+    if persisted_uses is not None and not persisted_uses:
+        # The table exists but holds no rows for this function.  That is an
+        # absence of evidence (older incremental rows, a producer that
+        # skipped the body), not proof that nothing is read — treating it as
+        # "no uses" silently emptied every data dependence.  Fall back to the
+        # lexical scan, flagged ``approximate_use_detection`` below.
         persisted_uses = None
 
     item_effects: dict[_Item, tuple[list[_Def], list[_Use]]] = {}
@@ -1781,8 +1796,10 @@ def slice_stored(
 
     Returns ``{"lines", "variables", "blocks", "limitations",
     "call_sites"}`` — all sorted/deterministic.  ``limitations`` always
-    contains ``approximate_use_detection``: uses are text-scanned, defs are
-    persisted, and nothing here is interprocedural.
+    names the use substrate: ``approximate_use_coverage`` for persisted
+    ``cfg_uses`` rows, ``approximate_use_detection`` for the lexical
+    fallback (table absent or no rows for this function).  Defs are
+    persisted; nothing here is interprocedural.
     """
     if direction not in {"backward", "forward"}:
         raise CFGAnalysisError(

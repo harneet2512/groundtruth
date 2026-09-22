@@ -427,7 +427,7 @@ def _build_graph(tmp_path: Path) -> Path:
     db = tmp_path / "graph.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO project_meta VALUES ('git_commit', ?)", (GRAPH_REVISION,))
+    conn.execute("INSERT INTO project_meta VALUES ('source_revision', ?)", (GRAPH_REVISION,))
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path,"
         " start_line, end_line, signature, return_type, is_exported, is_test,"
@@ -1310,3 +1310,104 @@ def test_slice_interprocedural_text_fallback_flag(tmp_path):
     (hop,) = sl["cross_function"]
     assert hop["mapped_vars"] == {"x": "n"}
     assert "approximate_actual_extraction" in (sl.get("limitations") or [])
+
+
+# ---------------------------------------------------------------------------
+# taint scoping + trust tiers (W3)
+# ---------------------------------------------------------------------------
+
+
+def test_taint_field_channels_scoped_to_source_sink_reachability(tmp_path):
+    """Field channels whose writer the source cannot reach (Repo.set) or
+    whose reader cannot reach the sink must not appear: the repository-wide
+    join made ``field_channels`` noise unrelated to the query."""
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(ActionKind.TAINT, {"source": "get_input", "sink": "execute"}),
+        _context(tmp_path, db),
+    )
+    fields = {c["field"] for c in _answer(artifact)["field_channels"]}
+    assert fields == {"payload"}
+
+
+def test_taint_without_sink_marks_readers_unscoped(tmp_path):
+    db = _build_graph(tmp_path)
+    artifact = execute_query(
+        _request(ActionKind.TAINT, {"source": "set"}),
+        _context(tmp_path, db),
+    )
+    assert "field_channel_readers_unscoped" in artifact.omissions
+    writers = {c["writer"]["symbol"] for c in _answer(artifact)["field_channels"]}
+    assert writers == {"set"}
+
+
+def test_taint_separates_certified_from_uncertain_paths(tmp_path):
+    db = _build_graph(tmp_path)
+    conn = sqlite3.connect(str(db))
+    # A CANDIDATE shortcut get_input -> execute beside the certified chain.
+    conn.execute(
+        "INSERT INTO edges (source_id, target_id, type, source_line, source_file,"
+        " resolution_method, trust_tier, confidence) VALUES"
+        " (17, 19, 'CALLS', 5, 'srv.py', 'impl_method', 'CANDIDATE', 0.6)"
+    )
+    conn.commit()
+    conn.close()
+    artifact = execute_query(
+        _request(ActionKind.TAINT, {"source": "get_input", "sink": "execute"}),
+        _context(tmp_path, db),
+    )
+    answer = _answer(artifact)
+    assert [p["path"] for p in answer["paths"]] == [["get_input", "process", "execute"]]
+    assert all(p["trust"] == "certified" for p in answer["paths"])
+    assert [p["path"] for p in answer["uncertain_paths"]] == [["get_input", "execute"]]
+    assert answer["uncertain_paths"][0]["hop_tiers"] == ["CANDIDATE"]
+    assert answer["paths_found"] == 2
+
+
+# ---------------------------------------------------------------------------
+# cfg_uses present but empty for a function (W3)
+# ---------------------------------------------------------------------------
+
+
+def test_slice_empty_persisted_uses_falls_back_to_lexical(tmp_path):
+    """cfg_uses exists (v15.3+) but carries no rows for tsfn: that is
+    missing evidence, not proof of no reads -- the lexical scan must run and
+    say so, instead of slicing as if nothing were read."""
+    db = _build_graph_v15x(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("DELETE FROM cfg_uses WHERE node_id = 25")
+    conn.commit()
+    conn.close()
+    artifact = execute_query(
+        _request(
+            ActionKind.SLICE,
+            {"symbol": "tsfn", "line": 3, "direction": "backward"},
+        ),
+        _context(tmp_path, db),
+    )
+    sl = _answer(artifact)["slices"][0]
+    assert sl["slice_lines"] == [1, 2, 3]
+    assert "approximate_use_detection" in sl["limitations"]
+
+
+# ---------------------------------------------------------------------------
+# route_map honesty on hand-built fixtures (W3)
+# ---------------------------------------------------------------------------
+
+
+def test_route_map_api_call_only_route_hand_built(tmp_path):
+    db = _build_graph(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO edges (source_id, target_id, type, source_line, source_file,"
+        " resolution_method, trust_tier, confidence, metadata) VALUES"
+        " (5, 1, 'API_CALL', 8, 'client.py', 'route_match', 'CANDIDATE', 0.7, ?)",
+        ('{"route": "/api/orders", "method": "POST"}',),
+    )
+    conn.commit()
+    conn.close()
+    artifact = execute_query(_request(ActionKind.ROUTE_MAP, {}), _context(tmp_path, db))
+    routes = {r["route"]: r for r in _answer(artifact)["routes"]}
+    assert routes["/api/orders"]["handler"] is None
+    assert "route_handler_unresolved:/api/orders" in artifact.omissions
+    assert ("client.py", 8) in {(a.path, a.line) for a in artifact.anchors}
