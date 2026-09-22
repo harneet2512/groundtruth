@@ -35,7 +35,7 @@ from .observation_compiler import (
     canonical_bytes,
     canonical_sha256,
 )
-from .diff_impact import diff_impact
+from .diff_impact import impact_for_ranges
 from .patch_delta import analyze_patch_delta
 from .processes import detect_processes
 from .verification_plan import Check, CheckResult, VerificationPlan, green
@@ -54,7 +54,9 @@ _ALLOWED_ARGUMENTS: Mapping[ActionKind, frozenset[str]] = {
     ActionKind.PROCESSES: frozenset({"concept", "limit"}),
     ActionKind.ROUTE_MAP: frozenset({"path"}),
     ActionKind.API_IMPACT: frozenset({"route", "handler"}),
-    ActionKind.TAINT: frozenset({"source", "sink", "path", "language", "depth"}),
+    ActionKind.TAINT: frozenset(
+        {"source", "sink", "path", "language", "depth", "include_name_matched"}
+    ),
     ActionKind.RENAME: frozenset({"symbol", "new_name", "path", "language"}),
     ActionKind.SHAPE_CHECK: frozenset({"symbol", "path", "language"}),
     ActionKind.TOOL_MAP: frozenset({"path", "language"}),
@@ -428,21 +430,17 @@ def _patch_impact(request: ActionRequest, context: DeterministicQueryContext) ->
     else:
         try:
             omissions.extend(_graph_omissions(request, context, conn))
-            diff_lines: list[str] = []
-            for name in sorted(edited):
-                before, after = edited[name]
-                diff_lines.extend(
-                    difflib.unified_diff(
-                        (before or "").splitlines(keepends=True),
-                        after.splitlines(keepends=True),
-                        fromfile=f"a/{name}",
-                        tofile=f"b/{name}",
-                        lineterm="",
-                    )
-                )
-            impact = diff_impact(
+            sides = {
+                name: _graph_side(conn, name, edited[name], omissions)
+                for name in sorted(edited)
+            }
+            ranges = {
+                name: _changed_ranges(edited[name][0] or "", edited[name][1], sides[name])
+                for name in sorted(edited)
+            }
+            impact = impact_for_ranges(
                 context.graph_db,
-                "\n".join(diff_lines),
+                {name: r for name, r in ranges.items() if r},
                 processes=detect_processes(context.graph_db).processes,
             )
             mapped = {s.file_path for s in impact.changed_symbols}
@@ -458,22 +456,30 @@ def _patch_impact(request: ActionRequest, context: DeterministicQueryContext) ->
                     }
                     for s in impact.changed_symbols
                 ],
+                "line_mapping": {name: sides[name] for name in sorted(edited)},
                 "callers_by_depth": {
                     str(d): [
-                        {"name": n, "location": loc} for n, loc in callers
+                        {
+                            "name": c.name,
+                            "qualified_name": c.qualified_name,
+                            "location": c.location,
+                            "trust_tier": c.trust_tier,
+                            "confidence": c.confidence,
+                        }
+                        for c in callers
                     ]
-                    for d, callers in impact.callers_by_depth.items()
+                    for d, callers in impact.caller_details_by_depth.items()
                 },
                 "affected_flows": [
                     {
-                        "label": p.label,
+                        "label": p.display_label,
                         "entry_kind": p.entry_kind,
                         "step_count": p.step_count,
                         "certified_ratio": round(p.certified_ratio, 4),
                     }
                     for p in impact.affected_flows
                 ],
-                "statement_slices": _statement_slices(edited, conn, omissions),
+                "statement_slices": _statement_slices(edited, conn, omissions, sides),
             }
         except sqlite3.Error:
             omissions.append("graph_unreadable")
@@ -491,6 +497,97 @@ def _patch_impact(request: ActionRequest, context: DeterministicQueryContext) ->
         omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
+
+
+def _text_digests(text: str) -> set[str]:
+    """SHA-256 of the text as given and with LF/CRLF line endings — the
+    producer hashes the raw file bytes, the caller may hold either form."""
+    lf = text.replace("\r\n", "\n")
+    return {
+        _sha256(text.encode("utf-8")),
+        _sha256(lf.encode("utf-8")),
+        _sha256(lf.replace("\n", "\r\n").encode("utf-8")),
+    }
+
+
+def _graph_side(
+    conn: sqlite3.Connection,
+    name: str,
+    edit: tuple[str | None, str],
+    omissions: list[str],
+) -> str:
+    """Which version of ``name`` the graph's line numbers describe.
+
+    ``"old"`` when the graph's recorded content hash equals ``before``,
+    ``"new"`` when it equals ``after``.  When neither can be proven the
+    pre-image is assumed if ``before`` is known (a typed patch_impact is
+    normally asked before the graph is amended) and the mapping is named
+    ``line_mapping_approximate:<file>``.
+    """
+    before, after = edit
+    try:
+        row = conn.execute(
+            "SELECT content_hash FROM file_hashes WHERE file_path = ?", (name,)
+        ).fetchone()
+    except sqlite3.Error:
+        row = None
+    recorded = str(row[0]) if row and row[0] else ""
+    if recorded and before is not None and recorded in _text_digests(before):
+        return "old"
+    if recorded and recorded in _text_digests(after):
+        return "new"
+    try:
+        indexed = conn.execute(
+            "SELECT 1 FROM nodes WHERE file_path = ? LIMIT 1", (name,)
+        ).fetchone() is not None
+    except sqlite3.Error:
+        indexed = False
+    if indexed:
+        omissions.append(f"line_mapping_approximate:{name}")
+    return "old" if before is not None else "new"
+
+
+def _changed_ranges(before: str, after: str, side: str) -> list[tuple[int, int]]:
+    """Changed line ranges ``(start, length)`` in the ``side`` numbering.
+
+    Computed from line opcodes, not from a unified diff: diff hunks carry
+    context lines, and a post-image range laid over a pre-edit graph lands
+    on whatever the shifted lines used to be.  A pure insertion (old side)
+    or pure deletion (new side) is attributed to the two lines around the
+    joint — conservative: the joint belongs to whichever symbol spans it.
+    """
+    matcher = difflib.SequenceMatcher(
+        None, before.splitlines(), after.splitlines(), autojunk=False
+    )
+    ranges: list[tuple[int, int]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        lo, hi = (i1, i2) if side == "old" else (j1, j2)
+        if hi > lo:
+            ranges.append((lo + 1, hi - lo))
+        else:
+            ranges.append((max(lo, 1), 2 if lo >= 1 else 1))
+    return ranges
+
+
+def _changed_after_lines(before: str, after: str) -> list[tuple[int, int]]:
+    """``(after_line, old_line)`` for each replaced/inserted post-edit line;
+    ``old_line`` is the pre-image line the change sits at."""
+    matcher = difflib.SequenceMatcher(
+        None, before.splitlines(), after.splitlines(), autojunk=False
+    )
+    out: list[tuple[int, int]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag not in {"replace", "insert"}:
+            continue
+        for j in range(j1, j2):
+            if tag == "replace":
+                old = i1 + min(j - j1, i2 - i1 - 1) + 1
+            else:
+                old = max(i1, 1)
+            out.append((j + 1, old))
+    return out
 
 
 def _check_from_dict(data: Mapping[str, Any]) -> Check:
@@ -590,6 +687,32 @@ _NODE_COLS = (
     " COALESCE(is_exported,0)"
 )
 _DEF_LABELS = ("Function", "Method", "Class", "Interface", "Struct", "Enum", "Module")
+# Source-code symbol labels — the parser's declaration taxonomy, mirroring
+# gt-index ``resolver.IsCodeSymbolLabel`` (plus the Rust ``ImplBlock``
+# parent).  Everything else in ``nodes`` is either a file anchor or an
+# analysis-layer row (Callsite, *Fact, QueryPolicyVersion, ...) published by
+# the resolution substrate; those share symbol *names* with real code and
+# must never be resolved as a symbol, a definition, or a reference source.
+_SOURCE_SYMBOL_LABELS = frozenset(
+    {
+        "Function", "Method", "Class", "Interface",
+        "Struct", "Enum", "EnumMember", "Trait", "Impl", "ImplBlock",
+        "TypeAlias", "Namespace", "Module", "Union", "Macro", "Constant",
+        "Record", "Annotation", "Constructor", "Accessor", "Protocol",
+    }
+)
+# Incoming-edge sources that count as code references: source symbols plus
+# the per-file anchor node (module-level imports/decorations hang off it).
+_REFERENCE_SOURCE_LABELS = _SOURCE_SYMBOL_LABELS | {"File"}
+_SOURCE_LABEL_SQL = ",".join(f"'{label}'" for label in sorted(_SOURCE_SYMBOL_LABELS))
+_REFERENCE_LABEL_SQL = ",".join(f"'{label}'" for label in sorted(_REFERENCE_SOURCE_LABELS))
+# Result caps.  Every cap that drops rows records a named omission, and the
+# reported counts are always the pre-truncation totals.
+_MAX_RESOLVED_NODES = 5
+_MAX_ROWS_PER_GROUP = 20
+_MAX_CONTEXT_NEIGHBORS = 10
+_MAX_CONTEXT_FLOWS = 5
+_TIER_ORDER = {"CERTIFIED": 0, "CANDIDATE": 1, "SPECULATIVE": 2}
 # Languages the Go indexer emits per-function CFG sidecar rows for
 # (cfg_blocks/cfg_edges/cfg_defs) — mirrored by cfgLangs in
 # gt-index/internal/parser/cfg.go.  ``slice`` serves these through the
@@ -608,13 +731,22 @@ def _open_graph(context: DeterministicQueryContext) -> sqlite3.Connection | None
 
 
 def _graph_revision(conn: sqlite3.Connection) -> str:
+    """The indexed source revision the graph was built from.
+
+    HAR-90 contract: gt-index writes ``project_meta.source_revision`` (flag
+    ``-source-revision``) on full builds, amends and ``-file`` increments.
+    ``git_commit`` is the producer *build* commit — provenance, not the
+    indexed tree — so it is never read here; comparing it against a value
+    the host copied from the same row made the freshness check tautological.
+    Absent -> "" -> ``graph_revision_unavailable``.
+    """
     try:
         row = conn.execute(
-            "SELECT value FROM project_meta WHERE key='git_commit'"
+            "SELECT value FROM project_meta WHERE key='source_revision'"
         ).fetchone()
     except sqlite3.Error:
         return ""
-    return str(row[0]) if row else ""
+    return str(row[0]) if row and row[0] else ""
 
 
 def _graph_omissions(
@@ -658,31 +790,76 @@ def _resolve_symbol_nodes(
     symbol: object,
     path_hint: object = "",
     language_hint: object = "",
+    omissions: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Exact name/qualified_name lookup. Hints narrow, never invent."""
+    """Exact name/qualified_name lookup over source-symbol nodes only.
+
+    Analysis-layer rows (``Callsite`` and the resolution-substrate fact
+    nodes) are excluded by label.  The language hint is a filter: a hint
+    that matches nothing yields no nodes (never a silent fallback to other
+    languages) and records ``language_hint_unmatched``.  The path hint
+    narrows when it matches; a non-matching path hint keeps the set and
+    records ``path_hint_unmatched`` so the answer cannot claim EXACT.
+    """
     if not isinstance(symbol, str) or not symbol.strip() or "\x00" in symbol:
         return []
     symbol = symbol.strip()
     rows = conn.execute(
-        f"SELECT {_NODE_COLS} FROM nodes WHERE name = ? OR qualified_name = ?",
+        f"SELECT {_NODE_COLS} FROM nodes WHERE (name = ? OR qualified_name = ?)"
+        f" AND label IN ({_SOURCE_LABEL_SQL})",
         (symbol, symbol),
     ).fetchall()
     nodes = [_node_dict(r) for r in rows]
     if isinstance(language_hint, str) and language_hint.strip():
         lang = language_hint.strip().lower()
         narrowed = [n for n in nodes if n["language"].lower() == lang]
-        if narrowed:
-            nodes = narrowed
+        if not narrowed and nodes and omissions is not None:
+            omissions.append(f"language_hint_unmatched:{lang}")
+        nodes = narrowed
     if isinstance(path_hint, str) and path_hint.strip():
         hint = path_hint.strip().replace("\\", "/")
         narrowed = [n for n in nodes if n["file_path"].endswith(hint)]
         if narrowed:
             nodes = narrowed
+        elif nodes and omissions is not None:
+            omissions.append("path_hint_unmatched")
     # Preferred order: non-test defs, exported first, deterministic by site.
     nodes.sort(
         key=lambda n: (n["is_test"], -int(n["is_exported"]), n["file_path"], n["start_line"])
     )
     return nodes
+
+
+def _symbol_sites(nodes: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Ambiguity witnesses: one ``file:line`` per distinct resolved symbol.
+
+    More than one site means the name denotes several symbols (different
+    files, classes or languages); merging their evidence silently is what
+    this surfaces."""
+    sites = sorted({f"{n['file_path']}:{n['start_line']}" for n in nodes})
+    return tuple(sites) if len(sites) > 1 else ()
+
+
+def _resolved_symbols(nodes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": n["name"],
+            "qualified_name": n["qualified_name"],
+            "kind": n["kind"],
+            "file_path": n["file_path"],
+            "start_line": n["start_line"],
+            "language": n["language"],
+        }
+        for n in nodes[:_MAX_ROWS_PER_GROUP]
+    ]
+
+
+def _tier_key(row: Mapping[str, Any]) -> tuple[int, str, int]:
+    return (
+        _TIER_ORDER.get(str(row.get("trust_tier") or ""), 3),
+        str(row.get("file_path") or ""),
+        int(row.get("line") or 0),
+    )
 
 
 def _unavailable_graph(request: ActionRequest, kind: str) -> _Produced:
@@ -699,15 +876,17 @@ def _definition(request: ActionRequest, context: DeterministicQueryContext) -> _
     conn = _open_graph(context)
     if conn is None:
         return _unavailable_graph(request, "definition")
+    args = request.arguments
     with conn:
-        args = request.arguments
-        nodes = _resolve_symbol_nodes(
-            conn, args.get("symbol"), args.get("path"), args.get("language")
-        )
         omissions = _graph_omissions(request, context, conn)
+        nodes = _resolve_symbol_nodes(
+            conn, args.get("symbol"), args.get("path"), args.get("language"), omissions
+        )
     if not nodes:
         omissions.append("symbol_not_found")
     defs = [n for n in nodes if n["kind"] in _DEF_LABELS] or nodes
+    if len(defs) > _MAX_ROWS_PER_GROUP:
+        omissions.append("definitions_truncated")
     answer = {
         "symbol": args.get("symbol"),
         "definitions": [
@@ -723,84 +902,128 @@ def _definition(request: ActionRequest, context: DeterministicQueryContext) -> _
                 "language": n["language"],
                 "is_test": n["is_test"],
             }
-            for n in defs[:20]
+            for n in defs[:_MAX_ROWS_PER_GROUP]
         ],
         "definition_count": len(defs),
     }
-    ambiguity = tuple(
-        sorted({f"{n['file_path']}:{n['start_line']}" for n in defs})
-    ) if len(defs) > 1 else ()
+    ambiguity = _symbol_sites(defs)
     exact = not omissions and not ambiguity
     return _Produced(
         answer,
         EvidenceSemantics.EXACT if exact and defs else EvidenceSemantics.INCOMPLETE,
-        Coverage.COMPLETE if exact else Coverage.PARTIAL,
-        anchors=tuple((n["file_path"], n["start_line"]) for n in defs[:20]),
+        Coverage.COMPLETE if exact and defs else Coverage.PARTIAL,
+        anchors=tuple(
+            (n["file_path"], n["start_line"]) for n in defs[:_MAX_ROWS_PER_GROUP]
+            if n["start_line"] >= 1
+        ),
         ambiguity=ambiguity,
-        omissions=tuple(omissions),
+        omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
 
 
+def _neighbor_row(
+    name: object,
+    qualified: object,
+    file_path: object,
+    line: object,
+    call_line: object,
+    language: object,
+    tier: object,
+    confidence: object,
+) -> dict[str, Any]:
+    return {
+        "name": str(name or ""),
+        "qualified_name": str(qualified or ""),
+        "file_path": str(file_path or ""),
+        "line": int(line or 0),
+        "call_line": int(call_line or 0),
+        "language": str(language or ""),
+        "trust_tier": str(tier or ""),
+        "confidence": float(confidence or 0.0),
+    }
+
+
+def _row_anchors(rows: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, int], ...]:
+    return tuple(
+        (str(r["file_path"]), int(r["line"]))
+        for r in rows
+        if r.get("file_path") and int(r.get("line") or 0) >= 1
+    )[:_MAX_ROWS_PER_GROUP]
+
+
 def _references(request: ActionRequest, context: DeterministicQueryContext) -> _Produced:
+    """Incoming graph edges of every type into the resolved symbol(s).
+
+    Reference sources are source symbols or file anchors only — the
+    resolution substrate's Callsite/fact rows are not code references.
+    Rows carry the referencing symbol's language and the edge's own
+    ``reference_line``; ``line`` stays the referencing symbol's start line.
+    """
     conn = _open_graph(context)
     if conn is None:
         return _unavailable_graph(request, "references")
+    args = request.arguments
     with conn:
-        args = request.arguments
-        nodes = _resolve_symbol_nodes(
-            conn, args.get("symbol"), args.get("path"), args.get("language")
-        )
         omissions = _graph_omissions(request, context, conn)
+        nodes = _resolve_symbol_nodes(
+            conn, args.get("symbol"), args.get("path"), args.get("language"), omissions
+        )
         if not nodes:
             omissions.append("symbol_not_found")
+        if len(nodes) > _MAX_RESOLVED_NODES:
+            omissions.append("resolved_nodes_truncated")
         by_type: dict[str, list[dict[str, Any]]] = {}
-        total = 0
-        for node in nodes[:5]:
+        for node in nodes[:_MAX_RESOLVED_NODES]:
             for row in conn.execute(
-                "SELECT e.type, n.name, n.file_path, n.start_line,"
+                "SELECT e.type, n.name, COALESCE(n.qualified_name,''), n.file_path,"
+                " n.start_line, COALESCE(e.source_line,0), COALESCE(n.language,''),"
                 " COALESCE(e.trust_tier,''), COALESCE(e.confidence,0.0)"
                 " FROM edges e JOIN nodes n ON n.id = e.source_id"
-                " WHERE e.target_id = ?",
+                f" WHERE e.target_id = ? AND n.label IN ({_REFERENCE_LABEL_SQL})",
                 (node["id"],),
             ):
-                etype, name, fp, line, tier, conf = row
-                by_type.setdefault(str(etype), []).append(
-                    {
-                        "name": str(name or ""),
-                        "file_path": str(fp or ""),
-                        "line": int(line or 0),
-                        "trust_tier": str(tier or ""),
-                        "confidence": float(conf or 0.0),
-                    }
-                )
-                total += 1
-        for rows in by_type.values():
-            rows.sort(
-                key=lambda r: (0 if r["trust_tier"] == "CERTIFIED" else 1, r["file_path"], r["line"])
-            )
-            del rows[20:]
+                etype, name, qualified, fp, line, ref_line, lang, tier, conf = row
+                entry = _neighbor_row(name, qualified, fp, line, ref_line, lang, tier, conf)
+                entry["reference_line"] = entry.pop("call_line")
+                entry["target"] = f"{node['file_path']}:{node['start_line']}"
+                by_type.setdefault(str(etype), []).append(entry)
+        counts = {etype: len(rows) for etype, rows in sorted(by_type.items())}
+        for etype, rows in by_type.items():
+            rows.sort(key=_tier_key)
+            if len(rows) > _MAX_ROWS_PER_GROUP:
+                omissions.append(f"references_truncated:{etype}")
+                del rows[_MAX_ROWS_PER_GROUP:]
     answer = {
         "symbol": args.get("symbol"),
         "resolved_nodes": len(nodes),
+        "resolved_symbols": _resolved_symbols(nodes),
         "references_by_type": by_type,
-        "reference_count": total,
+        "reference_count": sum(counts.values()),
+        "reference_count_by_type": counts,
+        "returned_count": sum(len(rows) for rows in by_type.values()),
     }
-    exact = not omissions and bool(nodes)
+    ambiguity = _symbol_sites(nodes)
+    exact = not omissions and bool(nodes) and not ambiguity
     return _Produced(
         answer,
         EvidenceSemantics.EXACT if exact else EvidenceSemantics.INCOMPLETE,
         Coverage.COMPLETE if exact else Coverage.PARTIAL,
-        anchors=tuple(
-            (r["file_path"], r["line"])
-            for rows in by_type.values() for r in rows
-        )[:20],
-        omissions=tuple(omissions),
+        anchors=_row_anchors([r for rows in by_type.values() for r in rows]),
+        ambiguity=ambiguity,
+        omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
 
 
 def _callers(request: ActionRequest, context: DeterministicQueryContext) -> _Produced:
+    """Transitive incoming CALLS, banded by hop distance.
+
+    ``caller_count`` is the number of distinct callers found before any
+    per-band cap; ``returned_count`` is what the answer carries.  A dropped
+    row is the omission ``callers_truncated``; several same-named symbols
+    are reported as ambiguity, never merged into one EXACT answer.
+    """
     conn = _open_graph(context)
     if conn is None:
         return _unavailable_graph(request, "callers")
@@ -809,12 +1032,12 @@ def _callers(request: ActionRequest, context: DeterministicQueryContext) -> _Pro
         depth = max(1, min(int(raw_depth), 6))
     except (TypeError, ValueError):
         depth = 3
+    args = request.arguments
     with conn:
-        args = request.arguments
-        nodes = _resolve_symbol_nodes(
-            conn, args.get("symbol"), args.get("path"), args.get("language")
-        )
         omissions = _graph_omissions(request, context, conn)
+        nodes = _resolve_symbol_nodes(
+            conn, args.get("symbol"), args.get("path"), args.get("language"), omissions
+        )
         if not nodes:
             omissions.append("symbol_not_found")
         visited = {n["id"] for n in nodes}
@@ -825,121 +1048,141 @@ def _callers(request: ActionRequest, context: DeterministicQueryContext) -> _Pro
             if dist >= depth:
                 continue
             for row in conn.execute(
-                "SELECT e.source_id, n.name, n.file_path, n.start_line,"
+                "SELECT e.source_id, n.name, COALESCE(n.qualified_name,''), n.file_path,"
+                " n.start_line, COALESCE(e.source_line,0), COALESCE(n.language,''),"
                 " COALESCE(e.trust_tier,''), COALESCE(e.confidence,0.0)"
                 " FROM edges e JOIN nodes n ON n.id = e.source_id"
-                " WHERE e.target_id = ? AND e.type='CALLS'",
+                " WHERE e.target_id = ? AND e.type='CALLS'"
+                f" AND n.label IN ({_SOURCE_LABEL_SQL})",
                 (node_id,),
             ):
-                src, name, fp, line, tier, conf = row
+                src = row[0]
                 if src in visited:
                     continue
                 visited.add(src)
-                bands.setdefault(dist + 1, []).append(
-                    {
-                        "name": str(name or ""),
-                        "file_path": str(fp or ""),
-                        "line": int(line or 0),
-                        "trust_tier": str(tier or ""),
-                        "confidence": float(conf or 0.0),
-                    }
-                )
+                bands.setdefault(dist + 1, []).append(_neighbor_row(*row[1:]))
                 frontier.append((src, dist + 1))
+        caller_count = sum(len(rows) for rows in bands.values())
         for rows in bands.values():
             rows.sort(
-                key=lambda r: (0 if r["trust_tier"] == "CERTIFIED" else 1, r["name"])
+                key=lambda r: (_TIER_ORDER.get(r["trust_tier"], 3), r["name"], r["file_path"], r["line"])
             )
-            del rows[20:]
+            if len(rows) > _MAX_ROWS_PER_GROUP:
+                omissions.append("callers_truncated")
+                del rows[_MAX_ROWS_PER_GROUP:]
     answer = {
         "symbol": args.get("symbol"),
         "resolved_nodes": len(nodes),
+        "resolved_symbols": _resolved_symbols(nodes),
         "max_depth": depth,
         "callers_by_depth": {str(d): rows for d, rows in sorted(bands.items())},
-        "caller_count": sum(len(r) for r in bands.values()),
+        "caller_count": caller_count,
+        "returned_count": sum(len(r) for r in bands.values()),
     }
-    exact = not omissions and bool(nodes)
+    ambiguity = _symbol_sites(nodes)
+    exact = not omissions and bool(nodes) and not ambiguity
     return _Produced(
         answer,
         EvidenceSemantics.EXACT if exact else EvidenceSemantics.INCOMPLETE,
         Coverage.COMPLETE if exact else Coverage.PARTIAL,
-        anchors=tuple(
-            (r["file_path"], r["line"]) for rows in bands.values() for r in rows
-        )[:20],
-        omissions=tuple(omissions),
+        anchors=_row_anchors([r for _d, rows in sorted(bands.items()) for r in rows]),
+        ambiguity=ambiguity,
+        omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
 
 
+def _call_neighbors(
+    conn: sqlite3.Connection, node_id: int, direction: str
+) -> list[dict[str, Any]]:
+    other, own = ("source_id", "target_id") if direction == "in" else ("target_id", "source_id")
+    rows = [
+        _neighbor_row(*row)
+        for row in conn.execute(
+            "SELECT n.name, COALESCE(n.qualified_name,''), n.file_path, n.start_line,"
+            " COALESCE(e.source_line,0), COALESCE(n.language,''),"
+            " COALESCE(e.trust_tier,''), COALESCE(e.confidence,0.0)"
+            f" FROM edges e JOIN nodes n ON n.id = e.{other}"
+            f" WHERE e.{own} = ? AND e.type='CALLS'"
+            f" AND n.label IN ({_SOURCE_LABEL_SQL})",
+            (node_id,),
+        )
+    ]
+    rows.sort(key=lambda r: (_TIER_ORDER.get(r["trust_tier"], 3), r["name"], r["file_path"]))
+    return rows
+
+
 def _symbol_context(request: ActionRequest, context: DeterministicQueryContext) -> _Produced:
-    """One-shot 360° view: definition + callers + callees + flow membership."""
+    """One-shot 360° view: definition + callers + callees + flow membership.
+
+    When the name denotes several symbols the answer lists every candidate,
+    records the ambiguity (``ambiguous_symbol``) and states how the shown
+    ``definition`` was chosen — it never presents the first match as the
+    symbol.  Neighbor caps and flow caps are named omissions.
+    """
     conn = _open_graph(context)
     if conn is None:
         return _unavailable_graph(request, "symbol_context")
+    args = request.arguments
     with conn:
-        args = request.arguments
-        nodes = _resolve_symbol_nodes(
-            conn, args.get("symbol"), args.get("path"), args.get("language")
-        )
         omissions = _graph_omissions(request, context, conn)
+        nodes = _resolve_symbol_nodes(
+            conn, args.get("symbol"), args.get("path"), args.get("language"), omissions
+        )
         if not nodes:
             omissions.append("symbol_not_found")
+        ambiguity = _symbol_sites(nodes)
+        if ambiguity:
+            omissions.append("ambiguous_symbol")
         primary = nodes[0] if nodes else None
         callers: list[dict[str, Any]] = []
         callees: list[dict[str, Any]] = []
         if primary:
-            for direction, sink in (("in", callers), ("out", callees)):
-                sql = (
-                    "SELECT n.name, n.file_path, n.start_line, COALESCE(e.trust_tier,'')"
-                    " FROM edges e JOIN nodes n ON n.id = e.source_id"
-                    " WHERE e.target_id = ? AND e.type='CALLS'"
-                    if direction == "in"
-                    else
-                    "SELECT n.name, n.file_path, n.start_line, COALESCE(e.trust_tier,'')"
-                    " FROM edges e JOIN nodes n ON n.id = e.target_id"
-                    " WHERE e.source_id = ? AND e.type='CALLS'"
-                )
-                for name, fp, line, tier in conn.execute(sql, (primary["id"],)):
-                    sink.append(
-                        {
-                            "name": str(name or ""),
-                            "file_path": str(fp or ""),
-                            "line": int(line or 0),
-                            "trust_tier": str(tier or ""),
-                        }
-                    )
-            for sink in (callers, callees):
-                sink.sort(
-                    key=lambda r: (0 if r["trust_tier"] == "CERTIFIED" else 1, r["name"])
-                )
-                del sink[10:]
-        flows: list[str] = []
-        if primary:
-            try:
-                from .processes import build_process_index, detect_processes
+            callers = _call_neighbors(conn, primary["id"], "in")
+            callees = _call_neighbors(conn, primary["id"], "out")
+    caller_count, callee_count = len(callers), len(callees)
+    if caller_count > _MAX_CONTEXT_NEIGHBORS:
+        omissions.append("callers_truncated")
+    if callee_count > _MAX_CONTEXT_NEIGHBORS:
+        omissions.append("callees_truncated")
+    flows: list[str] = []
+    if primary:
+        try:
+            from .processes import build_process_index, detect_processes
 
-                index = build_process_index(
-                    detect_processes(context.graph_db).processes
-                )
-                flows = [p.label for p in index.get(primary["id"], ())[:5]]
-            except Exception:  # noqa: BLE001 - flow membership is additive
-                omissions.append("process_index_unavailable")
+            index = build_process_index(detect_processes(context.graph_db).processes)
+            member_of = index.get(primary["id"], ())
+            flows = [p.display_label for p in member_of[:_MAX_CONTEXT_FLOWS]]
+            if len(member_of) > _MAX_CONTEXT_FLOWS:
+                omissions.append("flows_truncated")
+        except Exception:  # noqa: BLE001 - flow membership is additive
+            omissions.append("process_index_unavailable")
     answer = {
         "symbol": args.get("symbol"),
         "definition": primary,
+        "primary_selection": (
+            "ambiguous_preferred_order" if ambiguity else "unique"
+        ) if primary else None,
+        "candidates": _resolved_symbols(nodes),
         "additional_definitions": len(nodes) - 1 if nodes else 0,
-        "callers": callers,
-        "callees": callees,
+        "callers": callers[:_MAX_CONTEXT_NEIGHBORS],
+        "callees": callees[:_MAX_CONTEXT_NEIGHBORS],
+        "caller_count": caller_count,
+        "callee_count": callee_count,
         "flows": flows,
     }
-    exact = not omissions and primary is not None
+    exact = not omissions and primary is not None and not ambiguity
     return _Produced(
         answer,
         EvidenceSemantics.EXACT if exact else EvidenceSemantics.INCOMPLETE,
         Coverage.COMPLETE if exact else Coverage.PARTIAL,
         anchors=(
-            ((primary["file_path"], primary["start_line"]),) if primary else ()
+            ((primary["file_path"], primary["start_line"]),)
+            if primary and primary["start_line"] >= 1
+            else ()
         ),
-        omissions=tuple(omissions),
+        ambiguity=ambiguity,
+        omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
 
@@ -979,7 +1222,7 @@ def _processes(request: ActionRequest, context: DeterministicQueryContext) -> _P
         "truncated": result.stats.truncated,
         "processes": [
             {
-                "label": p.label,
+                "label": p.display_label,
                 "entry": p.entry.rendered,
                 "terminal": p.terminal.rendered,
                 "step_count": p.step_count,
@@ -1005,6 +1248,52 @@ def _processes(request: ActionRequest, context: DeterministicQueryContext) -> _P
     )
 
 
+def _route_anchor(route: Mapping[str, Any]) -> tuple[str, int] | None:
+    """Where a route row points: the handler definition when bound, else
+    the first client call site (an API_CALL-only route has no handler
+    line).  ``None`` when neither is a real line — never line 0."""
+    handler_file = str(route.get("handler_file") or "")
+    handler_line = int(route.get("handler_line") or 0)
+    if handler_file and handler_line >= 1:
+        return handler_file, handler_line
+    for consumer in route.get("consumers") or ():
+        cfile = str(consumer.get("file") or "")
+        cline = int(consumer.get("line") or 0)
+        if cfile and cline >= 1:
+            return cfile, cline
+    return None
+
+
+def _route_omissions(
+    routes: Sequence[Mapping[str, Any]], result: Mapping[str, Any]
+) -> tuple[list[str], tuple[tuple[str, int], ...]]:
+    """Named unknowns for a route answer, plus its anchors.  Anything the
+    answer could not bind or had to cut is an omission, so EXACT means
+    every route is fully known."""
+    omissions: list[str] = []
+    anchors: list[tuple[str, int]] = []
+    for route in routes:
+        name = str(route.get("name") or route.get("route") or "")
+        if not route.get("handler"):
+            omissions.append(f"route_handler_unresolved:{name}")
+        if name == "unknown":
+            omissions.append("route_path_unknown")
+        if route.get("flows_truncated"):
+            omissions.append("route_flows_truncated")
+        if route.get("consumers_truncated"):
+            omissions.append("route_consumers_truncated")
+        anchor = _route_anchor(route)
+        if anchor is None:
+            omissions.append(f"route_anchor_unavailable:{name}")
+        else:
+            anchors.append(anchor)
+    if result.get("truncated"):
+        omissions.append("route_map_truncated")
+    if result.get("unattached_middleware"):
+        omissions.append("middleware_unattached")
+    return omissions, tuple(anchors[:20])
+
+
 def _route_map(request: ActionRequest, context: DeterministicQueryContext) -> _Produced:
     """Route → handler → downstream-call topology from producer edges."""
     conn = _open_graph(context)
@@ -1027,8 +1316,8 @@ def _route_map(request: ActionRequest, context: DeterministicQueryContext) -> _P
             if str(r.get("handler_file") or "").replace("\\", "/").startswith(prefix)
             or prefix in str(r.get("handler_file") or "").replace("\\", "/")
         ]
-    if result.get("truncated"):
-        omissions.append("route_map_truncated")
+    route_omissions, anchors = _route_omissions(routes, result)
+    omissions.extend(route_omissions)
     answer = {
         "route_count": len(routes),
         "truncated": bool(result.get("truncated")),
@@ -1039,24 +1328,24 @@ def _route_map(request: ActionRequest, context: DeterministicQueryContext) -> _P
                 "handler": r.get("handler"),
                 "handler_file": r.get("handler_file"),
                 "handler_line": r.get("handler_line"),
+                "route_source": r.get("route_source"),
                 "discovered_via": r.get("discovered_via"),
                 "confidence": r.get("confidence"),
+                "middleware": r.get("middleware") or [],
+                "injections": r.get("injections") or [],
                 "consumers": r.get("consumers") or [],
                 "downstream_calls": r.get("flows") or [],
             }
             for r in routes
         ],
+        "unattached_middleware": result.get("unattached_middleware") or [],
     }
     exact = not omissions and result.get("status") == "ok"
     return _Produced(
         answer,
         EvidenceSemantics.EXACT if exact else EvidenceSemantics.INCOMPLETE,
         Coverage.COMPLETE if exact else Coverage.PARTIAL,
-        anchors=tuple(
-            (str(r.get("handler_file") or ""), int(r.get("handler_line") or 0))
-            for r in routes
-            if r.get("handler_file")
-        )[:20],
+        anchors=anchors,
         omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
@@ -1085,24 +1374,21 @@ def _api_impact(request: ActionRequest, context: DeterministicQueryContext) -> _
         omissions.append("route_not_found")
     elif result.get("status") != "ok":
         omissions.append("route_tables_absent")
-    if result.get("truncated"):
-        omissions.append("route_map_truncated")
+    routes = result.get("routes") or []
+    route_omissions, anchors = _route_omissions(routes, result)
+    omissions.extend(route_omissions)
     answer = {
         "route": route,
         "handler": handler,
-        "route_count": len(result.get("routes") or []),
-        "routes": result.get("routes") or [],
+        "route_count": len(routes),
+        "routes": routes,
     }
     exact = not omissions and result.get("status") == "ok"
     return _Produced(
         answer,
         EvidenceSemantics.EXACT if exact else EvidenceSemantics.INCOMPLETE,
         Coverage.COMPLETE if exact else Coverage.PARTIAL,
-        anchors=tuple(
-            (str(r.get("handler_file") or ""), int(r.get("handler_line") or 0))
-            for r in (result.get("routes") or [])
-            if r.get("handler_file")
-        )[:20],
+        anchors=anchors,
         omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
@@ -1195,6 +1481,15 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
     Honest scope: this is call-graph reachability, not statement-level
     dataflow — a path exists means a call chain connects source to sink,
     not that attacker-controlled data provably flows. Always INCOMPLETE.
+
+    Trust tiers are kept apart: ``paths`` are chains whose every hop is a
+    CERTIFIED edge; ``uncertain_paths`` need at least one CANDIDATE /
+    SPECULATIVE hop.  Low-confidence ``name_match`` edges (< 0.5: a call
+    bound to a same-named symbol with no receiver/import proof, e.g. a
+    stdlib/external qualified call landing on a local method) are not
+    followed unless ``include_name_matched`` is true.  Field channels are
+    scoped to the query: writers the sources reach, readers that reach the
+    sinks (readers are unscoped — and say so — when no sink is given).
     """
     conn = _open_graph(context)
     if conn is None:
@@ -1222,53 +1517,134 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
         sink_nodes = _resolve_symbol_nodes(
             conn, sink_arg, args.get("path"), args.get("language")
         ) if isinstance(sink_arg, str) and sink_arg.strip() else []
+        if isinstance(sink_arg, str) and sink_arg.strip() and not sink_nodes:
+            omissions.append("sink_not_found")
 
-        # Forward CALLS adjacency.
-        forward: dict[int, list[tuple[int, str, str]]] = {}
+        include_name_matched = args.get("include_name_matched") is True
+        edge_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(edges)")}
+        method_expr = (
+            "COALESCE(e.resolution_method,'')"
+            if "resolution_method" in edge_cols
+            else "''"
+        )
+        # Forward CALLS adjacency: one hop per (source, target), keeping the
+        # strongest tier and the first call line of that edge.
+        hop_tier: dict[tuple[int, int], str] = {}
+        hop_line: dict[tuple[int, int], int] = {}
+        excluded_from: set[int] = set()
         for row in conn.execute(
-            "SELECT e.source_id, e.target_id, n.name, COALESCE(e.trust_tier,'')"
-            " FROM edges e JOIN nodes n ON n.id = e.target_id"
-            " WHERE e.type='CALLS'"
+            "SELECT e.source_id, e.target_id, COALESCE(e.trust_tier,''),"
+            f" COALESCE(e.confidence,0.0), {method_expr}, COALESCE(e.source_line,0)"
+            " FROM edges e WHERE e.type='CALLS'"
+            " ORDER BY e.source_id, e.target_id, e.source_line"
         ):
-            forward.setdefault(int(row[0]), []).append(
-                (int(row[1]), str(row[2] or ""), str(row[3] or ""))
+            src, tgt = int(row[0]), int(row[1])
+            tier, conf, method = str(row[2] or "").upper(), float(row[3] or 0.0), str(row[4] or "")
+            if method == "name_match" and conf < 0.5 and not include_name_matched:
+                excluded_from.add(src)
+                continue
+            key = (src, tgt)
+            prior = hop_tier.get(key)
+            if prior is None or _TIER_ORDER.get(tier, 3) < _TIER_ORDER.get(prior, 3):
+                hop_tier[key] = tier
+            if int(row[5] or 0) > 0:
+                hop_line.setdefault(key, int(row[5]))
+        forward: dict[int, list[int]] = {}
+        backward: dict[int, list[int]] = {}
+        for src, tgt in sorted(hop_tier):
+            forward.setdefault(src, []).append(tgt)
+            backward.setdefault(tgt, []).append(src)
+        node_label = {
+            int(r[0]): (str(r[1] or ""), str(r[2] or ""), int(r[3] or 0))
+            for r in conn.execute(
+                "SELECT id, name, file_path, COALESCE(start_line,0) FROM nodes"
             )
+        }
 
-        paths: list[dict[str, Any]] = []
-        reachable_names: dict[int, str] = {}
-        name_of = {n["id"]: n["name"] for n in source_nodes}
-        sink_ids = {n["id"] for n in sink_nodes}
-        for source in source_nodes[:10]:
-            # BFS keeping one shortest path per reached node.
+        def _bfs(
+            start: int, adjacency: dict[int, list[int]], certified_only: bool
+        ) -> tuple[dict[int, int], set[int]]:
             prev: dict[int, int] = {}
-            queue: list[tuple[int, int]] = [(source["id"], 0)]
-            visited = {source["id"]}
+            visited = {start}
+            queue: list[tuple[int, int]] = [(start, 0)]
             while queue:
                 current, dist = queue.pop(0)
                 if dist >= depth:
                     continue
-                for target, tname, tier in forward.get(current, []):
-                    reachable_names[target] = tname
-                    if target not in visited:
-                        visited.add(target)
-                        prev[target] = current
-                        queue.append((target, dist + 1))
-            # Report shortest source→sink paths.
-            for sink_id in sink_ids & visited:
-                chain = [sink_id]
-                while chain[-1] != source["id"]:
-                    chain.append(prev[chain[-1]])
-                chain.reverse()
-                paths.append(
-                    {
-                        "source": source["name"],
-                        "sink": reachable_names.get(sink_id) or name_of.get(sink_id) or str(sink_id),
-                        "hops": len(chain) - 1,
-                        "path": [name_of.get(n) or reachable_names.get(n) or str(n) for n in chain],
-                    }
-                )
-        paths.sort(key=lambda p: (p["hops"], p["source"], p["path"]))
-        del paths[25:]
+                for nxt in adjacency.get(current, ()):
+                    if nxt in visited:
+                        continue
+                    key = (current, nxt) if adjacency is forward else (nxt, current)
+                    if certified_only and hop_tier.get(key) != "CERTIFIED":
+                        continue
+                    visited.add(nxt)
+                    prev[nxt] = current
+                    queue.append((nxt, dist + 1))
+            return prev, visited
+
+        def _chain(prev: dict[int, int], start: int, end: int) -> list[int]:
+            chain = [end]
+            while chain[-1] != start:
+                chain.append(prev[chain[-1]])
+            chain.reverse()
+            return chain
+
+        def _path_record(chain: list[int]) -> dict[str, Any]:
+            tiers = [hop_tier.get((a, b), "") for a, b in zip(chain, chain[1:])]
+            return {
+                "source": node_label.get(chain[0], ("",))[0],
+                "sink": node_label.get(chain[-1], ("",))[0],
+                "hops": len(chain) - 1,
+                "path": [node_label.get(n, (str(n),))[0] for n in chain],
+                "path_sites": [
+                    f"{node_label[n][1]}:{node_label[n][2]}" for n in chain if n in node_label
+                ],
+                "hop_tiers": tiers,
+                "trust": "certified" if all(t == "CERTIFIED" for t in tiers) else "uncertain",
+                "_ids": chain,
+            }
+
+        paths: list[dict[str, Any]] = []
+        uncertain_paths: list[dict[str, Any]] = []
+        sink_ids = {n["id"] for n in sink_nodes}
+        reachable: set[int] = set()
+        reachable_certified: set[int] = set()
+        writer_scope: set[int] = set()
+        for source in source_nodes[:10]:
+            sid = source["id"]
+            prev_c, seen_c = _bfs(sid, forward, True)
+            prev_a, seen_a = _bfs(sid, forward, False)
+            writer_scope |= seen_a
+            reachable |= seen_a - {sid}
+            reachable_certified |= seen_c - {sid}
+            if excluded_from & seen_a:
+                omissions.append("name_match_edges_excluded")
+            certified_chains = set()
+            for sink_id in sorted(sink_ids & seen_c):
+                chain = _chain(prev_c, sid, sink_id)
+                certified_chains.add(tuple(chain))
+                paths.append(_path_record(chain))
+            for sink_id in sorted(sink_ids & seen_a):
+                chain = _chain(prev_a, sid, sink_id)
+                if tuple(chain) in certified_chains:
+                    continue
+                record = _path_record(chain)
+                if record["trust"] == "certified":
+                    continue  # a longer certified chain is already reported
+                uncertain_paths.append(record)
+        for bucket, label in ((paths, "certified"), (uncertain_paths, "uncertain")):
+            bucket.sort(key=lambda p: (p["hops"], p["source"], p["path"]))
+            if len(bucket) > 25:
+                omissions.append(f"taint_{label}_paths_truncated")
+                del bucket[25:]
+        reachable_names = {n: node_label.get(n, ("",))[0] for n in reachable}
+        if sink_ids:
+            reader_scope: set[int] | None = set()
+            for sink_id in sink_ids:
+                reader_scope |= _bfs(sink_id, backward, False)[1]
+        else:
+            reader_scope = None
+            omissions.append("field_channel_readers_unscoped")
 
         heuristic_sinks: list[str] = []
         if not sink_ids:
@@ -1283,6 +1659,13 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
                 omissions.append("sink_pattern_heuristic")
             else:
                 omissions.append("no_sink_specified")
+        heuristic_certified = sorted(
+            {
+                node_label.get(n, ("",))[0]
+                for n in reachable_certified
+                if node_label.get(n, ("",))[0].lower() in _SINK_NAME_MARKERS
+            }
+        ) if not sink_ids else []
 
         # Field-mediated channels: a WRITES(f) → READS(f) pair is a data
         # channel CALLS cannot see (e.g. source writes request field, sink
@@ -1304,10 +1687,6 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
                 " FROM nodes"
             )
         }
-        name_to_ids: dict[str, list[int]] = {}
-        for nid, n in nodes_by_id.items():
-            name_to_ids.setdefault(n["name"], []).append(nid)
-
         # Receiver/type evidence persisted by the producer, loaded once:
         # field_read/side_effect props carry ``reads: <recv>.<field>`` /
         # ``mutates: <recv>.<field>``; param props carry ``name[:type]``;
@@ -1477,7 +1856,14 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
                 ]
             scope_raw = site.get("scope_node_id")
             scope_id = int(scope_raw) if isinstance(scope_raw, int) else None
-            node = nodes_by_id.get(int(row[1]), {})
+            accessor = int(row[1])
+            # Query scoping: a writer must be reachable from a source, a
+            # reader must reach a sink.  Repository-wide joins were noise.
+            if row[0] == "WRITES" and accessor not in writer_scope:
+                continue
+            if row[0] == "READS" and reader_scope is not None and accessor not in reader_scope:
+                continue
+            node = nodes_by_id.get(accessor, {})
             seen_access: set[tuple[str, object]] = set()
             for field, aline, arecv in accesses:
                 if not field or (field, aline) in seen_access:
@@ -1508,6 +1894,8 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
                 if owner_w is not None and owner_r is not None and owner_w != owner_r:
                     continue
                 bound = owner_w is not None and owner_w == owner_r
+                if len(ws) > 5 or len(rs) > 5:
+                    omissions.append("field_channels_truncated")
                 for w in ws[:5]:
                     for r in rs[:5]:
                         data_channels.append(
@@ -1524,51 +1912,48 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
             key=lambda c: (str(c["field"]), str(c["owner"]),
                            c["writer"]["symbol"], c["reader"]["symbol"])
         )
-        del data_channels[25:]
+        if len(data_channels) > 25:
+            omissions.append("field_channels_truncated")
+            del data_channels[25:]
         if any(c["identity"] == "owner_bound" for c in data_channels):
             omissions.append("field_flow_owner_bound")
         if any(c["identity"] == "owner_unknown" for c in data_channels):
             omissions.append("field_flow_name_matched")
 
-        # Per-hop statement evidence: for Python hops, the CALLS edge's
-        # source_line is a real call site — report which variables reach it
-        # via the CFG substrate's backward slice (bounded; per-hop abstains).
+        # Per-hop statement evidence: the CALLS edge's source_line is a real
+        # call site — for Python hops report which variables reach it via the
+        # CFG substrate's backward slice (bounded; per-hop abstains).  Hops
+        # are node identities, so same-named symbols never borrow lines.
         hop_detail_budget = 8
-        for path in paths:
+        for path in (*paths, *uncertain_paths):
+            chain_ids = path.pop("_ids")
             details: list[dict[str, Any]] = []
-            chain_names = path["path"]
-            for i in range(len(chain_names) - 1):
-                hop: dict[str, Any] = {"from": chain_names[i], "to": chain_names[i + 1]}
-                src_ids = name_to_ids.get(chain_names[i], [])
-                dst_ids = name_to_ids.get(chain_names[i + 1], [])
-                # Only unambiguous hops get line/variable evidence.
-                if len(src_ids) == 1 and len(dst_ids) == 1:
-                    edge_row = conn.execute(
-                        "SELECT source_line FROM edges WHERE source_id = ?"
-                        " AND target_id = ? AND type = 'CALLS' LIMIT 1",
-                        (src_ids[0], dst_ids[0]),
-                    ).fetchone()
-                    if edge_row and edge_row[0]:
-                        hop["call_line"] = int(edge_row[0])
-                        node = nodes_by_id[src_ids[0]]
-                        if node["language"] == "python" and hop_detail_budget > 0:
-                            src_file = context.repository_root / node["file_path"]
-                            if src_file.is_file():
-                                try:
-                                    from .cfg_analysis import slice_at_line as _sal
+            for a, b in zip(chain_ids, chain_ids[1:]):
+                hop: dict[str, Any] = {
+                    "from": node_label.get(a, ("",))[0],
+                    "to": node_label.get(b, ("",))[0],
+                    "trust_tier": hop_tier.get((a, b), ""),
+                }
+                call_line = hop_line.get((a, b), 0)
+                if call_line:
+                    hop["call_line"] = call_line
+                    node = nodes_by_id.get(a)
+                    if node and node["language"] == "python" and hop_detail_budget > 0:
+                        src_file = context.repository_root / node["file_path"]
+                        if src_file.is_file():
+                            try:
+                                from .cfg_analysis import slice_at_line as _sal
 
-                                    hop_slice = _sal(
-                                        src_file.read_text(
-                                            encoding="utf-8", errors="replace"
-                                        ),
-                                        node["name"],
-                                        int(edge_row[0]),
-                                        "backward",
-                                    )
-                                    hop["variables_at_call"] = hop_slice["variables"]
-                                    hop_detail_budget -= 1
-                                except Exception:
-                                    hop["slice_error"] = True
+                                hop_slice = _sal(
+                                    src_file.read_text(encoding="utf-8", errors="replace"),
+                                    node["name"],
+                                    call_line,
+                                    "backward",
+                                )
+                                hop["variables_at_call"] = hop_slice["variables"]
+                                hop_detail_budget -= 1
+                            except Exception:
+                                hop["slice_error"] = True
                 details.append(hop)
             if details:
                 path["hop_detail"] = details
@@ -1578,9 +1963,12 @@ def _taint(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
     answer = {
         "source": args.get("source"),
         "sink": sink_arg,
-        "paths_found": len(paths),
+        "paths_found": len(paths) + len(uncertain_paths),
+        "certified_paths_found": len(paths),
         "paths": paths,
+        "uncertain_paths": uncertain_paths,
         "heuristic_sinks_reached": heuristic_sinks[:20],
+        "heuristic_sinks_reached_certified": heuristic_certified[:20],
         "reachable_symbol_count": len(reachable_names),
         "field_channels": data_channels,
     }
@@ -1609,13 +1997,15 @@ def _rename(request: ActionRequest, context: DeterministicQueryContext) -> _Prod
         return _unavailable_graph(request, "rename")
     with conn:
         args = request.arguments
-        nodes = _resolve_symbol_nodes(
-            conn, args.get("symbol"), args.get("path"), args.get("language")
-        )
         omissions = _graph_omissions(request, context, conn)
+        nodes = _resolve_symbol_nodes(
+            conn, args.get("symbol"), args.get("path"), args.get("language"), omissions
+        )
         omissions.append("text_references_not_enumerated")
         if not nodes:
             omissions.append("symbol_not_found")
+        if len(nodes) > 10:
+            omissions.append("rename_definitions_truncated")
         definitions = [
             {
                 "name": n["name"],
@@ -1633,7 +2023,7 @@ def _rename(request: ActionRequest, context: DeterministicQueryContext) -> _Prod
                 "SELECT e.type, n.name, n.file_path, e.source_line,"
                 " COALESCE(e.trust_tier,''), COALESCE(e.confidence,0.0)"
                 " FROM edges e JOIN nodes n ON n.id = e.source_id"
-                " WHERE e.target_id = ?",
+                f" WHERE e.target_id = ? AND n.label IN ({_REFERENCE_LABEL_SQL})",
                 (node["id"],),
             ):
                 etype, name, fp, line, tier, conf = row
@@ -1649,9 +2039,11 @@ def _rename(request: ActionRequest, context: DeterministicQueryContext) -> _Prod
                 if fp:
                     files.add(str(fp))
                 total += 1
-        for rows in sites_by_type.values():
+        for etype, rows in sites_by_type.items():
             rows.sort(key=lambda r: (r["file_path"], r["line"]))
-            del rows[50:]
+            if len(rows) > 50:
+                omissions.append(f"edit_sites_truncated:{etype}")
+                del rows[50:]
 
     answer = {
         "symbol": args.get("symbol"),
@@ -1662,15 +2054,19 @@ def _rename(request: ActionRequest, context: DeterministicQueryContext) -> _Prod
         "files_to_touch": sorted(files),
     }
     remaining_omissions = [o for o in omissions if o != "text_references_not_enumerated"]
+    ambiguity = _symbol_sites(nodes)
     return _Produced(
         answer,
         # Text references can never be proven absent from the graph — the
         # graph surface is complete, the rename itself is always INCOMPLETE.
         EvidenceSemantics.INCOMPLETE,
-        Coverage.COMPLETE if nodes and not remaining_omissions else Coverage.PARTIAL,
+        Coverage.COMPLETE
+        if nodes and not remaining_omissions and not ambiguity
+        else Coverage.PARTIAL,
         anchors=tuple(
-            (n["file_path"], n["start_line"]) for n in nodes[:10]
+            (n["file_path"], n["start_line"]) for n in nodes[:10] if n["start_line"] >= 1
         ),
+        ambiguity=ambiguity,
         omissions=tuple(sorted(set(omissions))),
         revision=_producer_revision(request),
     )
@@ -1917,18 +2313,22 @@ def _slice(request: ActionRequest, context: DeterministicQueryContext) -> _Produ
     text — not a call-graph approximation.  javascript/typescript/java/go run
     the persisted-CFG substrate (cfg_store): the Go indexer's cfg_blocks /
     cfg_edges / cfg_defs rows composed into the same dominator /
-    control-dependence / reaching-definition machinery, with uses
-    approximated from source text (``approximate_use_detection`` — always
-    INCOMPLETE).  ``call_sites`` marks the interprocedural boundary honestly;
+    control-dependence / reaching-definition machinery.  Uses come from the
+    persisted ``cfg_uses`` rows when the function has any
+    (``approximate_use_coverage``) and from a lexical source scan otherwise
+    (``approximate_use_detection``) — either way always INCOMPLETE.
+    ``call_sites`` marks the interprocedural boundary honestly;
     ``limitations`` lists every unmodeled construct so an exact claim is only
     made when the analysis is complete.
 
     With ``interprocedural: true`` the slice composes through graph.db CALLS
     edges (bounded: max_depth 3, 25 cross-hops).  Python composes over the
     AST substrate; the persisted-CFG languages compose over cfg_* rows via
-    ``cfg_store.interprocedural_slice_stored`` — positional actual→formal
-    binding from persisted param defs with text-extracted actuals
-    (``approximate_actual_extraction``).  Argument mapping is
+    ``cfg_store.interprocedural_slice_stored`` — keyword/positional/variadic
+    actual→formal binding from persisted ``param`` properties (else entry
+    ``cfg_defs``), with actuals from ``edges.actual_args`` when persisted
+    (v15.4) and text-extracted otherwise (``approximate_actual_extraction``).
+    Argument mapping is
     name/positional — never type-proven — so interprocedural results are
     always INCOMPLETE (``interprocedural_name_matched``).
     """
@@ -2178,13 +2578,17 @@ def _statement_slices(
     edited: dict[str, tuple[str | None, str]],
     conn: sqlite3.Connection,
     omissions: list[str],
+    sides: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Forward statement-level slices for changed lines in Python files.
 
     For each ``+``/replaced line in the post-edit text, find the innermost
     enclosing Function/Method node in the graph and forward-slice from that
     line — what the edited statement can affect downstream inside the same
-    function. Non-Python files and unresolvable spans are named omissions.
+    function.  The enclosing node is looked up in the graph's own line
+    numbering (the pre-image line when the graph predates the edit); the
+    slice itself runs on the post-edit text.  Non-Python files and
+    unresolvable spans are named omissions.
     """
     from .cfg_analysis import CFGAnalysisError, slice_at_line
 
@@ -2193,21 +2597,15 @@ def _statement_slices(
         before, after = edited[name]
         if not name.endswith((".py", ".pyi")):
             continue  # CFG substrate is Python-only; other langs omitted below
-        # After-side changed lines via SequenceMatcher opcodes.
-        matcher = difflib.SequenceMatcher(
-            None, (before or "").splitlines(), after.splitlines()
-        )
-        changed_lines: list[int] = []
-        for tag, _a1, _a2, b1, b2 in matcher.get_opcodes():
-            if tag in {"replace", "insert"}:
-                changed_lines.extend(range(b1 + 1, b2 + 1))
-        for line in changed_lines[:3]:
+        use_old = (sides or {}).get(name) == "old"
+        for line, old_line in _changed_after_lines(before or "", after)[:3]:
+            graph_line = old_line if use_old else line
             row = conn.execute(
                 "SELECT id, name, label FROM nodes"
                 " WHERE file_path = ? AND start_line <= ? AND end_line >= ?"
                 " AND label IN ('Function','Method')"
                 " ORDER BY (end_line - start_line) ASC LIMIT 1",
-                (name, line, line),
+                (name, graph_line, graph_line),
             ).fetchone()
             if row is None:
                 omissions.append(f"slice_scope_unresolved:{name}:{line}")

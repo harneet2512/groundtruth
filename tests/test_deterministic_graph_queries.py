@@ -110,7 +110,7 @@ def _build_graph(tmp_path: Path, *, revision: str = GRAPH_REVISION) -> Path:
     db = tmp_path / "graph.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO project_meta VALUES ('git_commit', ?)", (revision,))
+    conn.execute("INSERT INTO project_meta VALUES ('source_revision', ?)", (revision,))
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path,"
         " start_line, end_line, signature, return_type, is_exported, is_test,"
@@ -521,3 +521,45 @@ def test_all_certified_languages_represented(tmp_path):
         answer = _answer(artifact)
         assert answer["definitions"], language
         assert answer["definitions"][0]["language"] == language
+
+
+def test_processes_label_keeps_lower_bound_marker(tmp_path):
+    db = _build_graph(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "UPDATE edges SET trust_tier='CANDIDATE', confidence=0.6"
+        " WHERE source_id=2 AND target_id=3"
+    )
+    conn.commit()
+    conn.close()
+    artifact = execute_query(
+        _request(ActionKind.PROCESSES, {"concept": "run_pipeline"}),
+        _context(tmp_path, db),
+    )
+    labels = [p["label"] for p in _answer(artifact)["processes"]]
+    assert labels and all(label.endswith("(lower bound)") for label in labels)
+    ctx = execute_query(
+        _request(ActionKind.SYMBOL_CONTEXT, {"symbol": "run_pipeline"}),
+        _context(tmp_path, db),
+    )
+    flows = _answer(ctx)["flows"]
+    assert flows and all(f.endswith("(lower bound)") for f in flows)
+
+
+def test_graph_revision_ignores_build_commit(tmp_path):
+    """Only project_meta.source_revision identifies the indexed source;
+    git_commit is producer provenance and must never bind an answer."""
+    db = _build_graph(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute("DELETE FROM project_meta WHERE key='source_revision'")
+    conn.execute(
+        "INSERT OR REPLACE INTO project_meta VALUES ('git_commit', ?)", (GRAPH_REVISION,)
+    )
+    conn.commit()
+    conn.close()
+    artifact = execute_query(
+        _request(ActionKind.DEFINITION, {"symbol": "run_pipeline"}),
+        _context(tmp_path, db),
+    )
+    assert "graph_revision_unavailable" in artifact.omissions
+    assert artifact.semantics is EvidenceSemantics.INCOMPLETE

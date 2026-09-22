@@ -14,7 +14,9 @@ These tests pin the lit behavior:
   kind (type_usage / data_flow / decorator / resolution_meta) instead of
   silently laundering it as a "call".
 * ``deterministic_queries._references`` groups incoming edges by their raw
-  persisted type — no whitelist — so every persisted kind is reachable.
+  persisted type — no edge-type whitelist — but only from source-symbol or
+  file-anchor nodes: resolution-substrate rows (Callsite/*Fact) are not
+  code references, so their bookkeeping links never appear.
 * ``_symbol_context``/``_callers`` stay CALLS-only (a caller must be a call).
 * ``localization_vnext`` traverses the real code relations
   (_SUPPORTED_RELATIONS, census ``trusted_edge_types``, ``_edge_evidence``)
@@ -195,7 +197,7 @@ def _build_graph(tmp_path: Path, *, revision: str = GRAPH_REVISION) -> Path:
     db = tmp_path / "graph.db"
     conn = sqlite3.connect(str(db))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO project_meta VALUES ('git_commit', ?)", (revision,))
+    conn.execute("INSERT INTO project_meta VALUES ('source_revision', ?)", (revision,))
     conn.executemany(
         "INSERT INTO nodes (id, label, name, qualified_name, file_path,"
         " start_line, end_line, signature, return_type, is_exported, is_test,"
@@ -393,14 +395,17 @@ def test_references_groups_all_persisted_edge_types(tmp_path):
         _request(ActionKind.REFERENCES, {"symbol": "Service"}), ctx
     )
     by_type = _answer(artifact)["references_by_type"]
-    # The bookkeeping edges are reachable too — under their real type names.
-    assert {"INJECTS", "ACCESSES", "CANDIDATE_TARGET"} <= set(by_type)
+    assert {"INJECTS", "ACCESSES"} <= set(by_type)
+    # Resolution-substrate bookkeeping (Callsite -> CANDIDATE_TARGET) is not
+    # a code reference: its source is an analysis-layer node, not a symbol.
+    assert "CANDIDATE_TARGET" not in by_type
 
     artifact = execute_query(
         _request(ActionKind.REFERENCES, {"symbol": "dashboard_view"}), ctx
     )
     by_type = _answer(artifact)["references_by_type"]
-    assert {"CALLS", "DECORATES", "SELECTED_TARGET"} <= set(by_type)
+    assert {"CALLS", "DECORATES"} <= set(by_type)
+    assert "SELECTED_TARGET" not in by_type
 
 
 def test_symbol_context_callers_stay_calls_only(tmp_path):
