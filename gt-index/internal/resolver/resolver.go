@@ -378,6 +378,7 @@ func BuildNodeMeta(allNodes []store.Node, nodeDBIDs []int64) map[int64]NodeMeta 
 				ReturnType:   n.ReturnType,
 				ReceiverName: recvName,
 				StartLine:    n.StartLine,
+				Language:     n.Language,
 			}
 		}
 	}
@@ -1003,6 +1004,10 @@ type NodeMeta struct {
 	// non-deterministically by the parallel parse — see pickBestNameMatchTarget
 	// and the methodsByClass build in resolveInternal).
 	StartLine int
+	// Language is the node's source language. Name-keyed candidate sets are
+	// restricted to the caller's language family (see langFamily): a Python
+	// call can never bind a JavaScript function that merely shares its name.
+	Language string
 }
 
 // Resolve takes all call refs and all defined nodes, and resolves calls to definitions.
@@ -1554,8 +1559,12 @@ func Resolve(
 	fileMap map[string][]string,
 	nodeMeta ...map[int64]NodeMeta,
 ) []ResolvedCall {
-	resolved, _ := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, true, nodeMeta...)
-	return resolved
+	// Resolve per callsite, then project onto one edge per (caller, target)
+	// keeping the strongest resolution — the same projection the full-index
+	// path (ResolveWithProvenance) publishes, so an incremental -file reindex
+	// cannot pick a weaker first-callsite edge than a rebuild does.
+	perCallsite, _ := resolveInternal(allCalls, nodeIDs, fileNodeIDs, callerNodeIDs, allImports, fileMap, false, nodeMeta...)
+	return dedupeResolvedCalls(perCallsite)
 }
 
 // resolveInternal resolves every parser callsite. When dedupeAcrossCallsites is
@@ -1564,7 +1573,7 @@ func Resolve(
 // legacy edge projection is deduplicated by ResolveWithProvenance.
 func resolveInternal(
 	allCalls []parser.CallRef,
-	nodeIDs map[string][]int64, // name → list of node IDs
+	allNodeIDs map[string][]int64, // name → list of node IDs (every language)
 	fileNodeIDs map[string]map[string][]int64, // file → name → list of node IDs
 	callerNodeIDs []int64, // parallel to allCalls
 	allImports []parser.ImportRef, // all parsed import statements
@@ -1574,13 +1583,54 @@ func resolveInternal(
 ) ([]ResolvedCall, [][]ResolutionPassExecution) {
 	// Build import index: file → imported name → list of candidate target files
 	importIndex := buildImportIndex(allImports, fileMap)
-	nameAliasIndex := buildNameAliasIndex(nodeIDs)
+	externalImports := buildExternalImportNames(allImports, importIndex)
 
 	// metaMap: nodeID → NodeMeta, the single accessor for the optional variadic
 	// nodeMeta[0] (nil when absent). Used by the Strategy-1.5 same-dir tie-break (#40).
 	var metaMap map[int64]NodeMeta
 	if len(nodeMeta) > 0 && nodeMeta[0] != nil {
 		metaMap = nodeMeta[0]
+	}
+
+	// Language-family scoping of every name-keyed candidate set. nodeIDs and
+	// nameAliasIndex are re-pointed per callsite at the caller's family view
+	// (the closures below capture the variables, so they see it too). A
+	// caller with no known language keeps the unfiltered index.
+	familyViews := buildLanguageFamilyViews(allNodeIDs, metaMap)
+	familyAlias := make(map[string]map[string][]int64, len(familyViews))
+	allNameAliasIndex := buildNameAliasIndex(allNodeIDs)
+	nodeIDs, nameAliasIndex := allNodeIDs, allNameAliasIndex
+	callerFamily := ""
+	useFamilyView := func(callerID int64) {
+		callerFamily = ""
+		if m, ok := metaMap[callerID]; ok {
+			callerFamily = langFamily(m.Language)
+		}
+		view, ok := familyViews[callerFamily]
+		if callerFamily == "" || !ok {
+			nodeIDs, nameAliasIndex = allNodeIDs, allNameAliasIndex
+			return
+		}
+		nodeIDs = view
+		alias, ok := familyAlias[callerFamily]
+		if !ok {
+			alias = buildNameAliasIndex(view)
+			familyAlias[callerFamily] = alias
+		}
+		nameAliasIndex = alias
+	}
+	// inCallerFamily reports whether a node may be a target of the current
+	// callsite's language family (an unknown language on either side passes).
+	inCallerFamily := func(id int64) bool {
+		if callerFamily == "" {
+			return true
+		}
+		m, ok := metaMap[id]
+		if !ok {
+			return true
+		}
+		f := langFamily(m.Language)
+		return f == "" || f == callerFamily
 	}
 
 	// Build class-method index for self.method() resolution (Strategy 1.75)
@@ -1699,13 +1749,23 @@ func resolveInternal(
 			methodClassCount[methodName][classID] = true
 		}
 	}
-	uniqueMethodClass := make(map[string]int64)
-	for methodName, classes := range methodClassCount {
-		if len(classes) == 1 {
-			for classID := range classes {
-				uniqueMethodClass[methodName] = classID
+	// familyMethodClasses returns the classes defining methodName that belong
+	// to the current callsite's language family — the implementor set rungs
+	// 1.94 (impl_method) and 1.98 (unique_method) reason over. Uniqueness is
+	// judged inside the family: a Java class defining `run` must neither make
+	// a Python `x.run()` "unique" nor push its count past the 1–3 window.
+	familyMethodClasses := func(methodName string) map[int64]bool {
+		classes := methodClassCount[methodName]
+		if callerFamily == "" || len(classes) == 0 {
+			return classes
+		}
+		out := make(map[int64]bool, len(classes))
+		for classID := range classes {
+			if inCallerFamily(classID) {
+				out[classID] = true
 			}
 		}
+		return out
 	}
 
 	var resolved []ResolvedCall
@@ -1795,6 +1855,30 @@ func resolveInternal(
 		callsByCallee[c.CalleeName] = append(callsByCallee[c.CalleeName], idx)
 	}
 
+	// aliasChainHop returns the callable binding an alias's bare RHS names
+	// when that RHS is itself a tracked variable at the alias write's line.
+	// A same-file DEFINITION of the name wins over a module-scope binding
+	// (the definition is the primary claim, mirroring the parser's marking
+	// rule); a binding local to the alias's own scope shadows it.
+	aliasChainHop := func(binding VarType, file, scope string, fa *AssignmentMap, depth int) (VarType, bool) {
+		if fa == nil || depth >= maxCallableAliasChainDepth || binding.TypeName == "" || binding.Line <= 0 {
+			return VarType{}, false
+		}
+		bindScope := binding.Scope
+		if bindScope == "" {
+			bindScope = scope
+		}
+		next, ok := fa.ResolveCallableBinding(binding.TypeName, bindScope, callerObjectScope(bindScope), binding.Line-1)
+		if !ok || (!next.ViaSymbol && !next.IsParameter) {
+			return VarType{}, false
+		}
+		if next.Scope == "" {
+			if fns, ok := fileNodeIDs[file]; ok && len(collectCallable(fns[binding.TypeName], false, 0)) > 0 {
+				return VarType{}, false
+			}
+		}
+		return next, true
+	}
 	// resolveAliasTargets resolves the RHS of a callable-value alias write to
 	// the callable nodes it can name. For a qualified RHS (`recv.leaf`) the
 	// receiver is probed conservatively — self/this (caller's class), a tracked
@@ -1802,9 +1886,29 @@ func resolveInternal(
 	// leaf is always also probed same-file/global (a bound method's leaf names
 	// its Method node). Every probe merges into one candidate set; the caller
 	// emits only when exactly one viable target remains.
+	var resolveAliasTargetsDepth func(binding VarType, file, scope string, callerID int64, fa *AssignmentMap, depth int) []int64
+	var callableParamTarget func(binding VarType, file string, thisCall int, fa *AssignmentMap) (int64, bool)
 	resolveAliasTargets := func(binding VarType, file, scope string, callerID int64, fa *AssignmentMap) []int64 {
+		return resolveAliasTargetsDepth(binding, file, scope, callerID, fa, 0)
+	}
+	resolveAliasTargetsDepth = func(binding VarType, file, scope string, callerID int64, fa *AssignmentMap, depth int) []int64 {
 		qual := binding.TypeQualified
 		if qual == "" || qual == binding.TypeName {
+			// Copy chain: `f = helper; g = f; g()` — the RHS `f` is itself a
+			// callable VALUE binding visible where the alias was written, so
+			// follow the variable, not the symbol namespace (which would bind
+			// any function named `f`, in any file). Bounded depth; each hop
+			// reads the binding in force at the previous write's line, so a
+			// cycle (`x = y; y = x`) finds no earlier write and stops.
+			if next, ok := aliasChainHop(binding, file, scope, fa, depth); ok {
+				if next.IsParameter {
+					if t, ok := callableParamTarget(next, file, -1, fa); ok && t != callerID {
+						return []int64{t}
+					}
+					return nil // the chain ends at a formal whose argument is unseen
+				}
+				return resolveAliasTargetsDepth(next, file, scope, callerID, fa, depth+1)
+			}
 			return resolveCallableBareName(binding.TypeName, file, callerID)
 		}
 		var recv, leaf string
@@ -1915,7 +2019,7 @@ func resolveInternal(
 	// bound to something unseen → abstain. Same-file callsites must name the
 	// function lexically; cross-file callsites must resolve their callee to
 	// the function's own node.
-	callableParamTarget := func(binding VarType, file string, thisCall int, fa *AssignmentMap) (int64, bool) {
+	callableParamTarget = func(binding VarType, file string, thisCall int, fa *AssignmentMap) (int64, bool) {
 		// Owner names the callable whose formals the callsites bind — for a
 		// nested function this differs from Scope (the enclosing function the
 		// binding is visible under). Fall back to Scope for bindings recorded
@@ -2094,6 +2198,14 @@ func resolveInternal(
 			}
 		}
 		binding, found := fileAssignments.ResolveCallableBinding(varName, callerScope, callerObjectScope(callerScope), call.Line)
+		if !found && varName == call.CalleeQualified {
+			// A method invoked ON a callable value (Java/Kotlin `r.run()`,
+			// `cb.apply(x)` — the SAM call) dispatches through the receiver's
+			// binding; the member name is not part of the key.
+			if dot := strings.LastIndex(varName, "."); dot > 0 {
+				binding, found = fileAssignments.ResolveCallableBinding(varName[:dot], callerScope, callerObjectScope(callerScope), call.Line)
+			}
+		}
 		if !found {
 			return false
 		}
@@ -2127,6 +2239,7 @@ func resolveInternal(
 		if callerID == 0 {
 			continue
 		}
+		useFamilyView(callerID)
 
 		calleeName := call.CalleeName
 		var targets []int64
@@ -2151,10 +2264,21 @@ func resolveInternal(
 			continue
 		}
 
-		// Strategy 1: Same-file exact name match (only when unambiguous)
+		// Strategy 1: Same-file exact name match (only when unambiguous).
+		// A QUALIFIED call certifies a same-file target only when the receiver
+		// is proven to be that target's owner (self/this/cls/Self, the Go
+		// method receiver, or the owning class named directly). Otherwise the
+		// leaf name alone decides nothing: `requests.get("x")`,
+		// `subprocess.run(cmd)` and `sess.get()` on an untyped parameter all
+		// used to become CERTIFIED same_file edges to an unrelated local
+		// `Session.get` / `Store.run`. Such calls fall through to the
+		// receiver-typing rungs below and, if nothing proves the receiver,
+		// at most to a receiver-unproven CANDIDATE guess.
 		currentPasses.begin("lexical_binding")
+		isQualifiedCall := call.CalleeQualified != "" && call.CalleeQualified != calleeName
 		if fileNodes, ok := fileNodeIDs[call.File]; ok {
-			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID {
+			if targetIDs, ok := fileNodes[calleeName]; ok && len(targetIDs) == 1 && targetIDs[0] != callerID &&
+				(!isQualifiedCall || sameFileReceiverProven(call.CalleeQualified, callerID, targetIDs[0], metaMap)) {
 				targetID := targetIDs[0]
 				key := edgeKey{callerID, targetID, "CALLS"}
 				if !seen[key] {
@@ -2316,12 +2440,27 @@ func resolveInternal(
 			}
 			if dotIdx175 > 0 {
 				qualifier := call.CalleeQualified[:dotIdx175]
-				if qualifier == "self" || qualifier == "this" || qualifier == "Self" {
+				// super / super() / super(Cls, self): the lookup starts at the
+				// caller class's PARENTS. Rung 1 no longer certifies these by
+				// leaf name, so they are proven here or not at all.
+				isSuper := qualifier == "super" || qualifier == "super()" || strings.HasPrefix(qualifier, "super(")
+				if qualifier == "self" || qualifier == "this" || qualifier == "Self" || qualifier == "cls" || isSuper {
 					callerMeta, hasMeta := nodeMeta[0][callerID]
 					if hasMeta && callerMeta.ParentID != 0 {
 						receiverType := nodeMeta[0][callerMeta.ParentID].Name
 						memberName := call.CalleeQualified[dotIdx175+sep175:]
-						if targetID, found := lookupMethodWithInheritance(callerMeta.ParentID, memberName); found && targetID != callerID {
+						targetID, found := int64(0), false
+						if isSuper {
+							for _, parentID := range inheritanceMap[callerMeta.ParentID] {
+								if tid, ok := lookupMethodWithInheritance(parentID, memberName); ok {
+									targetID, found = tid, true
+									break
+								}
+							}
+						} else {
+							targetID, found = lookupMethodWithInheritance(callerMeta.ParentID, memberName)
+						}
+						if found && targetID != callerID {
 							// Determine if same-class or inherited
 							targetMeta := nodeMeta[0][targetID]
 							method := "same_file"
@@ -2374,6 +2513,15 @@ func resolveInternal(
 		// IS internal and must not be dropped. The drop/demote moved to the last-chance
 		// block after 1.98 and still guards the receiver-UNPROVEN rungs (1.94/1.98).
 		builtinQualified := qualifiedUnresolved && (strongBuiltinMethodNames[calleeName] || builtinMethodNames[calleeName])
+		// A receiver rooted at an imported EXTERNAL module (`import requests`
+		// → `requests.get(...)`, `subprocess.run(...)`) names no repository
+		// symbol: the import binds the root to code outside the index. The
+		// receiver-unproven CANDIDATE-tier guesses (1.94 impl_method, 1.98
+		// unique_method) must not claim an internal same-named method for it.
+		// The last-chance tail still applies: a single candidate is kept only
+		// as the sub-0.5 SPECULATIVE name_match hint (never a fact).
+		externalReceiver := qualifiedUnresolved && externalImports[call.File][receiverRoot(call.CalleeQualified)]
+		unprovenBlocked := builtinQualified || externalReceiver
 
 		// Strategy 1.9 fires here ONLY for UNQUALIFIED calls (the ACG/ECOOP 2022
 		// globally-unique-name property holds for bare names). #B5: a QUALIFIED call
@@ -2725,135 +2873,6 @@ func resolveInternal(
 			}
 		}
 
-		// Strategy 1.94: Single/few-implementor method resolution
-		// For a qualified call obj.method() or Type::method(), if method is defined
-		// as a method in exactly 1-3 classes across the codebase (regardless of what
-		// obj/Type is), resolve with graduated confidence. This is especially useful
-		// for Rust trait methods where `impl Trait for Struct` means a method like
-		// `next()` might exist in only a few structs. Fires before generic type_flow
-		// (1.95) because it uses global method uniqueness as a disambiguation signal.
-		// Skips self/this/Self (handled by 1.75) and common method names (>3 classes).
-		// Skips calls where the qualifier is a known class name (1.95 handles those).
-		// #B5: skips builtin-named qualified calls — 1.94 does NOT prove the receiver
-		// (global name-uniqueness only), so letting it claim `obj.get()`/`x.update()`
-		// would re-launder dict/str calls the builtin drop exists to remove.
-		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && !builtinQualified &&
-			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
-			currentPasses.begin("implementation_set")
-			resolved194 := false
-			methodName194 := calleeName
-			dotIdx194 := strings.LastIndex(call.CalleeQualified, ".")
-			if dotIdx194 <= 0 {
-				dotIdx194 = strings.LastIndex(call.CalleeQualified, "::")
-			}
-			if dotIdx194 > 0 {
-				qualifier194 := call.CalleeQualified[:dotIdx194]
-				// Skip self/this/Self (handled by 1.75)
-				isSelfLike := qualifier194 == "self" || qualifier194 == "this" || qualifier194 == "Self"
-				// Skip if qualifier is a known class name (1.95 will handle it better)
-				qualifierIsClass := false
-				if !isSelfLike {
-					if qIDs, ok := nodeIDs[qualifier194]; ok {
-						for _, qid := range qIDs {
-							if qm, ok := nodeMeta[0][qid]; ok &&
-								(qm.Label == "Class" || qm.Label == "Struct" || qm.Label == "Interface") {
-								qualifierIsClass = true
-								break
-							}
-						}
-					}
-				}
-				if !isSelfLike && !qualifierIsClass {
-					if classes194, ok := methodClassCount[methodName194]; ok && len(classes194) >= 1 && len(classes194) <= 3 {
-						numClasses := len(classes194)
-						// #5: impl_method resolves purely on GLOBAL METHOD-NAME UNIQUENESS
-						// with ZERO check that the receiver `obj` is actually that class
-						// (the qualifier was explicitly excluded from being a known class
-						// above). Name-uniqueness != receiver-proof (RTA-without-the-receiver),
-						// so the 1-class case must NEVER be CERTIFIED — cap it at CANDIDATE
-						// (conf 0.6). CERTIFIED stays reserved for stages that PROVE the
-						// receiver type (1.75 self, 1.93/1.94a import/declared-type, 1.95/1.96
-						// type_flow). Graduated: 1 class=0.6, 2=0.5, 3=0.4; tier via tierFor.
-						conf194 := 0.4
-						if numClasses == 1 {
-							conf194 = 0.6
-						} else if numClasses == 2 {
-							conf194 = 0.5
-						}
-						// Pick the best target: prefer a same-file class, else the
-						// content-smallest class. #B8a: the previous `range classes194`
-						// map iteration made the cross-file pick RUN-DEPENDENT (Go map
-						// order is randomized) — sort the class IDs deterministically.
-						classIDs194 := make([]int64, 0, len(classes194))
-						for classID := range classes194 {
-							classIDs194 = append(classIDs194, classID)
-						}
-						// Raw-id sort made the pick deterministic within one build,
-						// but the id space is not content-addressed: a batch amend
-						// retains unchanged files' ids and re-inserts the edited
-						// file's nodes at the TOP of AUTOINCREMENT, so "smallest id"
-						// names a different class under an amend than under a full
-						// rebuild (the measured ±726/713 gross CALLS relabel). Order
-						// by the class node's CONTENT key (file, start_line, id) —
-						// identical either way.
-						sortIDsByContent(classIDs194, nodeMeta[0])
-						// Keep a deterministic preferred endpoint only for the backward-
-						// compatible legacy CALLS projection. The attached callsite trace
-						// below derives ambiguity from the complete candidate set and will
-						// deliberately publish no unique selection when that set has more
-						// than one viable implementor.
-						var bestTarget194 int64
-						var sameFileTarget194 int64
-						var fallbackTarget194 int64
-						var candidates194 []int64
-						for _, classID := range classIDs194 {
-							if methods, ok := methodsByClass[classID]; ok {
-								if targetID, ok := methods[methodName194]; ok && targetID != callerID {
-									candidates194 = append(candidates194, targetID)
-									cm := nodeMeta[0][classID]
-									if cm.File == call.File && sameFileTarget194 == 0 {
-										sameFileTarget194 = targetID
-									}
-									if fallbackTarget194 == 0 {
-										fallbackTarget194 = targetID
-									}
-								}
-							}
-						}
-						bestTarget194 = sameFileTarget194
-						if bestTarget194 == 0 {
-							bestTarget194 = fallbackTarget194
-						}
-						if bestTarget194 != 0 {
-							key := edgeKey{callerID, bestTarget194, "CALLS"}
-							if !seen[key] {
-								seen[key] = true
-								emit(ResolvedCall{
-									SourceNodeID: callerID,
-									TargetNodeID: bestTarget194,
-									SourceLine:   call.Line,
-									SourceFile:   call.File,
-									Method:       "impl_method",
-									Confidence:   conf194,
-									// CandidateNodeIDs is the authority for attached
-									// provenance; TargetNodeID is retained only for the
-									// legacy endpoint-deduplicated CALLS edge.
-									CandidateCount:   len(candidates194),
-									CandidateNodeIDs: append([]int64(nil), candidates194...),
-									TrustTier:        tierFor(conf194),
-									EvidenceType:     "single_implementor",
-								})
-							}
-							resolved194 = true
-						}
-					}
-				}
-			}
-			if resolved194 {
-				continue
-			}
-		}
-
 		// Strategy 1.95 (T2): Type-flow resolution for qualified calls
 		// Supports both "." and "::" separators (Rust: Router::new, Python: obj.method)
 		if len(nodeMeta) > 0 && nodeMeta[0] != nil && call.CalleeQualified != "" {
@@ -3159,6 +3178,138 @@ func resolveInternal(
 			}
 		}
 
+		// Strategy 1.94: Single/few-implementor method resolution
+		// For a qualified call obj.method() or Type::method(), if method is defined
+		// as a method in exactly 1-3 classes across the codebase (regardless of what
+		// obj/Type is), resolve with graduated confidence. This is especially useful
+		// for Rust trait methods where `impl Trait for Struct` means a method like
+		// `next()` might exist in only a few structs. It proves NOTHING about the
+		// receiver, so it runs AFTER every receiver-proving rung (1.95 Class.m,
+		// 1.96 assignment flow, 1.97 return type, 1.96b callable value): running
+		// it first let name-uniqueness pre-empt a proven receiver — `q = Q();
+		// q.go()` picked the overridden P.go instead of Q.go.
+		// Skips self/this/Self (handled by 1.75) and common method names (>3 classes).
+		// Skips calls where the qualifier is a known class name (1.95 handles those).
+		// #B5: skips builtin-named qualified calls — 1.94 does NOT prove the receiver
+		// (global name-uniqueness only), so letting it claim `obj.get()`/`x.update()`
+		// would re-launder dict/str calls the builtin drop exists to remove.
+		if len(nodeMeta) > 0 && nodeMeta[0] != nil && methodsByClass != nil && !unprovenBlocked &&
+			call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+			currentPasses.begin("implementation_set")
+			resolved194 := false
+			methodName194 := calleeName
+			dotIdx194 := strings.LastIndex(call.CalleeQualified, ".")
+			if dotIdx194 <= 0 {
+				dotIdx194 = strings.LastIndex(call.CalleeQualified, "::")
+			}
+			if dotIdx194 > 0 {
+				qualifier194 := call.CalleeQualified[:dotIdx194]
+				// Skip self/this/Self (handled by 1.75)
+				isSelfLike := qualifier194 == "self" || qualifier194 == "this" || qualifier194 == "Self"
+				// Skip if qualifier is a known class name (1.95 will handle it better)
+				qualifierIsClass := false
+				if !isSelfLike {
+					if qIDs, ok := nodeIDs[qualifier194]; ok {
+						for _, qid := range qIDs {
+							if qm, ok := nodeMeta[0][qid]; ok &&
+								(qm.Label == "Class" || qm.Label == "Struct" || qm.Label == "Interface") {
+								qualifierIsClass = true
+								break
+							}
+						}
+					}
+				}
+				if !isSelfLike && !qualifierIsClass {
+					if classes194 := familyMethodClasses(methodName194); len(classes194) >= 1 && len(classes194) <= 3 {
+						numClasses := len(classes194)
+						// #5: impl_method resolves purely on GLOBAL METHOD-NAME UNIQUENESS
+						// with ZERO check that the receiver `obj` is actually that class
+						// (the qualifier was explicitly excluded from being a known class
+						// above). Name-uniqueness != receiver-proof (RTA-without-the-receiver),
+						// so the 1-class case must NEVER be CERTIFIED — cap it at CANDIDATE
+						// (conf 0.6). CERTIFIED stays reserved for stages that PROVE the
+						// receiver type (1.75 self, 1.93/1.94a import/declared-type, 1.95/1.96
+						// type_flow). Graduated: 1 class=0.6, 2=0.5, 3=0.4; tier via tierFor.
+						conf194 := 0.4
+						if numClasses == 1 {
+							conf194 = 0.6
+						} else if numClasses == 2 {
+							conf194 = 0.5
+						}
+						// Pick the best target: prefer a same-file class, else the
+						// content-smallest class. #B8a: the previous `range classes194`
+						// map iteration made the cross-file pick RUN-DEPENDENT (Go map
+						// order is randomized) — sort the class IDs deterministically.
+						classIDs194 := make([]int64, 0, len(classes194))
+						for classID := range classes194 {
+							classIDs194 = append(classIDs194, classID)
+						}
+						// Raw-id sort made the pick deterministic within one build,
+						// but the id space is not content-addressed: a batch amend
+						// retains unchanged files' ids and re-inserts the edited
+						// file's nodes at the TOP of AUTOINCREMENT, so "smallest id"
+						// names a different class under an amend than under a full
+						// rebuild (the measured ±726/713 gross CALLS relabel). Order
+						// by the class node's CONTENT key (file, start_line, id) —
+						// identical either way.
+						sortIDsByContent(classIDs194, nodeMeta[0])
+						// Keep a deterministic preferred endpoint only for the backward-
+						// compatible legacy CALLS projection. The attached callsite trace
+						// below derives ambiguity from the complete candidate set and will
+						// deliberately publish no unique selection when that set has more
+						// than one viable implementor.
+						var bestTarget194 int64
+						var sameFileTarget194 int64
+						var fallbackTarget194 int64
+						var candidates194 []int64
+						for _, classID := range classIDs194 {
+							if methods, ok := methodsByClass[classID]; ok {
+								if targetID, ok := methods[methodName194]; ok && targetID != callerID {
+									candidates194 = append(candidates194, targetID)
+									cm := nodeMeta[0][classID]
+									if cm.File == call.File && sameFileTarget194 == 0 {
+										sameFileTarget194 = targetID
+									}
+									if fallbackTarget194 == 0 {
+										fallbackTarget194 = targetID
+									}
+								}
+							}
+						}
+						bestTarget194 = sameFileTarget194
+						if bestTarget194 == 0 {
+							bestTarget194 = fallbackTarget194
+						}
+						if bestTarget194 != 0 {
+							key := edgeKey{callerID, bestTarget194, "CALLS"}
+							if !seen[key] {
+								seen[key] = true
+								emit(ResolvedCall{
+									SourceNodeID: callerID,
+									TargetNodeID: bestTarget194,
+									SourceLine:   call.Line,
+									SourceFile:   call.File,
+									Method:       "impl_method",
+									Confidence:   conf194,
+									// CandidateNodeIDs is the authority for attached
+									// provenance; TargetNodeID is retained only for the
+									// legacy endpoint-deduplicated CALLS edge.
+									CandidateCount:   len(candidates194),
+									CandidateNodeIDs: append([]int64(nil), candidates194...),
+									TrustTier:        tierFor(conf194),
+									EvidenceType:     "single_implementor",
+								})
+							}
+							resolved194 = true
+						}
+					}
+				}
+			}
+			if resolved194 {
+				continue
+			}
+		}
+
 		// Strategy 1.98: Unique-method-class resolution
 		// If a method name belongs to exactly one class in the codebase, and this is a
 		// qualified call (obj.method()), resolve to that class's method.
@@ -3173,9 +3324,16 @@ func resolveInternal(
 		// fact set that excludes unique_method). CERTIFIED/type-derived tiers stay
 		// reserved for the rungs that PROVE the receiver (1.75 self, 1.93/1.94a
 		// import/declared-type, 1.95/1.96 type_flow, 1.97 return_type).
-		if !builtinQualified && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+		if !unprovenBlocked && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
 			currentPasses.begin("global_name")
-			if classID, ok := uniqueMethodClass[calleeName]; ok {
+			var classID int64
+			ok := false
+			if classes := familyMethodClasses(calleeName); len(classes) == 1 {
+				for id := range classes {
+					classID, ok = id, true
+				}
+			}
+			if ok {
 				if methods, ok := methodsByClass[classID]; ok {
 					if targetID, ok := methods[calleeName]; ok && targetID != callerID {
 						key := edgeKey{callerID, targetID, "CALLS"}
@@ -3480,15 +3638,26 @@ func callImportEvidence(call parser.CallRef, imports []parser.ImportRef) []strin
 	return evidence
 }
 
+// dedupeResolvedCalls projects per-callsite resolutions onto one legacy CALLS
+// edge per (caller, target). The surviving row is the STRONGEST resolution of
+// the pair — highest confidence (tierFor is monotone in confidence, so this is
+// also the best tier); ties keep the earliest callsite. Keeping the first
+// callsite instead let a receiver-unproven guess on line 1 (impl_method 0.5)
+// mask a type-proven call to the same target on line 3 (type_flow 0.9), hiding
+// a real certified edge from every CERTIFIED/≥0.7 consumer. The edge keeps the
+// position of the pair's first callsite so output order stays stable.
 func dedupeResolvedCalls(calls []ResolvedCall) []ResolvedCall {
-	seen := make(map[edgeKey]bool, len(calls))
+	pos := make(map[edgeKey]int, len(calls))
 	resolved := make([]ResolvedCall, 0, len(calls))
 	for _, call := range calls {
 		key := edgeKey{call.SourceNodeID, call.TargetNodeID, "CALLS"}
-		if seen[key] {
+		if at, ok := pos[key]; ok {
+			if call.Confidence > resolved[at].Confidence {
+				resolved[at] = call
+			}
 			continue
 		}
-		seen[key] = true
+		pos[key] = len(resolved)
 		resolved = append(resolved, call)
 	}
 	return resolved
