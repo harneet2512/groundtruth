@@ -342,3 +342,74 @@ def test_persisted_tables_absent_falls_back(graph_db: Path) -> None:
     result = detect_processes(graph_db)
     assert all(not p.witnessed for p in result.processes)
     assert len(result.processes) > 0
+
+
+def _tiny_graph(path: Path, names, edges) -> None:
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,"
+        " file_path TEXT, start_line INTEGER, is_test INTEGER, signature TEXT);"
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,"
+        " target_id INTEGER, type TEXT, resolution_method TEXT,"
+        " confidence REAL, trust_tier TEXT, candidate_count INTEGER);"
+    )
+    db.executemany(
+        "INSERT INTO nodes (id,label,name,file_path,start_line,is_test,"
+        "signature) VALUES (?,?,?,?,?,0,'')",
+        [(i, "Function", n, f"{n}.py", i) for i, n in enumerate(names, start=1)],
+    )
+    db.executemany(
+        "INSERT INTO edges (source_id,target_id,type,resolution_method,"
+        "confidence,trust_tier,candidate_count) VALUES (?,?,'CALLS',?,?,?,1)",
+        edges,
+    )
+    db.commit()
+    db.close()
+
+
+def test_display_label_carries_lower_bound_marker(tmp_path: Path) -> None:
+    """Callers that surface a flow by label must not lose the lower-bound
+    marker: ``display_label`` keeps it for flows with non-CERTIFIED hops."""
+    path = tmp_path / "g.db"
+    _tiny_graph(
+        path,
+        ("a", "b", "c", "d"),
+        [
+            (1, 2, "same_file", 1.0, "CERTIFIED"),
+            (2, 3, "name_match", 0.6, "CANDIDATE"),
+            (3, 4, "same_file", 1.0, "CERTIFIED"),
+        ],
+    )
+    (proc,) = detect_processes(path).processes
+    assert proc.label == "a -> d"
+    assert proc.display_label == "a -> d (lower bound)"
+
+
+def test_display_label_plain_when_fully_certified(graph_db: Path) -> None:
+    by_label = {p.label: p for p in detect_processes(graph_db).processes}
+    assert by_label["main -> check"].display_label == "main -> check"
+
+
+def test_entry_points_tie_break_by_out_degree(tmp_path: Path) -> None:
+    """Among equally-ranked roots the one with more callees comes first
+    (the documented out-degree tie-break), then file path, then name."""
+    path = tmp_path / "g.db"
+    _tiny_graph(
+        path,
+        ("a_root", "z_root", "t1", "t2", "t3"),
+        [
+            (1, 3, "same_file", 1.0, "CERTIFIED"),
+            (2, 3, "same_file", 1.0, "CERTIFIED"),
+            (2, 4, "same_file", 1.0, "CERTIFIED"),
+            (2, 5, "same_file", 1.0, "CERTIFIED"),
+        ],
+    )
+    import groundtruth.runtime.processes as procs
+
+    conn = sqlite3.connect(path)
+    try:
+        nodes, adjacency, _count = procs._load_graph(conn)
+    finally:
+        conn.close()
+    entries, _dropped = find_entry_points(nodes, adjacency)
+    assert [n.name for n, _kind in entries] == ["z_root", "a_root"]
