@@ -118,3 +118,37 @@ def test_changed_symbols_excluded_from_caller_list(db_path: Path) -> None:
     result = diff_impact(db_path, DIFF)
     flat = [name for callers in result.callers_by_depth.values() for name, _ in callers]
     assert "getZip" not in flat
+
+
+def test_same_named_callers_in_different_files_are_distinct(tmp_path: Path) -> None:
+    """Two different functions named ``run`` both call the changed symbol:
+    keyed by bare name they collapsed into one caller."""
+    path = tmp_path / "g.db"
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT,"
+        " file_path TEXT, start_line INTEGER, end_line INTEGER, is_test INTEGER,"
+        " signature TEXT);"
+        "CREATE TABLE edges (id INTEGER PRIMARY KEY, source_id INTEGER,"
+        " target_id INTEGER, type TEXT, trust_tier TEXT, confidence REAL);"
+    )
+    db.executemany(
+        "INSERT INTO nodes VALUES (?,?,?,?,?,?,0,'')",
+        [
+            (1, "Function", "target", "core.py", 1, 5),
+            (2, "Function", "run", "a.py", 3, 6),
+            (3, "Function", "run", "b.py", 3, 6),
+        ],
+    )
+    db.executemany(
+        "INSERT INTO edges (source_id,target_id,type,trust_tier,confidence)"
+        " VALUES (?,?,'CALLS',?,?)",
+        [(2, 1, "CERTIFIED", 1.0), (3, 1, "CANDIDATE", 0.6)],
+    )
+    db.commit()
+    db.close()
+    diff = "--- a/core.py\n+++ b/core.py\n@@ -2 +2 @@\n-x\n+y\n"
+    result = diff_impact(path, diff)
+    assert result.callers_by_depth[1] == [("run", "a.py:3"), ("run", "b.py:3")]
+    tiers = {d.file_path: d.trust_tier for d in result.caller_details_by_depth[1]}
+    assert tiers == {"a.py": "CERTIFIED", "b.py": "CANDIDATE"}
