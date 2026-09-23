@@ -57,6 +57,14 @@ type IncomingEdgeRef struct {
 	// fallback is a new guess and gets neither.
 	Metadata           sql.NullString
 	VerificationStatus string
+	// CandidateCount is the ambiguity the ORIGINAL resolution recorded. A
+	// preserved-method restore re-proves the same fact, so it carries the
+	// original count (NULL stays NULL); a name_match fallback is a new guess
+	// and gets len(ids) — the candidates the rebind lookup actually saw.
+	// Carrying len(ids) on a preserved restore would rewrite a recorded
+	// ambiguity of 3 as 1 and diverge from a clean rebuild (java IMPORTS,
+	// convergence harness).
+	CandidateCount sql.NullInt64
 }
 
 // SnapshotIncomingEdgesTx captures cross-file edges whose target is a node
@@ -102,7 +110,8 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		`SELECT e.source_id, e.source_line, e.type, COALESCE(e.source_file, ''), n.name,
 		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0),
 		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, ''),
-		        e.actual_args, e.metadata, COALESCE(e.verification_status, 'unverified')
+		        e.actual_args, e.metadata, COALESCE(e.verification_status, 'unverified'),
+		        e.candidate_count
 		   FROM edges e
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
@@ -128,7 +137,7 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		var r IncomingEdgeRef
 		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName,
 			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName,
-			&r.ActualArgs, &r.Metadata, &r.VerificationStatus); err != nil {
+			&r.ActualArgs, &r.Metadata, &r.VerificationStatus, &r.CandidateCount); err != nil {
 			return nil, fmt.Errorf("scan incoming edge: %w", err)
 		}
 		out = append(out, r)
@@ -300,6 +309,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string,
 		var evType string
 		metadata := sql.NullString{}
 		verification := "unverified"
+		candidateCount := r.CandidateCount
 		if !qualifiedUnresolved && len(ids) == 1 && deterministicRestoreMethods[r.ResolutionMethod] {
 			conf = r.Confidence
 			// Item #4: floor ONLY the literal pre-v14 0.0/NULL sentinel to the
@@ -339,6 +349,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string,
 		} else {
 			method = "name_match"
 			evType = "name_match"
+			candidateCount = sql.NullInt64{Int64: int64(len(ids)), Valid: true}
 			switch {
 			case qualifiedUnresolved:
 				// Parity with the resolver demote (resolver.go: conf 0.2,
@@ -365,8 +376,9 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string,
 			tier = tierForConfidence(conf)
 		}
 		// Target is the exact-qualified-name match when one survived, else the
-		// deterministic first candidate (id ASC). Edge confidence reflects ambiguity
-		// across all candidates (candidate_count = len(ids)).
+		// deterministic first candidate (id ASC). candidate_count is the
+		// ORIGINAL recorded ambiguity on a preserved restore and the rebind
+		// lookup's real count on a name_match fallback.
 		var srcFile interface{}
 		if r.SourceFile == "" {
 			srcFile = nil
@@ -374,7 +386,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string,
 			srcFile = r.SourceFile
 		}
 		if _, err := ins.Exec(r.SourceID, targetID, r.EdgeType, r.SourceLine, srcFile,
-			method, conf, metadata, tier, len(ids), evType, verification, r.ActualArgs); err != nil {
+			method, conf, metadata, tier, candidateCount, evType, verification, r.ActualArgs); err != nil {
 			return restored, unresolved, fmt.Errorf("insert restored edge: %w", err)
 		}
 		restored++
