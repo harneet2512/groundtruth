@@ -102,7 +102,7 @@ export function build(): Circle { return new Circle(1) }
 		specs.KindInterface, specs.KindClass,
 		specs.KindConstructor, specs.KindAccessor, specs.KindMethod,
 		specs.KindFunction, specs.KindEnum, specs.KindEnumMember,
-		specs.KindTypeAlias, specs.KindNamespace,
+		specs.KindTypeAlias, specs.KindNamespace, specs.KindFile,
 	)
 
 	labels := labelCounts(result)
@@ -136,7 +136,7 @@ func (p *Point) String() string { return "p" }
 	// named type that also falls to the alias default -- neither is a struct.
 	assertKinds(t, result,
 		specs.KindStruct, specs.KindInterface, specs.KindTypeAlias,
-		specs.KindFunction, specs.KindMethod,
+		specs.KindFunction, specs.KindMethod, specs.KindFile,
 	)
 	if labels := labelCounts(result); labels["Interface"] != 1 {
 		t.Errorf("expected the pre-existing Go Interface label to be untouched, labels=%v", labels)
@@ -162,6 +162,7 @@ macro_rules! shout { () => {} }
 		specs.KindStruct, specs.KindEnum, specs.KindTrait, specs.KindImpl,
 		specs.KindFunction, specs.KindModule, specs.KindTypeAlias,
 		specs.KindConstant, specs.KindUnion, specs.KindMacro,
+		specs.KindFile,
 	)
 	// `impl Handle for Router` states conformance in a named field.
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
@@ -184,7 +185,8 @@ class Circle implements Shape {
 	assertKinds(t, result,
 		specs.KindInterface, specs.KindEnum, specs.KindClass,
 		specs.KindConstructor, specs.KindMethod, specs.KindEnumMember,
-		specs.KindRecord, specs.KindAnnotation,
+		specs.KindRecord, specs.KindAnnotation, specs.KindFile,
+		specs.KindDecorator,
 	)
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
 		got[0] != "Shape|"+specs.MechImplementsClause {
@@ -213,7 +215,7 @@ def build():
 	// (GT already records the parent) but its KIND is `function`, because that
 	// is what the grammar declared.
 	assertKinds(t, result, specs.KindClass, specs.KindConstructor,
-		specs.KindFunction)
+		specs.KindFunction, specs.KindFile)
 	if labels := labelCounts(result); labels["Method"] != 2 {
 		t.Errorf("Method label = %d, want 2 (unchanged by item 11); labels=%v", labels["Method"], labels)
 	}
@@ -237,7 +239,7 @@ double area() { return 1.0; }
 	assertKinds(t, result,
 		specs.KindStruct, specs.KindClass, specs.KindFunction,
 		specs.KindNamespace, specs.KindEnum, specs.KindEnumMember,
-		specs.KindUnion, specs.KindTypeAlias,
+		specs.KindUnion, specs.KindTypeAlias, specs.KindFile,
 	)
 }
 
@@ -259,7 +261,7 @@ namespace Geo {
 		specs.KindInterface, specs.KindStruct,
 		specs.KindClass, specs.KindConstructor, specs.KindMethod,
 		specs.KindNamespace, specs.KindEnum, specs.KindEnumMember,
-		specs.KindRecord,
+		specs.KindRecord, specs.KindFile,
 	)
 	// base_list does not say which entry is an interface, so C# claims none.
 	if got := propValues(result, PropImplementsType); len(got) != 0 {
@@ -286,7 +288,7 @@ function build() { return new Circle(); }
 		specs.KindInterface, specs.KindClass,
 		specs.KindConstructor, specs.KindMethod, specs.KindFunction,
 		specs.KindNamespace, specs.KindTrait, specs.KindEnum,
-		specs.KindEnumMember,
+		specs.KindEnumMember, specs.KindFile,
 	)
 	if got := propValues(result, PropImplementsType); len(got) != 1 ||
 		got[0] != "Shape|"+specs.MechImplementsClause {
@@ -333,13 +335,13 @@ defmodule Router do
   end
 end
 `)
-	assertKinds(t, result, specs.KindModule)
-	if len(result.Nodes) != 1 {
-		t.Errorf("nodes = %d, want 1 (the parser does not descend past the outermost call)", len(result.Nodes))
+	assertKinds(t, result, specs.KindModule, specs.KindFile)
+	if len(result.Nodes) != 2 {
+		t.Errorf("nodes = %d, want 2 (the module + its File anchor)", len(result.Nodes))
 	}
 	// Whole-word matching: `def` must not have matched inside `defmodule`.
-	if got := symbolKinds(result); len(got) != 1 || got[0] != specs.KindModule {
-		t.Errorf("kinds = %v, want [module]; `def` leaked into `defmodule`", got)
+	if got := symbolKinds(result); len(got) != 2 || got[1] != specs.KindModule {
+		t.Errorf("kinds = %v, want [file module]; `def` leaked into `defmodule`", got)
 	}
 }
 
@@ -391,12 +393,14 @@ export function build(): Circle { return new Circle() }
 	labels := labelCounts(result)
 	// Pre-existing labels, with the counts the parser produced before item 11:
 	// one Class (Circle), one Class (Shape, since interface_declaration is in
-	// the TypeScript spec's ClassNodes), one Method, one Function.
+	// the TypeScript spec's ClassNodes), one Function. Method is 2 since the
+	// interface member rule now emits Shape.area() as a Method — a new node,
+	// not a relabeled one.
 	if labels["Class"] != 2 {
 		t.Errorf("Class = %d, want 2 (Shape and Circle, as before item 11); labels=%v", labels["Class"], labels)
 	}
-	if labels["Method"] != 1 {
-		t.Errorf("Method = %d, want 1; labels=%v", labels["Method"], labels)
+	if labels["Method"] != 2 {
+		t.Errorf("Method = %d, want 2 (Circle.area plus interface member Shape.area); labels=%v", labels["Method"], labels)
 	}
 	if labels["Function"] != 1 {
 		t.Errorf("Function = %d, want 1; labels=%v", labels["Function"], labels)
@@ -451,7 +455,7 @@ export namespace Geo { export const k = 1; }
 		}
 	}
 	assertKinds(t, result, specs.KindEnum, specs.KindEnumMember,
-		specs.KindTypeAlias, specs.KindNamespace)
+		specs.KindTypeAlias, specs.KindNamespace, specs.KindFile)
 
 	rust := parseTaxonomyFixture(t, "a.rs", `
 pub mod routing;

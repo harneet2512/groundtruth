@@ -186,9 +186,17 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 	callables := buildIndex(nodes, ids, callableLabels)
 	methods := buildIndex(nodes, ids, methodLabels)
 	nodesByID := make(map[int64]*store.Node, min(len(nodes), len(ids)))
+	// Decorator occurrence nodes, grouped by the declaration they are
+	// parented to. They are the DECORATES source when the applied decorator
+	// has no in-repo callable (external package, builtin, annotation type).
+	decoratorsByParent := make(map[int64][]int64)
 	for i, id := range ids {
 		if id > 0 && i < len(nodes) && nodes[i] != nil {
 			nodesByID[id] = nodes[i]
+			if nodes[i].Label == "Decorator" && nodes[i].ParentID > 0 {
+				decoratorsByParent[nodes[i].ParentID] = append(
+					decoratorsByParent[nodes[i].ParentID], id)
+			}
 		}
 	}
 	b := newBuilder()
@@ -233,7 +241,7 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			b.emit(specs.EdgeMethodOverrides, specs.MechOverrideMarker, id,
 				withoutSelf(methods[node.Name], id), node.FilePath, p.Line)
 
-		case propClassDecorator:
+		case propClassDecorator, propFunctionDecorator:
 			// `@dataclass` / `@pytest.fixture(scope="module")` -> `dataclass`.
 			name := decoratorName(p.Value)
 			if name == "" {
@@ -241,7 +249,20 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			}
 			// Direction: the decorator decorates the declaration, so the
 			// decorator is the source.
-			for _, decorator := range callables[name] {
+			sources := callables[name]
+			if len(sources) == 0 {
+				// External decorator: no in-repo callable carries this name.
+				// The parser minted a `Decorator` occurrence node parented to
+				// this declaration; it is the honest edge source — naming the
+				// applied decorator without fabricating a callable.
+				sources = nil
+				for _, occID := range decoratorsByParent[id] {
+					if occ := nodesByID[occID]; occ != nil && occ.Name == name {
+						sources = append(sources, occID)
+					}
+				}
+			}
+			for _, decorator := range sources {
 				b.emit(specs.EdgeDecorates, specs.MechDecoratorApplied, decorator,
 					[]int64{id}, node.FilePath, p.Line)
 			}
@@ -297,10 +318,11 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 // Property row kinds this package reads that the parser already wrote before
 // item 11. Named here so the dependency is explicit.
 const (
-	propClassDecorator = "class_decorator"
-	propParam          = "param"
-	propFieldRead      = "field_read"
-	propSideEffect     = "side_effect"
+	propClassDecorator    = "class_decorator"
+	propFunctionDecorator = "function_decorator"
+	propParam             = "param"
+	propFieldRead         = "field_read"
+	propSideEffect        = "side_effect"
 )
 
 func isConstructorDeclaration(node *store.Node) bool {

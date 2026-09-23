@@ -83,6 +83,19 @@ func init() {
 				Kind: KindEnumMember, Label: "EnumMember", Of: "enum_body",
 				Types: []string{"property_identifier", "enum_assignment"}, NameField: "name",
 			},
+			// Interface members are `method_signature` nodes — not the
+			// `method_definition` the normal walk emits — so without this entry
+			// a TS interface produced zero member nodes and shape_check's
+			// interface-conformance check (nodes.parent_id = iface AND label
+			// IN ('Method','Function')) was vacuous for TypeScript while Java/
+			// C#/PHP/Go interfaces already emit their member methods. Property
+			// members (`property_signature`) are not emitted: no Field label
+			// exists (fields are class_field properties) and the contract
+			// surface requires callables only.
+			"interface_declaration": {
+				Kind: KindMethod, Label: "Method", Of: "interface_body",
+				Types: []string{"method_signature"}, NameField: "name",
+			},
 		},
 		Implements: []ImplementsRule{
 			{NodeType: "class_declaration", ChildType: "implements_clause"},

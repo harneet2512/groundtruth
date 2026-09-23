@@ -81,19 +81,21 @@ app.use(missingMw);
 		map[string]string{"app.js": src},
 		map[string]string{"app.js": "javascript"})
 
-	// id 1 anchors the file (first node in app.js).
+	// id 5 is the File anchor; the Function nodes precede it so the anchor is
+	// chosen by label, not lowest-id.
 	execSQL(t, db, `INSERT INTO nodes (id, label, name, file_path, start_line, end_line, language) VALUES
 		(1, 'Function', 'bootstrap', 'app.js', 5, 5, 'javascript'),
 		(2, 'Function', 'auth',      'app.js', 6, 6, 'javascript'),
 		(3, 'Function', 'logReq',    'app.js', 7, 7, 'javascript'),
-		(4, 'Function', 'track',     'app.js', 8, 8, 'javascript')`)
+		(4, 'Function', 'track',     'app.js', 8, 8, 'javascript'),
+		(5, 'File',     'app',       'app.js', 1, 14, 'javascript')`)
 
 	if _, err := ResolveRelationships(db, files, root); err != nil {
 		t.Fatal(err)
 	}
 	edges := queryWiringEdges(t, db, "MIDDLEWARE_ON")
 
-	e, ok := edges[[2]int64{2, 1}]
+	e, ok := edges[[2]int64{2, 5}]
 	if !ok {
 		t.Fatal("missing MIDDLEWARE_ON auth -> app.js anchor")
 	}
@@ -105,7 +107,7 @@ app.use(missingMw);
 		t.Errorf("metadata = %v, want mechanism=express_use route=null", m)
 	}
 
-	e2, ok := edges[[2]int64{3, 1}]
+	e2, ok := edges[[2]int64{3, 5}]
 	if !ok {
 		t.Fatal("missing MIDDLEWARE_ON logReq -> app.js anchor")
 	}
@@ -113,7 +115,7 @@ app.use(missingMw);
 		t.Errorf("route-scoped use() metadata = %v, want route=/api", m2)
 	}
 
-	if _, ok := edges[[2]int64{4, 1}]; !ok {
+	if _, ok := edges[[2]int64{4, 5}]; !ok {
 		t.Error("missing MIDDLEWARE_ON track -> anchor (router.use must bind like app.use)")
 	}
 

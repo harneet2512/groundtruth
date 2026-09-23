@@ -199,6 +199,51 @@ func TestDecoratesPointsFromTheDecorator(t *testing.T) {
 	}
 }
 
+// An external decorator has no in-repo callable — the `Decorator` occurrence
+// node the parser parents to the declaration is the honest DECORATES source.
+func TestDecoratesExternalUsesOccurrenceNode(t *testing.T) {
+	nodes := []*store.Node{
+		node("Function", "handler", "a.py"),
+		{Label: "Decorator", Name: "route", QualifiedName: "app.route",
+			FilePath: "a.py", StartLine: 1, ParentID: 1},
+	}
+	props := []parser.PropertyRef{
+		{NodeIdx: 0, Kind: propFunctionDecorator, Value: "@app.route('/x')", Line: 1},
+	}
+	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDecorates)
+	if len(rows) != 1 {
+		t.Fatalf("%d DECORATES rows, want 1", len(rows))
+	}
+	if rows[0].SourceID != 2 || rows[0].TargetID != 1 {
+		t.Errorf("DECORATES %d->%d, want 2->1 (occurrence node is the source)",
+			rows[0].SourceID, rows[0].TargetID)
+	}
+	if rows[0].TrustTier == "CERTIFIED" {
+		t.Errorf("external-decorator edge claimed CERTIFIED: %+v", rows[0])
+	}
+}
+
+// When an in-repo callable carries the decorator's name it wins; the
+// occurrence node is a fallback, never an extra edge.
+func TestDecoratesPrefersInRepoCallable(t *testing.T) {
+	nodes := []*store.Node{
+		node("Function", "handler", "a.py"),
+		{Label: "Decorator", Name: "logged", QualifiedName: "logged",
+			FilePath: "a.py", StartLine: 1, ParentID: 1},
+		node("Function", "logged", "deco.py"),
+	}
+	props := []parser.PropertyRef{
+		{NodeIdx: 0, Kind: propFunctionDecorator, Value: "@logged", Line: 1},
+	}
+	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDecorates)
+	if len(rows) != 1 {
+		t.Fatalf("%d DECORATES rows, want exactly 1 (callable wins, no double edge)", len(rows))
+	}
+	if rows[0].SourceID != 3 || rows[0].TargetID != 1 {
+		t.Errorf("DECORATES %d->%d, want 3->1 (in-repo callable)", rows[0].SourceID, rows[0].TargetID)
+	}
+}
+
 func TestRequiredNamedEdgesUseSyntacticEvidenceAndNeverCertify(t *testing.T) {
 	nodes := []*store.Node{
 		node("Class", "Dependency", "dep.py"),

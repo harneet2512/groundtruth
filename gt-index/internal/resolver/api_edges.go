@@ -3,6 +3,7 @@ package resolver
 import (
 	"bufio"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -363,11 +364,37 @@ func isAPIPath(p string) bool {
 // ResolveAPIEdges scans source files for HTTP route definitions and client calls,
 // then creates API_CALL edges between files that share matching paths.
 func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int, error) {
+	tx, err := db.BeginTx()
+	if err != nil {
+		return 0, fmt.Errorf("begin api edges tx: %w", err)
+	}
+	defer tx.Rollback()
+	n, err := resolveAPIEdgesTx(tx, files, root, "")
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit api edges: %w", err)
+	}
+	return n, nil
+}
+
+// ResolveAPIEdgesTx is the -file amend variant: runs inside the caller's amend
+// transaction so the File-anchor map sees the reparsed file's uncommitted File
+// node. emitScope, when non-empty, emits only API_CALL edges whose CLIENT file
+// is emitScope — the amend owns its own file's outbound calls; edges other
+// clients hold into this file's routes are restored by the incoming-edge
+// rebind, not re-emitted here (edges has no UNIQUE constraint).
+func ResolveAPIEdgesTx(tx *sql.Tx, files []walker.SourceFile, root, emitScope string) (int, error) {
+	return resolveAPIEdgesTx(tx, files, root, emitScope)
+}
+
+func resolveAPIEdgesTx(tx *sql.Tx, files []walker.SourceFile, root, emitScope string) (int, error) {
 	var routes []RouteDefinition
 	var clients []ClientCall
 
-	// Build a map of file_path -> node ID (use first node in that file as anchor).
-	fileNodeMap := buildFileNodeMap(db, files)
+	// Build a map of file_path -> File-anchor node ID.
+	fileNodeMap := buildFileNodeMapTx(tx, files)
 
 	// Scan each file for route/client patterns.
 	for _, sf := range files {
@@ -491,12 +518,24 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 			if c.File == r.File {
 				continue
 			}
+			// -file amend emits an edge when EITHER endpoint sits in the
+			// amended file: outbound edges are re-emitted because the file's
+			// own facts were deleted, and inbound edges because amending the
+			// route file deleted every edge targeting its File anchor.
+			if emitScope != "" && c.File != emitScope && r.File != emitScope {
+				continue
+			}
 			// Skip if either node is missing from DB.
 			if c.NodeID == 0 || r.NodeID == 0 {
 				continue
 			}
 
-			key := edgeKey{sourceID: c.NodeID, targetID: r.NodeID, typ: "API_CALL"}
+			// A4: the dedup identity is the (callsite, route) pair — not the
+			// (source anchor, target anchor) pair. File-level anchors are shared
+			// by every route in the file, so the old key collapsed a client
+			// calling N distinct routes in one server file into a single edge.
+			key := edgeKey{sourceID: c.NodeID, targetID: r.NodeID,
+				typ: fmt.Sprintf("API_CALL|%d|%s|%s:%d", c.Line, c.Path, r.File, r.Line)}
 			if seen[key] {
 				continue
 			}
@@ -538,26 +577,34 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 		return 0, nil
 	}
 
-	if err := db.BatchInsertEdges(edges); err != nil {
+	if err := store.BatchInsertEdgesTx(tx, edges); err != nil {
 		return 0, fmt.Errorf("insert API edges: %w", err)
 	}
 
 	return len(edges), nil
 }
 
-// buildFileNodeMap queries the DB for the first node in each file to use as an
-// anchor for API edges. Falls back to 0 if no node exists for that file.
+// buildFileNodeMap queries the DB for the File-anchor node in each file to use
+// as the anchor for file-level edges (API_CALL/HANDLES_ROUTE/MIDDLEWARE_ON/
+// IMPORTS/RE_EXPORTS). A file with no File node maps to 0 — absent anchor
+// abstains rather than misattributing a file-level relation to an arbitrary
+// symbol (the pre-A4 "first node by id" picked a class or the handler itself,
+// producing self-loop drops and wrong consumer attribution).
 func buildFileNodeMap(db *store.DB, files []walker.SourceFile) map[string]int64 {
-	result := make(map[string]int64, len(files))
-	// Use LookupNodeByName won't work here — we need file-level lookup.
-	// Query directly via a transaction.
 	tx, err := db.BeginTx()
 	if err != nil {
-		return result
+		return make(map[string]int64, len(files))
 	}
 	defer tx.Rollback()
+	return buildFileNodeMapTx(tx, files)
+}
 
-	stmt, err := tx.Prepare(`SELECT id FROM nodes WHERE file_path = ? ORDER BY id LIMIT 1`)
+// buildFileNodeMapTx is the in-transaction form: the -file amend path reads the
+// anchors of the graph it is mid-commit on, where the reparsed file's fresh
+// File node exists only inside the tx.
+func buildFileNodeMapTx(tx *sql.Tx, files []walker.SourceFile) map[string]int64 {
+	result := make(map[string]int64, len(files))
+	stmt, err := tx.Prepare(`SELECT id FROM nodes WHERE file_path = ? AND label = 'File' ORDER BY id LIMIT 1`)
 	if err != nil {
 		return result
 	}

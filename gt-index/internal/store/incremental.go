@@ -36,6 +36,13 @@ type IncomingEdgeRef struct {
 	EdgeType         string  // "CALLS", etc.
 	SourceFile       string  // source file path of the calling edge
 	TargetName       string  // name of the target symbol that lived in the file being reparsed
+	// TargetLabel is the target node's label (Function, Class, File, …). A4:
+	// file-anchor nodes share the file's basename, so a bare name+file_path
+	// rebind sees BOTH `Class Core` and `File Core` in core/Core.java and
+	// demotes a verified restore to an ambiguous name_match guess. Matching
+	// on label restores the exact node class the original edge pointed at.
+	// Empty label (manually-constructed refs) disables the label filter.
+	TargetLabel      string
 	ResolutionMethod string  // original resolution method (same_file, import, name_match)
 	Confidence       float64 // original confidence
 	// EvidenceType carries the ORIGINAL edge's evidence marker (ast_call,
@@ -111,7 +118,7 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		        COALESCE(e.resolution_method, ''), COALESCE(e.confidence, 0.0),
 		        COALESCE(e.evidence_type, ''), COALESCE(n.qualified_name, ''),
 		        e.actual_args, e.metadata, COALESCE(e.verification_status, 'unverified'),
-		        e.candidate_count
+		        e.candidate_count, COALESCE(n.label, '')
 		   FROM edges e
 		   JOIN nodes n ON e.target_id = n.id
 		  WHERE n.file_path = ?
@@ -137,7 +144,7 @@ func SnapshotIncomingEdgesTx(tx *sql.Tx, filePath string, cap int) ([]IncomingEd
 		var r IncomingEdgeRef
 		if err := rows.Scan(&r.SourceID, &r.SourceLine, &r.EdgeType, &r.SourceFile, &r.TargetName,
 			&r.ResolutionMethod, &r.Confidence, &r.EvidenceType, &r.TargetQualifiedName,
-			&r.ActualArgs, &r.Metadata, &r.VerificationStatus, &r.CandidateCount); err != nil {
+			&r.ActualArgs, &r.Metadata, &r.VerificationStatus, &r.CandidateCount, &r.TargetLabel); err != nil {
 			return nil, fmt.Errorf("scan incoming edge: %w", err)
 		}
 		out = append(out, r)
@@ -227,7 +234,12 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string,
 	// qualified_name so the restore can re-prove TARGET IDENTITY against the original
 	// edge's TargetQualifiedName (P0: a bare-name re-match must not launder a verified
 	// tier onto a different node that happens to share the simple name).
-	lookup, err := tx.Prepare(`SELECT id, COALESCE(qualified_name, '') FROM nodes WHERE name = ? AND file_path = ? ORDER BY id`)
+	// A4: match on the snapshot's target label so a file-anchor node whose name
+	// equals a same-file symbol (File 'Core' vs Class 'Core' in Core.java) does
+	// not inflate the candidate set into a false-ambiguous name_match demotion.
+	// Empty TargetLabel (manually-constructed refs) keeps the name-only legacy
+	// lookup — nodes.label is never empty on real parser output.
+	lookup, err := tx.Prepare(`SELECT id, COALESCE(qualified_name, '') FROM nodes WHERE name = ? AND file_path = ? AND (? = '' OR label = ?) ORDER BY id`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("prepare incoming lookup: %w", err)
 	}
@@ -244,7 +256,7 @@ func ResolveIncomingEdgesTx(tx *sql.Tx, snap []IncomingEdgeRef, filePath string,
 
 	restored, unresolved := 0, 0
 	for _, r := range snap {
-		rows, err := lookup.Query(r.TargetName, filePath)
+		rows, err := lookup.Query(r.TargetName, filePath, r.TargetLabel, r.TargetLabel)
 		if err != nil {
 			return restored, unresolved, fmt.Errorf("lookup %s in %s: %w", r.TargetName, filePath, err)
 		}

@@ -93,15 +93,28 @@ func TestInspectionRealBinaryIsBuildBoundByteStableAndExact(t *testing.T) {
 	}
 
 	type fixture struct {
-		request     inspectionRequest
-		declaration inspectionDeclaration
+		request      inspectionRequest
+		declarations []inspectionDeclaration
 	}
+	// Every fixture emits its symbol plus the File anchor (A4: content-bearing
+	// files carry a stable file-level node — the inspection surface reports the
+	// real parse output, so the anchor is declared, not hidden).
 	fixtures := []fixture{
-		{inspectionFixture("py", "python", "a.py", "def compute(x: int) -> int:\n    return x\n"), inspectionDeclaration{"Function", "compute", "compute", "def compute(x: int) -> int:", 1, 2, 0, 40}},
-		{inspectionFixture("go", "go", "a.go", "package a\nfunc Compute(x int) int { return x }\n"), inspectionDeclaration{"Function", "Compute", "Compute", "func Compute(x int) int", 2, 2, 10, 46}},
-		{inspectionFixture("ts", "typescript", "a.ts", "export function compute(x: number): number { return x }\n"), inspectionDeclaration{"Function", "compute", "compute", "function compute(x: number): number", 1, 1, 7, 55}},
-		{inspectionFixture("js", "javascript", "a.js", "export function compute(x) { return x }\n"), inspectionDeclaration{"Function", "compute", "compute", "function compute(x)", 1, 1, 7, 39}},
-		{inspectionFixture("rs", "rust", "a.rs", "pub fn compute(x: i32) -> i32 { x }\n"), inspectionDeclaration{"Function", "compute", "compute", "pub fn compute(x: i32) -> i32", 1, 1, 0, 35}},
+		{inspectionFixture("py", "python", "a.py", "def compute(x: int) -> int:\n    return x\n"), []inspectionDeclaration{
+			{"Function", "compute", "compute", "def compute(x: int) -> int:", 1, 2, 0, 40},
+			{"File", "a", "a.py", "", 1, 3, 0, 41}}},
+		{inspectionFixture("go", "go", "a.go", "package a\nfunc Compute(x int) int { return x }\n"), []inspectionDeclaration{
+			{"Function", "Compute", "Compute", "func Compute(x int) int", 2, 2, 10, 46},
+			{"File", "a", "a.go", "", 1, 3, 0, 47}}},
+		{inspectionFixture("ts", "typescript", "a.ts", "export function compute(x: number): number { return x }\n"), []inspectionDeclaration{
+			{"Function", "compute", "compute", "function compute(x: number): number", 1, 1, 7, 55},
+			{"File", "a", "a.ts", "", 1, 2, 0, 56}}},
+		{inspectionFixture("js", "javascript", "a.js", "export function compute(x) { return x }\n"), []inspectionDeclaration{
+			{"Function", "compute", "compute", "function compute(x)", 1, 1, 7, 39},
+			{"File", "a", "a.js", "", 1, 2, 0, 40}}},
+		{inspectionFixture("rs", "rust", "a.rs", "pub fn compute(x: i32) -> i32 { x }\n"), []inspectionDeclaration{
+			{"Function", "compute", "compute", "pub fn compute(x: i32) -> i32", 1, 1, 0, 35},
+			{"File", "a", "a.rs", "", 1, 2, 0, 36}}},
 	}
 	var input bytes.Buffer
 	encoder := json.NewEncoder(&input)
@@ -133,8 +146,8 @@ func TestInspectionRealBinaryIsBuildBoundByteStableAndExact(t *testing.T) {
 		if response.Schema != inspectionSchema || response.ParserIdentity != "gt-index/"+info.BuildID || !response.ParserIdentityComplete || !response.Complete || len(response.Diagnostics) != 0 {
 			t.Fatalf("%s response identity/completeness mismatch: %+v", fixture.request.Language, response)
 		}
-		if !slices.Equal(response.Declarations, []inspectionDeclaration{fixture.declaration}) {
-			t.Fatalf("%s declaration mismatch: got %+v want %+v", fixture.request.Language, response.Declarations, fixture.declaration)
+		if !slices.Equal(response.Declarations, fixture.declarations) {
+			t.Fatalf("%s declaration mismatch: got %+v want %+v", fixture.request.Language, response.Declarations, fixture.declarations)
 		}
 	}
 	if decoder.More() {

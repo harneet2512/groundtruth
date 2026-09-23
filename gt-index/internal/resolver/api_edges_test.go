@@ -1,6 +1,11 @@
 package resolver
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/harneet2512/groundtruth/gt-index/internal/store"
+)
 
 func TestNormalizePath(t *testing.T) {
 	tests := []struct {
@@ -257,5 +262,138 @@ func TestHAR70FrameworkValidationReportHasPerLanguageIncreases(t *testing.T) {
 	}
 	if got := FrameworkValidationDigest(rows); got == "" || len(got) != 64 {
 		t.Fatalf("invalid validation digest %q", got)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// A4: API_CALL identity is the (callsite, route) pair — not the (source anchor,
+// target anchor) pair. Anchored at shared File nodes, the old
+// (source,target,type) dedup collapsed every distinct route between the same
+// file pair into one edge.
+// ----------------------------------------------------------------------------
+
+// queryAPICalls returns all API_CALL edges.
+func queryAPICalls(t *testing.T, db *store.DB) []store.Edge {
+	t.Helper()
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT source_id, target_id, COALESCE(metadata,''),
+        COALESCE(source_line,0), COALESCE(confidence,0), COALESCE(candidate_count,0)
+   FROM edges WHERE type = 'API_CALL'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []store.Edge
+	for rows.Next() {
+		var e store.Edge
+		if err := rows.Scan(&e.SourceID, &e.TargetID, &e.Metadata,
+			&e.SourceLine, &e.Confidence, &e.CandidateCount); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// TestAPICallDistinctRoutesSameFilePair: a client file calling TWO routes that
+// both live in the same server file must keep BOTH edges — the A4 dedup defect
+// collapsed them to one.
+func TestAPICallDistinctRoutesSameFilePair(t *testing.T) {
+	server := `@app.route("/api/users")
+def users():
+    return []
+
+@app.route("/api/orders")
+def orders():
+    return []
+`
+	client := `async function load() {
+  await fetch("/api/users");
+  await fetch("/api/orders");
+}
+`
+	db, files, root := routeFixture(t,
+		map[string]string{"server.py": server, "client.js": client},
+		map[string]string{"server.py": "python", "client.js": "javascript"})
+
+	// File anchors are the endpoints; symbol nodes exist but are irrelevant to
+	// the file-level API relation.
+	execSQL(t, db, `INSERT INTO nodes (id, label, name, file_path, start_line, language) VALUES
+		(1, 'Function', 'users',  'server.py', 2, 'python'),
+		(2, 'Function', 'orders', 'server.py', 6, 'python'),
+		(3, 'Function', 'load',   'client.js', 1, 'javascript'),
+		(4, 'File',     'server', 'server.py', 1, 'python'),
+		(5, 'File',     'client', 'client.js', 1, 'javascript')`)
+
+	n, err := ResolveAPIEdges(db, files, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := queryAPICalls(t, db)
+
+	var usersEdge, ordersEdge *store.Edge
+	for i := range edges {
+		e := &edges[i]
+		if e.SourceID != 5 || e.TargetID != 4 {
+			continue
+		}
+		var m map[string]string
+		if err := json.Unmarshal([]byte(e.Metadata), &m); err != nil {
+			t.Fatalf("API_CALL metadata not JSON: %q", e.Metadata)
+		}
+		switch m["route"] {
+		case "/api/users":
+			usersEdge = e
+		case "/api/orders":
+			ordersEdge = e
+		}
+	}
+	if usersEdge == nil {
+		t.Error("missing API_CALL for /api/users (first route dropped by dedup)")
+	}
+	if ordersEdge == nil {
+		t.Error("missing API_CALL for /api/orders (second route dropped by dedup)")
+	}
+	if len(edges) != 2 || n != 2 {
+		t.Errorf("got %d API_CALL edges (insert=%d), want 2", len(edges), n)
+	}
+	if usersEdge != nil && usersEdge.SourceLine != 2 {
+		t.Errorf("/api/users edge source_line = %d, want 2 (the fetch line)", usersEdge.SourceLine)
+	}
+	if ordersEdge != nil && ordersEdge.SourceLine != 3 {
+		t.Errorf("/api/orders edge source_line = %d, want 3", ordersEdge.SourceLine)
+	}
+}
+
+// TestAPICallNoAnchorAbstains: no File anchor -> no edge (file-level relations
+// abstain rather than attach to an arbitrary symbol).
+func TestAPICallNoAnchorAbstains(t *testing.T) {
+	server := `@app.route("/api/users")
+def users():
+    return []
+`
+	client := `async function load() {
+  await fetch("/api/users");
+}
+`
+	db, files, root := routeFixture(t,
+		map[string]string{"server.py": server, "client.js": client},
+		map[string]string{"server.py": "python", "client.js": "javascript"})
+
+	// Symbol nodes only — no File anchors.
+	execSQL(t, db, `INSERT INTO nodes (id, label, name, file_path, start_line, language) VALUES
+		(1, 'Function', 'users', 'server.py', 2, 'python'),
+		(2, 'Function', 'load',  'client.js', 1, 'javascript')`)
+
+	n, err := ResolveAPIEdges(db, files, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("no-anchor graph minted %d API_CALL edges, want 0 (abstain)", n)
 	}
 }

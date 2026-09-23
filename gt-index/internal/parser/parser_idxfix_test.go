@@ -143,3 +143,41 @@ func TestFieldRead_SkipsMethodCalls_Go(t *testing.T) {
 		t.Errorf("genuine field read c.width lost; reads=%v", reads)
 	}
 }
+
+// A4 RED→GREEN: a file WITH symbols must also mint a File anchor — file-level
+// relations (HANDLES_ROUTE/API_CALL/IMPORTS) target it, and selecting "first
+// node by id" instead attached them to an arbitrary symbol.
+func TestFileAnchor_SymbolFileMintsNode(t *testing.T) {
+	src := "def helper():\n    pass\n"
+	res := parseFixture(t, "mod.py", src)
+	var found bool
+	for _, n := range res.Nodes {
+		if n.Label == "File" {
+			found = true
+			if n.Name != "mod" {
+				t.Errorf("File anchor name = %q, want mod", n.Name)
+			}
+			if n.IsExported {
+				t.Error("File anchor is_exported=true — would pollute dead_code (is_exported + no incoming)")
+			}
+		}
+	}
+	if !found {
+		t.Error("symbol-bearing file minted no File anchor")
+	}
+}
+
+// A4: exactly ONE File anchor per file, regardless of symbol count.
+func TestFileAnchor_ExactlyOnePerFile(t *testing.T) {
+	src := "def a():\n    pass\n\ndef b():\n    pass\n\nclass C:\n    pass\n"
+	res := parseFixture(t, "multi.py", src)
+	count := 0
+	for _, n := range res.Nodes {
+		if n.Label == "File" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("got %d File anchors, want exactly 1", count)
+	}
+}

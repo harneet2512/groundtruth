@@ -428,25 +428,29 @@ func stampContentAddress(src []byte, result *ParseResult) {
 	}
 }
 
-// maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
-// symbol nodes yet carries module-linking structure. See ParseFile caller for why.
+// maybeAddFileAnchorNode appends a synthetic File node for every file that
+// carries real content. HANDLES_ROUTE/API_CALL/IMPORTS/RE_EXPORTS are file-level
+// relations and must anchor at a stable file node — the previous "first node in
+// the file" convention attached them to an arbitrary symbol (a class, a route
+// handler's own node) producing self-loop drops and wrong consumer attribution.
+// #B3 stands: comment-only and blank files mint nothing, so a content-free file
+// stays node-free.
 func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResult) {
-	if len(result.Nodes) > 0 {
-		return
+	for _, n := range result.Nodes {
+		if n.Label == "File" {
+			return
+		}
 	}
 	text := string(src)
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	// Module-linking tokens common across languages. A barrel/re-export or pure
-	// import/use file STARTS a line with one of these even though it defines no
-	// symbols. #B3: the previous whole-text substring scan matched module-link
-	// tokens inside COMMENTS and string prose (any sentence containing " from ")
-	// and minted phantom File nodes for content-free files. Require the token at
-	// LINE START (after optional whitespace) on a non-comment line.
-	linkTokens := []string{"export ", "export*", "export{", "import ", "import{",
-		"from ", "require(", "use ", "pub use", "mod ", "pub mod "}
-	hasLink := false
+	// Any non-blank, non-comment line is real content. #B3: the previous
+	// whole-text substring scan matched module-link tokens inside COMMENTS and
+	// string prose (any sentence containing " from ") and minted phantom File
+	// nodes for content-free files. Require the content at LINE START (after
+	// optional whitespace) on a non-comment line.
+	hasContent := false
 	for _, line := range strings.Split(text, "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" {
@@ -457,17 +461,10 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResul
 			strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*") {
 			continue
 		}
-		for _, tok := range linkTokens {
-			if strings.HasPrefix(t, tok) {
-				hasLink = true
-				break
-			}
-		}
-		if hasLink {
-			break
-		}
+		hasContent = true
+		break
 	}
-	if !hasLink {
+	if !hasContent {
 		return
 	}
 	// Derive a stable module name from the file's base name (sans extension).
@@ -491,9 +488,12 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResul
 		StartLine:     1,
 		EndLine:       endLine,
 		Language:      sf.Language,
-		IsExported:    true,
-		ByteStart:     0,
-		ByteEnd:       uint64(len(src)),
+		// Not an exported symbol: is_exported=1 + zero incoming edges is the
+		// dead-code predicate, and an unlinked file anchor would read as dead
+		// code. Anchors are file-level relation targets, not symbols.
+		IsExported: false,
+		ByteStart:  0,
+		ByteEnd:    uint64(len(src)),
 	})
 	// Symbol taxonomy: the file kind, so every symbol node carries exactly one
 	// symbol_kind row regardless of which path emitted it.
@@ -863,6 +863,11 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			// constructor, accessor) without touching its label.
 			annotateSymbolKind(node, sf, src, result, idx)
 
+			// Decorators/annotations on callables: property rows plus
+			// `Decorator` occurrence nodes so external decorators still get a
+			// DECORATES edge source.
+			emitDecoratorFacts(node, sf, src, result, idx, "function_decorator", isTest)
+
 			// Extract calls from this function's body
 			bodyNode := node.ChildByFieldName(spec.BodyField)
 			if bodyNode == nil && spec.BodyField != "" {
@@ -983,7 +988,7 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 
 			// Extract class decorators (above the class definition)
-			extractClassDecorators(node, src, result, idx)
+			extractClassDecorators(node, sf, src, result, idx, isTest)
 
 			// Visibility: public/private/protected/exported/unexported
 			extractVisibility(node, src, result, idx)
@@ -5752,79 +5757,176 @@ func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseRes
 	}
 }
 
-// extractClassDecorators finds decorator nodes above the class definition.
-// Kind: class_decorator. Value: "@dataclass" or "@pytest.fixture".
-// Called from walkNode for ClassNodes.
-func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseResult, nodeIdx int) {
-	// Strategy 1: Check if parent is a decorated_definition (Python)
-	parent := classNode.Parent()
-	if parent != nil && parent.Type() == "decorated_definition" {
-		for i := 0; i < int(parent.ChildCount()); i++ {
-			child := parent.Child(i)
-			if child == nil {
-				continue
-			}
-			if child.Type() == "decorator" {
-				text := strings.TrimSpace(child.Content(src))
-				if len(text) > 200 {
-					text = text[:197] + "..."
-				}
-				if text != "" {
-					result.Properties = append(result.Properties, PropertyRef{
-						NodeIdx:    nodeIdx,
-						Kind:       "class_decorator",
-						Value:      text,
-						Line:       int(child.StartPoint().Row) + 1,
-						Confidence: 1.0,
-					})
-				}
-			}
-		}
-		return
-	}
+// decoratorOccurrence is one decorator/annotation application site in source.
+type decoratorOccurrence struct {
+	text      string // raw decorator text, bounded at 200 chars
+	name      string // tail identifier — `route` for `@app.route('/x')`
+	qual      string // full dotted path — `app.route`
+	line      int
+	byteStart uint64
+	byteEnd   uint64
+}
 
-	// Strategy 2: Check preceding siblings for decorator nodes
-	prev := classNode.PrevSibling()
-	for prev != nil && prev.Type() == "decorator" {
-		text := strings.TrimSpace(prev.Content(src))
+// decoratorFactNames reduces a decorator's source text to its fact names.
+// `@app.route('/x')` -> qual `app.route`, name `route`; `@Logged` -> `Logged`.
+// The tail name matches taxonomy.decoratorName's reduction of the property
+// value, so the occurrence node and the property name the same decorator.
+func decoratorFactNames(text string) (name, qual string) {
+	s := strings.TrimSpace(text)
+	s = strings.TrimPrefix(s, "@")
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	if i := strings.IndexAny(s, "(\n\r "); i >= 0 {
+		s = s[:i]
+	}
+	qual = strings.TrimSpace(s)
+	if qual == "" {
+		return "", ""
+	}
+	name = qual
+	for _, sep := range []string{"::", ".", "\\"} {
+		if i := strings.LastIndex(name, sep); i >= 0 {
+			name = name[i+len(sep):]
+		}
+	}
+	if name == "" || !isIdentifierShape(name) {
+		return "", ""
+	}
+	return name, qual
+}
+
+// isIdentifierShape reports whether s is a plausible identifier (letters,
+// digits, underscore; not starting with a digit).
+func isIdentifierShape(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// collectDecoratorOccurrences finds every decorator/annotation node applied to
+// a declaration, across the four placements the pinned grammars use:
+//
+//   - Python: `decorator` children of the `decorated_definition` WRAPPER (the
+//     declaration's parent — checked first, returns early).
+//   - TS/JS: `decorator` DIRECT CHILDREN of the declaration.
+//   - Java/Kotlin: `marker_annotation`/`annotation` inside the declaration's
+//     `modifiers` child.
+//   - C#: `attribute` inside the declaration's `attribute_list` children.
+//   - Legacy: `decorator`/`marker_annotation`/`annotation` as preceding
+//     siblings (older grammar layouts).
+func collectDecoratorOccurrences(declNode *sitter.Node, src []byte) []decoratorOccurrence {
+	var occs []decoratorOccurrence
+	add := func(n *sitter.Node) {
+		text := strings.TrimSpace(n.Content(src))
 		if len(text) > 200 {
 			text = text[:197] + "..."
 		}
-		if text != "" {
-			result.Properties = append(result.Properties, PropertyRef{
-				NodeIdx:    nodeIdx,
-				Kind:       "class_decorator",
-				Value:      text,
-				Line:       int(prev.StartPoint().Row) + 1,
-				Confidence: 1.0,
-			})
+		name, qual := decoratorFactNames(text)
+		if text == "" || name == "" {
+			return
 		}
-		prev = prev.PrevSibling()
+		occs = append(occs, decoratorOccurrence{
+			text: text, name: name, qual: qual,
+			line:      int(n.StartPoint().Row) + 1,
+			byteStart: uint64(n.StartByte()), byteEnd: uint64(n.EndByte()),
+		})
 	}
 
-	// Strategy 3: Java/Kotlin annotations (marker_annotation, annotation)
-	prev = classNode.PrevSibling()
-	for prev != nil {
-		pt := prev.Type()
-		if pt == "marker_annotation" || pt == "annotation" {
-			text := strings.TrimSpace(prev.Content(src))
-			if len(text) > 200 {
-				text = text[:197] + "..."
+	// Python decorated_definition wrapper — the decorators are siblings of the
+	// definition INSIDE the wrapper, so the sibling scans below would double
+	// them without the early return.
+	if parent := declNode.Parent(); parent != nil && parent.Type() == "decorated_definition" {
+		for i := 0; i < int(parent.ChildCount()); i++ {
+			if c := parent.Child(i); c != nil && c.Type() == "decorator" {
+				add(c)
 			}
-			if text != "" {
-				result.Properties = append(result.Properties, PropertyRef{
-					NodeIdx:    nodeIdx,
-					Kind:       "class_decorator",
-					Value:      text,
-					Line:       int(prev.StartPoint().Row) + 1,
-					Confidence: 1.0,
-				})
+		}
+		return occs
+	}
+
+	// Declaration children: TS/JS `decorator`, C# `attribute_list`, Java
+	// `modifiers` (annotations inside it).
+	for i := 0; i < int(declNode.ChildCount()); i++ {
+		c := declNode.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "decorator":
+			add(c)
+		case "attribute_list":
+			for j := 0; j < int(c.ChildCount()); j++ {
+				if a := c.Child(j); a != nil && a.Type() == "attribute" {
+					add(a)
+				}
 			}
-			prev = prev.PrevSibling()
-		} else {
-			break
+		case "modifiers":
+			for j := 0; j < int(c.ChildCount()); j++ {
+				if a := c.Child(j); a != nil && (a.Type() == "marker_annotation" || a.Type() == "annotation") {
+					add(a)
+				}
+			}
 		}
 	}
+
+	// Preceding siblings — decorator or annotation (older grammar layouts).
+	for prev := declNode.PrevSibling(); prev != nil; prev = prev.PrevSibling() {
+		switch prev.Type() {
+		case "decorator", "marker_annotation", "annotation", "attribute_list":
+			add(prev)
+		default:
+			return occs
+		}
+	}
+	return occs
+}
+
+// emitDecoratorFacts records each decorator/annotation applied to a
+// declaration: one `propKind` property row (the existing contract) AND one
+// `Decorator` occurrence node parented to the declaration. The occurrence
+// node carries the decorator's name as a real graph node — it is the
+// DECORATES edge's source when the decorator is external or otherwise has no
+// in-repo callable, so the edge names the decorator without inventing a
+// callable declaration. is_exported stays false: an occurrence is not a
+// declaration and must never appear in dead-code output.
+func emitDecoratorFacts(declNode *sitter.Node, sf walker.SourceFile, src []byte,
+	result *ParseResult, declIdx int, propKind string, isTest bool) {
+	for _, occ := range collectDecoratorOccurrences(declNode, src) {
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx: declIdx, Kind: propKind, Value: occ.text,
+			Line: occ.line, Confidence: 1.0,
+		})
+		idx := len(result.Nodes)
+		result.Nodes = append(result.Nodes, store.Node{
+			Label:         "Decorator",
+			Name:          occ.name,
+			QualifiedName: occ.qual,
+			FilePath:      sf.Path,
+			StartLine:     occ.line,
+			EndLine:       occ.line,
+			IsExported:    false,
+			IsTest:        isTest,
+			Language:      sf.Language,
+			ParentID:      int64(declIdx + 1),
+			ByteStart:     occ.byteStart,
+			ByteEnd:       occ.byteEnd,
+		})
+		result.Properties = append(result.Properties, PropertyRef{
+			NodeIdx: idx, Kind: PropSymbolKind, Value: specs.KindDecorator,
+			Line: occ.line, Confidence: 1.0,
+		})
+	}
+}
+
+// extractClassDecorators finds decorator nodes above the class definition.
+// Kind: class_decorator. Value: "@dataclass" or "@pytest.fixture".
+// Called from walkNode for ClassNodes.
+func extractClassDecorators(classNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int, isTest bool) {
+	emitDecoratorFacts(classNode, sf, src, result, nodeIdx, "class_decorator", isTest)
 }
 
 // extractAssertionRefs extracts assertions from test function bodies.
