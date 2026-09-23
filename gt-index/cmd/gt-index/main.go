@@ -57,6 +57,18 @@ var (
 	compiledBuildTags = "unknown"
 )
 
+// amendReDerivedEdgeTypes are the edge types a -file amend re-derives inside
+// its transaction (ResolveRelationshipsTx / ResolveAPIEdgesTx / the inbound
+// IMPORTS pass) rather than restoring from the incoming-edge snapshot.
+// IMPORTS is handled separately — it routes to the re-parse path, not this
+// skip set. Everything else listed here would otherwise be restored as a
+// weaker name_match copy beside the re-derived row (double emission).
+var amendReDerivedEdgeTypes = map[string]bool{
+	"API_CALL": true, "EXTENDS": true, "IMPLEMENTS": true, "COMPOSES": true,
+	"RE_EXPORTS": true, "HANDLES_ROUTE": true, "INJECTS": true,
+	"QUERIES": true, "MIDDLEWARE_ON": true,
+}
+
 func repoCommit(root string) string {
 	// Fast path: skip the git subprocess when the root is not a worktree. The
 	// incremental `-file` path is latency-sensitive and a spawn costs ~100ms+
@@ -283,7 +295,7 @@ func main() {
 			Schema string                            `json:"schema"`
 			Rows   []resolver.FrameworkValidationRow `json:"rows"`
 			Digest string                            `json:"validation_digest_sha256"`
-		}{Schema: "gt.framework_resolution_validation.v1", Rows: resolver.FrameworkValidationReport()}
+		}{Schema: "gt.framework_resolution_validation.v2", Rows: resolver.FrameworkValidationReport()}
 		payload.Digest = resolver.FrameworkValidationDigest(payload.Rows)
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetEscapeHTML(false)
@@ -2077,9 +2089,59 @@ func runIncremental(root, relpath, dbPath, sourceRevision string) error {
 		GraphSchemaVersion: producerIdentity.SchemaVersion, ResolutionContract: store.CallResolutionContractV2,
 		Complete: producerIdentity.Complete,
 	}
-	incomingRest, incomingUnres, err := store.ResolveIncomingEdgesTx(tx, incomingSnap, relSlash, incrIdentity)
+	// A4: IMPORTS edges into this file are RE-DERIVED, not name-restored.
+	// Sequential -file amends are order-dependent — an importer amended before
+	// this file resolved its import against the OLD graph (a FILE->FILE
+	// fallback or a symbol the edit has since renamed), and the File anchor's
+	// basename still rebinds, so a verbatim restore would freeze a resolution
+	// a clean rebuild never emits. Re-parsing each importer's current import
+	// specs and resolving against the post-reindex graph emits exactly the
+	// clean (importer -> this file) slice.
+	var importSnap []store.IncomingEdgeRef
+	restSnap := make([]store.IncomingEdgeRef, 0, len(incomingSnap))
+	for _, r := range incomingSnap {
+		if r.EdgeType == "IMPORTS" {
+			importSnap = append(importSnap, r)
+		} else if amendReDerivedEdgeTypes[r.EdgeType] {
+			// These types are re-derived by ResolveRelationshipsTx /
+			// ResolveAPIEdgesTx below (inbound covered via the scopeNodes /
+			// route-side emitScope match). A verbatim restore would mint a
+			// name_match/0.6 duplicate beside the re-derived row — the
+			// amend-only divergence the add_route fixture was added to catch.
+			continue
+		} else {
+			restSnap = append(restSnap, r)
+		}
+	}
+	incomingRest, incomingUnres, err := store.ResolveIncomingEdgesTx(tx, restSnap, relSlash, incrIdentity)
 	if err != nil {
 		return fmt.Errorf("re-resolve incoming edges: %w", err)
+	}
+	if len(importSnap) > 0 {
+		importers := make(map[string][]parser.ImportRef)
+		for _, r := range importSnap {
+			src := r.SourceFile
+			if _, done := importers[src]; done {
+				continue
+			}
+			spec2 := specs.ForExtension(filepath.Ext(src))
+			if spec2 == nil {
+				continue
+			}
+			parsed2, perr := parser.ParseFile(walker.SourceFile{
+				Path: src, AbsPath: filepath.Join(root, src),
+				Language: spec2.Name, Spec: spec2,
+			}, walker.IsTestFile(src) || walker.IsNonSourceFile(src))
+			if perr != nil || parsed2 == nil {
+				continue // importer unreadable/deleted: clean emits nothing either
+			}
+			importers[src] = parsed2.Imports
+		}
+		if n, ierr := resolver.ResolveInboundImportsTx(tx, importers, relSlash, fileMap, filteredNodes, filteredIDs); ierr != nil {
+			log.Printf("WARNING: incremental inbound IMPORTS re-derivation: %v", ierr)
+		} else {
+			incomingRest += n
+		}
 	}
 	mark("restore_incoming")
 	// Rebind the surviving callsites' resolution-v2 edges (CANDIDATE_TARGET /
@@ -2100,6 +2162,42 @@ func runIncremental(root, relpath, dbPath, sourceRevision string) error {
 	// Taxonomy edges resolve by name across files: re-derive them whole-graph.
 	if _, err := rederiveTaxonomyTx(tx); err != nil {
 		return err
+	}
+
+	// A4 slice 3: the amended file's OWN framework/API/relationship edges
+	// (HANDLES_ROUTE, MIDDLEWARE_ON, INJECTS, API_CALL, EXTENDS, IMPLEMENTS,
+	// COMPOSES, RE_EXPORTS, QUERIES, DECORATES-adjacent emissions) died with its
+	// nodes in DeleteFileEdgesAndNodesTx and were never re-emitted — a silent
+	// loss for route-bearing files that no convergence-gap row covered. Both
+	// passes re-scan the whole-graph file list (cross-file targets come from
+	// the in-tx node tables) but emit only source_file == relSlash — the amend
+	// owns exactly its own file's slice. Runs AFTER rederiveTaxonomyTx so
+	// buildImplIndexTx sees the fresh DECLARED_IMPLEMENTS rows.
+	relFiles := inhFiles
+	hasSelf := false
+	for _, sf2 := range relFiles {
+		if sf2.Path == relSlash {
+			hasSelf = true
+			break
+		}
+	}
+	if !hasSelf && !deleted {
+		relFiles = append(relFiles, walker.SourceFile{Path: relSlash, Language: spec.Name})
+	}
+	// scopeNodes: the amended file's FRESH node ids. Relationship/API edges
+	// owned by OTHER files but touching these nodes (EXTENDS targeting a
+	// reparsed class, MIDDLEWARE_ON sourcing a reparsed middleware, API_CALL
+	// targeting the File anchor) are re-derived here — the delete pass killed
+	// them and nothing else re-emits them.
+	scopeNodes := make(map[int64]bool, len(newDBIDs))
+	for _, id := range newDBIDs {
+		scopeNodes[id] = true
+	}
+	if _, relErr := resolver.ResolveRelationshipsTx(tx, relFiles, root, relSlash, scopeNodes); relErr != nil {
+		log.Printf("WARNING: incremental relationship edges: %v", relErr)
+	}
+	if _, apiErr := resolver.ResolveAPIEdgesTx(tx, relFiles, root, relSlash); apiErr != nil {
+		log.Printf("WARNING: incremental API edges: %v", apiErr)
 	}
 
 	mark("rebind_v2")

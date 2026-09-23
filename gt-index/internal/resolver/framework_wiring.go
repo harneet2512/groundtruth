@@ -38,6 +38,7 @@ package resolver
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"regexp"
@@ -193,8 +194,8 @@ type edgeEmitFunc func(sourceID, targetID int64, edgeType, sourceFile string, so
 // `inFlight` is this pass's own edge slice — its IMPLEMENTS rows are part of
 // the interface->implementation index along with already-persisted IMPLEMENTS
 // and taxonomy DECLARED_IMPLEMENTS rows.
-func resolveFrameworkWiring(
-	db *store.DB,
+func resolveFrameworkWiringTx(
+	tx *sql.Tx,
 	files []walker.SourceFile,
 	root string,
 	classIndex map[string][]classNodeEntry,
@@ -209,7 +210,7 @@ func resolveFrameworkWiring(
 		interfaceIndex: interfaceIndex,
 		funcFileIndex:  funcFileIndex,
 		fileNodeMap:    fileNodeMap,
-		classRanges:    buildClassRangeIndex(db),
+		classRanges:    buildClassRangeIndexTx(tx),
 		fileSet:        make(map[string]bool, len(files)),
 	}
 	idx.entryByID = buildEntryByID(classIndex, interfaceIndex)
@@ -219,7 +220,7 @@ func resolveFrameworkWiring(
 			ifaceIDs[e.ID] = true
 		}
 	}
-	idx.implsByIface = buildImplIndex(db, inFlight, idx.entryByID, ifaceIDs)
+	idx.implsByIface = buildImplIndexTx(tx, inFlight, idx.entryByID, ifaceIDs)
 	for _, sf := range files {
 		idx.fileSet[sf.Path] = true
 	}
@@ -682,13 +683,8 @@ func resolveDeclaredType(name, file string, classIndex, interfaceIndex map[strin
 // [start,end]) so the DI pass can find the containing class of a field/ctor
 // line. The label set matches buildRelationshipIndexes plus the richer
 // taxonomy labels (Record/Trait/Protocol).
-func buildClassRangeIndex(db *store.DB) map[string][]namedRange {
+func buildClassRangeIndexTx(tx *sql.Tx) map[string][]namedRange {
 	out := make(map[string][]namedRange)
-	tx, err := db.BeginTx()
-	if err != nil {
-		return out
-	}
-	defer tx.Rollback()
 	rows, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line,0), COALESCE(end_line,0)
 	  FROM nodes WHERE label IN ('Class','Interface','Struct','Enum','Type','Record','Trait','Protocol')`)
 	if err != nil {
@@ -727,7 +723,7 @@ func buildEntryByID(classIndex, interfaceIndex map[string][]classNodeEntry) map[
 // taxonomy DECLARED_IMPLEMENTS rows (taxonomy DeriveEdges is published before
 // pass 4c). An implementor that is itself an interface is excluded — an
 // interface is never an injectable implementation.
-func buildImplIndex(db *store.DB, inFlight []*store.Edge, entryByID map[int64]classNodeEntry, ifaceIDs map[int64]bool) map[int64][]classNodeEntry {
+func buildImplIndexTx(tx *sql.Tx, inFlight []*store.Edge, entryByID map[int64]classNodeEntry, ifaceIDs map[int64]bool) map[int64][]classNodeEntry {
 	out := make(map[int64][]classNodeEntry)
 	seen := make(map[[2]int64]bool)
 	add := func(srcID, tgtID int64) {
@@ -750,18 +746,14 @@ func buildImplIndex(db *store.DB, inFlight []*store.Edge, entryByID map[int64]cl
 			add(e.SourceID, e.TargetID)
 		}
 	}
-	if tx, err := db.BeginTx(); err == nil {
-		rows, qerr := tx.Query(`SELECT source_id, target_id FROM edges WHERE type IN ('IMPLEMENTS','DECLARED_IMPLEMENTS')`)
-		if qerr == nil {
-			for rows.Next() {
-				var s, t int64
-				if err := rows.Scan(&s, &t); err == nil {
-					add(s, t)
-				}
+	if rows, qerr := tx.Query(`SELECT source_id, target_id FROM edges WHERE type IN ('IMPLEMENTS','DECLARED_IMPLEMENTS')`); qerr == nil {
+		for rows.Next() {
+			var s, t int64
+			if err := rows.Scan(&s, &t); err == nil {
+				add(s, t)
 			}
-			rows.Close()
 		}
-		tx.Rollback()
+		rows.Close()
 	}
 	// Deterministic candidate order: content key, not DB scan order.
 	for tgt := range out {

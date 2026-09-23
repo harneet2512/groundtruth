@@ -207,8 +207,29 @@ func ResolveImportsTx(tx *sql.Tx, imports []parser.ImportRef, fileMap map[string
 		return 0, nil
 	}
 
-	// Source anchor (file -> first node id) + FILE->SYMBOL target index, built from
-	// the in-memory snapshot (no DB query — the snapshot is the post-reindex truth).
+	// Source anchor (file -> its File-label anchor node) + FILE->SYMBOL target
+	// index, built from the in-memory snapshot (no DB query — the snapshot is
+	// the post-reindex truth). A4: the anchor is the File node, same rule as
+	// buildFileNodeMapTx — first-id-wins attached file-level IMPORTS edges to
+	// an arbitrary symbol and diverged from the clean build.
+	fileNodeMap, fileSymbolIndex := buildImportIndexesInMem(allNodes, allIDs)
+	if len(fileNodeMap) == 0 {
+		return 0, nil
+	}
+	edges := emitImportEdges(imports, fileMap, fileNodeMap, fileSymbolIndex, "")
+	if len(edges) == 0 {
+		return 0, nil
+	}
+	if err := store.BatchInsertEdgesTx(tx, edges); err != nil {
+		return 0, fmt.Errorf("imports(incremental): insert edges: %w", err)
+	}
+	return len(edges), nil
+}
+
+// buildImportIndexesInMem constructs the file-anchor map (file_path -> File
+// node id) and the FILE->SYMBOL index (file_path -> name -> node id) from an
+// in-memory node snapshot. File-label nodes are never symbol targets.
+func buildImportIndexesInMem(allNodes []store.Node, allIDs []int64) (map[string]int64, map[string]map[string]int64) {
 	fileNodeMap := make(map[string]int64)
 	fileSymbolIndex := make(map[string]map[string]int64)
 	for i, n := range allNodes {
@@ -219,11 +240,10 @@ func ResolveImportsTx(tx *sql.Tx, imports []parser.ImportRef, fileMap map[string
 		if id == 0 || n.FilePath == "" {
 			continue
 		}
-		// First-id-wins file anchor (matches buildFileNodeMap's ORDER BY id LIMIT 1;
-		// allNodes is appended filtered-then-fresh, fresh ids are larger, so an
-		// existing target file keeps its smaller anchor id — deterministic).
-		if cur, ok := fileNodeMap[n.FilePath]; !ok || id < cur {
-			fileNodeMap[n.FilePath] = id
+		if n.Label == "File" {
+			if cur, ok := fileNodeMap[n.FilePath]; !ok || id < cur {
+				fileNodeMap[n.FilePath] = id
+			}
 		}
 		// FILE->SYMBOL: exclude File-label anchors from name targeting.
 		if IsCodeSymbolLabel(n.Label) && n.Name != "" {
@@ -237,10 +257,17 @@ func ResolveImportsTx(tx *sql.Tx, imports []parser.ImportRef, fileMap map[string
 			}
 		}
 	}
-	if len(fileNodeMap) == 0 {
-		return 0, nil
-	}
+	return fileNodeMap, fileSymbolIndex
+}
 
+// emitImportEdges resolves each import to its target node and builds the
+// IMPORTS edge rows, with the same trust/dedup policy as ResolveImports.
+// restrictTargetFile, when non-empty, keeps only edges whose resolved target
+// node lives in that file (used by the inbound re-derivation, which owns
+// exactly the importer->targetFile slice).
+func emitImportEdges(imports []parser.ImportRef, fileMap map[string][]string,
+	fileNodeMap map[string]int64, fileSymbolIndex map[string]map[string]int64,
+	restrictTargetFile string) []*store.Edge {
 	importIndex := buildImportIndex(imports, fileMap)
 	edges := make([]*store.Edge, 0)
 	seen := make(map[edgeKey]bool)
@@ -266,6 +293,12 @@ func ResolveImportsTx(tx *sql.Tx, imports []parser.ImportRef, fileMap map[string
 		if targetID == 0 || targetID == sourceID {
 			continue
 		}
+		if restrictTargetFile != "" {
+			targetFile := importTargetFileOf(targetID, targetFiles, fileSymbolIndex, fileNodeMap)
+			if targetFile != restrictTargetFile {
+				continue
+			}
+		}
 		key := edgeKey{sourceID: sourceID, targetID: targetID, typ: "IMPORTS"}
 		if seen[key] {
 			continue
@@ -285,12 +318,58 @@ func ResolveImportsTx(tx *sql.Tx, imports []parser.ImportRef, fileMap map[string
 			VerificationStatus: "verified",
 		})
 	}
+	return edges
+}
 
+// importTargetFileOf reports which candidate file the resolved target node
+// belongs to ("" when unresolvable — caller skips).
+func importTargetFileOf(targetID int64, targetFiles []string,
+	fileSymbolIndex map[string]map[string]int64, fileNodeMap map[string]int64) string {
+	for _, tf := range targetFiles {
+		if fileNodeMap[tf] == targetID {
+			return tf
+		}
+		if byName, ok := fileSymbolIndex[tf]; ok {
+			for _, nid := range byName {
+				if nid == targetID {
+					return tf
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// ResolveInboundImportsTx re-derives the IMPORTS edges INTO targetFile from
+// importer files that reference it, instead of restoring the pre-delete
+// snapshot verbatim. Sequential -file amends are order-dependent: an importer
+// amended BEFORE its target file resolved its imports against the old graph
+// (a FILE->FILE fallback or a stale symbol id survives the name rebind because
+// the File anchor's name still matches). Re-resolving each importer's CURRENT
+// on-disk import specs against the post-reindex graph emits exactly the edges
+// a clean rebuild would emit for the (importer -> targetFile) slice.
+// importers maps importer relSlash path -> that file's parsed ImportRefs.
+func ResolveInboundImportsTx(tx *sql.Tx, importers map[string][]parser.ImportRef,
+	targetFile string, fileMap map[string][]string,
+	allNodes []store.Node, allIDs []int64) (int, error) {
+	if len(importers) == 0 {
+		return 0, nil
+	}
+	fileNodeMap, fileSymbolIndex := buildImportIndexesInMem(allNodes, allIDs)
+	if len(fileNodeMap) == 0 {
+		return 0, nil
+	}
+	var edges []*store.Edge
+	// emitImportEdges dedups within one call — run per importer so each
+	// importer's edge set is dedup'd exactly as its own clean emit would be.
+	for _, imports := range importers {
+		edges = append(edges, emitImportEdges(imports, fileMap, fileNodeMap, fileSymbolIndex, targetFile)...)
+	}
 	if len(edges) == 0 {
 		return 0, nil
 	}
 	if err := store.BatchInsertEdgesTx(tx, edges); err != nil {
-		return 0, fmt.Errorf("imports(incremental): insert edges: %w", err)
+		return 0, fmt.Errorf("imports(incremental inbound): insert edges: %w", err)
 	}
 	return len(edges), nil
 }

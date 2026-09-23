@@ -105,10 +105,20 @@ func convergenceFixtures() []convergenceFixture {
 	tsCore := "export function helper(x: number): number {\n  return x + 1;\n}\n\nexport function logged(f: unknown): unknown {\n  return f;\n}\n\nexport function compute(a: number, b: number): number {\n  const y = helper(a);\n  return y + b;\n}\n\nexport function toDelete(z: number): number {\n  return z * 2;\n}\n\nexport class Store {\n  items: number[] = [];\n  add(item: number): number {\n    this.items.push(item);\n    return this.items.length;\n  }\n}\n"
 	tsApp := "import { helper, compute, toDelete, Store } from \"./core\";\nimport { lateBound } from \"./extra\";\n\nexport function main(): number {\n  const s = new Store();\n  s.add(1);\n  return compute(1, 2) + toDelete(3);\n}\n\nexport function other(): number {\n  lateBound();\n  return helper(5);\n}\n"
 	tsGone := "import { helper } from \"./core\";\n\nexport function legacy(): number {\n  return helper(9);\n}\n"
+	// Express-style server/client pair: covers HANDLES_ROUTE, MIDDLEWARE_ON
+	// (app.use), and API_CALL (fetch/axios path-matched to the route file).
+	// client.ts calls /api/users before server.ts declares it — the base graph
+	// has one API_CALL, the post-add_route graph two. The middleware lives in
+	// mw.ts so its MIDDLEWARE_ON edge is foreign-sourced: amending mw.ts kills
+	// the edge's source node while the edge's owner (server.ts) is untouched.
+	tsMw := "export function authMiddleware(req: any, res: any, next: any): void { next(); }\n"
+	tsServer := "import { authMiddleware } from \"./mw\";\n\nfunction listItems(req: any, res: any): void { res.json([]); }\n\nconst app = express();\napp.use(authMiddleware);\napp.get(\"/api/items\", listItems);\n"
+	tsClient := "export function load(): void {\n  fetch(\"/api/items\");\n  axios.post(\"/api/users\", {});\n}\n"
 	ts := convergenceFixture{
 		lang: "typescript", comment: "//",
 		files: map[string]string{
 			"src/core.ts": tsCore, "src/app.ts": tsApp, "src/gone.ts": tsGone,
+			"src/server.ts": tsServer, "src/client.ts": tsClient, "src/mw.ts": tsMw,
 			"src/app.test.ts": "import { main } from \"./app\";\n\ntest(\"main\", () => {\n  expect(main()).toBe(10);\n});\n",
 		},
 		edits: []convergenceEdit{
@@ -128,6 +138,19 @@ func convergenceFixtures() []convergenceFixture {
 				"src/gone.ts": "import * as core from \"./core\";\n\nexport function legacy(): number {\n  return core.helper(9);\n}\n"}},
 			{"route_decorator", map[string]string{
 				"src/core.ts": strings.Replace(tsCore, "export class Store {", "@logged\nexport class Store {", 1)}},
+			// Single-file edit: adds a route + handler to server.ts. The amend
+			// must re-emit server.ts's HANDLES_ROUTE/MIDDLEWARE_ON edges AND
+			// re-derive the inbound API_CALL edges from client.ts (whose edges
+			// die because they target server.ts's File anchor).
+			{"add_route", map[string]string{
+				"src/server.ts": strings.Replace(tsServer,
+					"app.get(\"/api/items\", listItems);",
+					"app.get(\"/api/items\", listItems);\napp.post(\"/api/users\", createUser);\n\nfunction createUser(req: any, res: any): void { res.json({}); }", 1)}},
+			// Amending the middleware's home file kills the MIDDLEWARE_ON edge's
+			// SOURCE node while the edge's owner (server.ts) is untouched — the
+			// scopeNodes re-derivation must re-emit it or it is silently lost.
+			{"modify_middleware", map[string]string{
+				"src/mw.ts": strings.Replace(tsMw, "next();", "res.setHeader('x-auth', '1'); next();", 1)}},
 		},
 	}
 

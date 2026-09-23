@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -60,7 +61,9 @@ var (
 
 var (
 	// Python: @app.route("/path") or @router.get("/path")
-	pyRouteDecoratorRe = regexp.MustCompile(`^\s*@(?:app|router|api)\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`)
+	// A4: any receiver — `@bp.route`, `@api.get`, Flask blueprints. The method
+	// whitelist (not the receiver name) is the discriminator.
+	pyRouteDecoratorRe = regexp.MustCompile(`^\s*@\w+\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`)
 	// Java: @RequestMapping("/path"), @GetMapping("/path"), etc.
 	javaRouteMappingRe = regexp.MustCompile(`@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']`)
 )
@@ -104,11 +107,42 @@ var (
 // files and inserts relationship edges (EXTENDS, IMPLEMENTS, HANDLES_ROUTE,
 // COMPOSES, RE_EXPORTS) into graph.db. Returns the number of edges created.
 func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) (int, error) {
-	// Pre-build indexes from the DB: name -> []nodeID with label filter.
-	classIndex, interfaceIndex, funcFileIndex, funcRangeIndex := buildRelationshipIndexes(db)
+	tx, err := db.BeginTx()
+	if err != nil {
+		return 0, fmt.Errorf("begin relationships tx: %w", err)
+	}
+	defer tx.Rollback()
+	n, err := resolveRelationshipsTx(tx, files, root, "", nil)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit relationship edges: %w", err)
+	}
+	return n, nil
+}
 
-	// File-path -> first node ID (for file-level anchoring of edges)
-	fileNodeMap := buildFileNodeMap(db, files)
+// ResolveRelationshipsTx is the -file amend variant: the whole pass runs
+// inside the caller's amend transaction so its index reads see the reparsed
+// file's uncommitted nodes. emitScope, when non-empty, restricts emitted edges
+// to (a) source_file == emitScope — the amend owns exactly its own file's
+// slice — and (b) edges whose source or target lands on a node in scopeNodes,
+// the amended file's FRESH node ids. (b) re-derives foreign-owned edges whose
+// endpoint died with the file (EXTENDS/COMPOSES/INJECTS targeting a reparsed
+// class, MIDDLEWARE_ON sourcing a reparsed middleware) — a verbatim snapshot
+// restore would only name-match them, and skipping them is silent loss.
+// Edges between unedited files are untouched (whole-graph re-emission would
+// duplicate them — edges has no UNIQUE constraint).
+func ResolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitScope string, scopeNodes map[int64]bool) (int, error) {
+	return resolveRelationshipsTx(tx, files, root, emitScope, scopeNodes)
+}
+
+func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitScope string, scopeNodes map[int64]bool) (int, error) {
+	// Pre-build indexes from the DB: name -> []nodeID with label filter.
+	classIndex, interfaceIndex, funcFileIndex, funcRangeIndex := buildRelationshipIndexesTx(tx)
+
+	// File-path -> File-anchor node ID (for file-level anchoring of edges)
+	fileNodeMap := buildFileNodeMapTx(tx, files)
 
 	var edges []*store.Edge
 	seen := make(map[edgeKey]bool)
@@ -122,7 +156,20 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		if sourceID == 0 || targetID == 0 || sourceID == targetID {
 			return
 		}
+		if emitScope != "" && sourceFile != emitScope &&
+			!scopeNodes[sourceID] && !scopeNodes[targetID] {
+			return // neither owned by the amended file nor touching its nodes
+		}
+		// A4: route/middleware/DI edges carry a metadata fact (route, method,
+		// mechanism). Anchored at the shared File node, a bare
+		// (source,target,type) key collapses distinct registrations — one
+		// handler serving /a and /b kept only /a. Metadata-bearing edges dedup
+		// on the fact identity (type|line|metadata); metadata-free edges keep
+		// the historical (source,target,type) identity.
 		key := edgeKey{sourceID: sourceID, targetID: targetID, typ: edgeType}
+		if metadata != "" {
+			key.typ = fmt.Sprintf("%s|%d|%s", edgeType, sourceLine, metadata)
+		}
 		if seen[key] {
 			return
 		}
@@ -177,8 +224,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for long lines
 		lineNum := 0
-		pendingRoutePath := "" // route path from decorator, waiting for the next def
-		pendingRouteLine := 0  // line of the route decorator
+		var pendingRoutes []routeBinding // stacked route decorators all bind the next def
 		// Non-Python decorator/annotation-shaped route fact (NestJS @Get, TS
 		// @app.get, Java @*Mapping) waiting to bind the NEXT method/function
 		// declaration — the analogue of pendingRoutePath for languages whose
@@ -220,14 +266,15 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					}
 				}
 
-				// P2: Python route decorators
+				// P2: Python route decorators. Stacked decorators all bind the next
+				// def — a single-slot pending lost every route but the last.
 				if m := pyRouteDecoratorRe.FindStringSubmatch(line); m != nil {
-					pendingRoutePath = m[2]
-					pendingRouteLine = lineNum
+					pendingRoutes = append(pendingRoutes, routeBinding{
+						Path: m[2], Method: extractMethod(m[1]),
+						Mechanism: "decorator_route", Line: lineNum})
 				}
-				if pendingRoutePath != "" && strings.Contains(line, "def ") {
-					// The function defined after the decorator handles the route.
-					// Find the function name and create a HANDLES_ROUTE edge.
+				if len(pendingRoutes) > 0 && strings.Contains(line, "def ") {
+					// The function defined after the decorators handles the routes.
 					defIdx := strings.Index(line, "def ")
 					if defIdx >= 0 {
 						rest := line[defIdx+4:]
@@ -236,17 +283,21 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 							funcName := strings.TrimSpace(rest[:parenIdx])
 							if funcs := funcFileIndex[sf.Path]; funcs != nil {
 								if funcID, ok := funcs[funcName]; ok {
-									// Use file's first node as a pseudo "route" target
+									// Target the file anchor; the route fact rides
+									// in metadata so route_map reads edge_metadata
+									// instead of re-parsing the source line.
 									fileID := fileNodeMap[sf.Path]
 									if fileID != 0 {
-										addEdge(funcID, fileID, "HANDLES_ROUTE", sf.Path, pendingRouteLine, "decorator_route", 0.95)
+										for _, rb := range pendingRoutes {
+											addEdgeMeta(funcID, fileID, "HANDLES_ROUTE", sf.Path, rb.Line,
+												"decorator_route", 0.95, routeEdgeMetadata(rb, sf.Language))
+										}
 									}
 								}
 							}
 						}
 					}
-					pendingRoutePath = ""
-					pendingRouteLine = 0
+					pendingRoutes = nil
 				}
 
 			case "javascript", "typescript":
@@ -702,7 +753,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 	// CHA: Go structural method-set satisfaction. Emit IMPLEMENTS edges from each
 	// struct whose method set covers an interface's required method set. Runs once
 	// over the collected interfaces + the struct method sets read from the DB.
-	resolveGoImplements(db, goInterfaces, classIndex, interfaceIndex, addEdge)
+	resolveGoImplementsTx(tx, goInterfaces, classIndex, interfaceIndex, addEdge)
 
 	// HAR-90 item 3: framework wiring — middleware registration (MIDDLEWARE_ON)
 	// and dependency-injection binding (INJECTS). Runs as its own scan AFTER the
@@ -710,14 +761,14 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 	// through the IMPLEMENTS edges emitted above plus the taxonomy
 	// DECLARED_IMPLEMENTS rows already persisted. `edges` is passed by value for
 	// the impl-index build; new edges still append through addEdgeCounted.
-	resolveFrameworkWiring(db, files, root, classIndex, interfaceIndex,
+	resolveFrameworkWiringTx(tx, files, root, classIndex, interfaceIndex,
 		funcFileIndex, fileNodeMap, edges, addEdgeCounted)
 
 	if len(edges) == 0 {
 		return 0, nil
 	}
 
-	if err := db.BatchInsertEdges(edges); err != nil {
+	if err := store.BatchInsertEdgesTx(tx, edges); err != nil {
 		return 0, fmt.Errorf("insert relationship edges: %w", err)
 	}
 
@@ -898,8 +949,8 @@ func parseGoStructMethodSig(sig string) (goMethodSig, bool) {
 // Class/Struct node by the parser). Interface method sets come from the source scan.
 // Non-empty interfaces only (the empty interface is satisfied by everything and is
 // not a useful edge). Embedded interfaces are expanded transitively.
-func resolveGoImplements(
-	db *store.DB,
+func resolveGoImplementsTx(
+	tx *sql.Tx,
 	interfaces []goInterfaceDecl,
 	classIndex map[string][]classNodeEntry,
 	interfaceIndex map[string][]classNodeEntry,
@@ -910,7 +961,7 @@ func resolveGoImplements(
 	}
 
 	// structMethods: structNodeID -> its method fingerprints + the struct's file.
-	structMethods := buildGoStructMethodSets(db)
+	structMethods := buildGoStructMethodSetsTx(tx)
 	if len(structMethods) == 0 {
 		return
 	}
@@ -1011,14 +1062,8 @@ type goStructMethodSet struct {
 // node). The join pulls the STRUCT's file/start_line so emitted edges anchor on
 // the struct's file (#1e), and the method's stored signature so arity +
 // result-presence can be verified (#1a).
-func buildGoStructMethodSets(db *store.DB) map[int64]goStructMethodSet {
+func buildGoStructMethodSetsTx(tx *sql.Tx) map[int64]goStructMethodSet {
 	out := make(map[int64]goStructMethodSet)
-
-	tx, err := db.BeginTx()
-	if err != nil {
-		return out
-	}
-	defer tx.Rollback()
 
 	// All Go method nodes with a non-zero parent (the parent is the struct).
 	rows, err := tx.Query(`SELECT m.parent_id, m.name, COALESCE(m.signature, ''),
@@ -1100,9 +1145,10 @@ func expandGoInterfaceMethods(decl *goInterfaceDecl, byName map[string][]*goInte
 	return set, true
 }
 
-// buildRelationshipIndexes queries graph.db for Class/Interface/Function nodes
-// and returns lookup maps for the relationship extractor.
-func buildRelationshipIndexes(db *store.DB) (
+// buildRelationshipIndexesTx queries graph.db for Class/Interface/Function
+// nodes and returns lookup maps for the relationship extractor. The tx form
+// lets the -file amend see its own uncommitted node inserts.
+func buildRelationshipIndexesTx(tx *sql.Tx) (
 	classIndex map[string][]classNodeEntry,
 	interfaceIndex map[string][]classNodeEntry,
 	funcFileIndex map[string]map[string]int64,
@@ -1112,12 +1158,6 @@ func buildRelationshipIndexes(db *store.DB) (
 	interfaceIndex = make(map[string][]classNodeEntry)
 	funcFileIndex = make(map[string]map[string]int64) // file -> funcName -> nodeID
 	funcRangeIndex = make(map[string][]funcRange)     // file -> []{id,start,end}
-
-	tx, err := db.BeginTx()
-	if err != nil {
-		return
-	}
-	defer tx.Rollback()
 
 	// Class/Struct nodes — start_line rides along so same-name picks can be made
 	// on the CONTENT key (file_path, start_line, id), not the AUTOINCREMENT id
