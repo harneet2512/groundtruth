@@ -388,10 +388,54 @@ def test_route_map_populates_middleware_from_middleware_on_edges(gt_index, tmp_p
 # ---------------------------------------------------------------------------
 
 
+_TAINT_REPO = dict(
+    _XLANG_REPO,
+    **{
+        # Same-family candidate: ``fetch`` defined in JS, so the W1+ producer
+        # still mints the low-confidence name_match edge this test excludes.
+        "js/c.js": """\
+function helper() {
+  return 1;
+}
+
+function fetch(url) {
+  return null;
+}
+
+function useIt() {
+  return helper();
+}
+
+module.exports = { helper, fetch, useIt };
+""",
+    },
+)
+
+
 def test_taint_does_not_follow_low_confidence_name_match(gt_index, tmp_path):
-    """``fetch('/orders')`` in JS resolves by name_match (0.2) to a Python
-    function named fetch; taint must not traverse it unless asked."""
-    root, db = _graph(gt_index, tmp_path, _XLANG_REPO)
+    """``fetch('/orders')`` in JS resolves by name_match (0.2) to the JS
+    ``fetch`` in js/c.js; taint must not traverse it unless asked.
+
+    W1 language-family scoping means the Python ``fetch`` in pkg/a.py is never
+    even minted as a candidate — the exclusion is exercised on the remaining
+    same-family (JS->JS) name_match edge. Assert both contracts: the
+    cross-family edge is absent from the graph entirely, and the surviving
+    low-confidence edge is still excluded from taint traversal."""
+    root, db = _graph(gt_index, tmp_path, _TAINT_REPO)
+    # Producer contract: no CALLS edge may point at the Python fetch from JS.
+    import sqlite3 as _sql
+
+    conn = _sql.connect(str(db))
+    cross_lang = conn.execute(
+        "SELECT COUNT(*) FROM edges e"
+        " JOIN nodes t ON t.id = e.target_id"
+        " JOIN nodes s ON s.id = e.source_id"
+        " WHERE e.type='CALLS' AND t.name='fetch' AND t.file_path='pkg/a.py'"
+        "   AND s.file_path LIKE 'web/%'"
+    ).fetchone()[0]
+    conn.close()
+    assert cross_lang == 0, "W1 regression: cross-family name_match minted"
+
     artifact, answer = _run(root, db, ActionKind.TAINT, {"source": "loadOrders", "sink": "fetch"})
     assert answer["paths_found"] == 0
     assert "name_match_edges_excluded" in artifact.omissions
