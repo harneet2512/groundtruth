@@ -295,7 +295,7 @@ func main() {
 			Schema string                            `json:"schema"`
 			Rows   []resolver.FrameworkValidationRow `json:"rows"`
 			Digest string                            `json:"validation_digest_sha256"`
-		}{Schema: "gt.framework_resolution_validation.v1", Rows: resolver.FrameworkValidationReport()}
+		}{Schema: "gt.framework_resolution_validation.v2", Rows: resolver.FrameworkValidationReport()}
 		payload.Digest = resolver.FrameworkValidationDigest(payload.Rows)
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetEscapeHTML(false)

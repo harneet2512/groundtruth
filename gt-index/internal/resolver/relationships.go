@@ -61,7 +61,9 @@ var (
 
 var (
 	// Python: @app.route("/path") or @router.get("/path")
-	pyRouteDecoratorRe = regexp.MustCompile(`^\s*@(?:app|router|api)\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`)
+	// A4: any receiver — `@bp.route`, `@api.get`, Flask blueprints. The method
+	// whitelist (not the receiver name) is the discriminator.
+	pyRouteDecoratorRe = regexp.MustCompile(`^\s*@\w+\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`)
 	// Java: @RequestMapping("/path"), @GetMapping("/path"), etc.
 	javaRouteMappingRe = regexp.MustCompile(`@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']`)
 )

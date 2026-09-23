@@ -55,15 +55,16 @@ type FrameworkFact struct {
 	Method    string
 }
 
-// FrameworkValidationRow is the deterministic, provider-free evidence row
-// consumed by the HAR-70 validation receipt.  The before count is deliberately
-// the framework-specific baseline (no overlay facts), while after counts are
-// produced by the same extractor used by ResolveAPIEdges.
+// FrameworkValidationRow is one manifest-language self-check row: the frozen
+// fixture line, the fact mechanisms the CURRENT extractor emits for it, and
+// the RED test that witnessed the row. A4 item 6: this is a regex self-check
+// report — the earlier draft carried a hard-coded certified_pairs_before=0
+// that fabricated a baseline nobody measured, so the field is gone and the
+// schema is v2.
 type FrameworkValidationRow struct {
 	Language               string   `json:"language"`
 	Framework              string   `json:"framework"`
-	CertifiedPairsBefore   int      `json:"certified_pairs_before"`
-	CertifiedPairsAfter    int      `json:"certified_pairs_after"`
+	FactsDetected          int      `json:"facts_detected"`
 	REDWitness             string   `json:"red_witness"`
 	ObservedFactMechanisms []string `json:"observed_fact_mechanisms"`
 }
@@ -97,12 +98,12 @@ var frameworkRoutePatterns = []struct {
 	framework string
 	mechanism string
 }{
-	{regexp.MustCompile(`^\s*@(?:app|router)\.(?:get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`), "Python", "FastAPI/Flask", "route_decorator"},
+	{regexp.MustCompile(`^\s*@\w+\.(?:get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`), "Python", "FastAPI/Flask", "route_decorator"},
 	{regexp.MustCompile(`\b(?:path|re_path)\s*\(\s*["']([^"']+)["']`), "Python", "Django", "route_registration"},
-	{regexp.MustCompile(`^\s*@(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`), "TypeScript", "Express", "route_registration"},
+	{regexp.MustCompile(`^\s*@\w+\.(?:get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`), "TypeScript", "Express", "route_registration"},
 	{regexp.MustCompile(`^\s*@(Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*["']([^"']+)["']`), "TypeScript", "NestJS", "route_registration"},
 	{regexp.MustCompile(`^\s*export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b`), "TypeScript", "Next.js", "app_router_handler"},
-	{regexp.MustCompile(`^\s*(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']`), "JavaScript", "Express", "route_registration"},
+	{regexp.MustCompile(`^\s*\w+\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']\s*,`), "JavaScript", "Express", "route_registration"},
 	{regexp.MustCompile(`^\s*@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\s*\(\s*["']([^"']+)["']`), "Java", "Spring", "request_mapping"},
 	{regexp.MustCompile(`^\s*[\w.]+\.(GET|POST|PUT|PATCH|DELETE)\s*\(\s*["']([^"']+)["']`), "Go", "gin/echo", "route_registration"},
 }
@@ -196,7 +197,7 @@ func FrameworkValidationReport() []FrameworkValidationRow {
 		}
 		rows = append(rows, FrameworkValidationRow{
 			Language: fixture.language, Framework: fixture.framework,
-			CertifiedPairsBefore: 0, CertifiedPairsAfter: len(mechanisms),
+			FactsDetected: len(mechanisms),
 			REDWitness: fixture.witness, ObservedFactMechanisms: mechanisms,
 		})
 	}
@@ -231,12 +232,16 @@ type ClientCall struct {
 // compiled expressions are named package vars so the HANDLES_ROUTE binding
 // pass in relationships.go shares them rather than duplicating the regexes.
 var (
-	// Python: @app.route("/path") or @router.get("/path")
-	pyRouteDecoratorPat = regexp.MustCompile(`^\s*@(?:app|router)\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`)
+	// Python: @<receiver>.route("/path") or @<receiver>.get("/path") — any
+	// receiver (app/router/bp/api/blueprint objects); the method whitelist is
+	// the discriminator, not the receiver name.
+	pyRouteDecoratorPat = regexp.MustCompile(`^\s*@\w+\.(get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`)
 	// Go: r.HandleFunc("/path", ...) or mux.Handle("/path", ...)
 	goHandleRoutePat = regexp.MustCompile(`^\s*[\w.]+\.(HandleFunc|Handle)\s*\(\s*["']([^"']+)["']`)
-	// JS/TS: app.get("/path", ...) or router.post("/path", ...)
-	jsAppRoutePat = regexp.MustCompile(`^\s*(?:app|router)\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`)
+	// JS/TS: <receiver>.get("/path", handler) — any receiver. The trailing
+	// comma (handler argument) is required: `map.get("/key")` is a lookup,
+	// not a route registration.
+	jsAppRoutePat = regexp.MustCompile(`^\s*\w+\.(get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']\s*,`)
 )
 
 var routePatterns = []*regexp.Regexp{
@@ -416,8 +421,15 @@ func resolveAPIEdgesTx(tx *sql.Tx, files []walker.SourceFile, root, emitScope st
 
 			// Framework adapters run beside the legacy route patterns.  They are
 			// producer-owned facts and carry language/framework/mechanism identity.
+			// A4: filter by the FILE's language — a widened receiver pattern can
+			// match a decorator-shaped line in the wrong language (`@api.get` is
+			// a valid shape in both Python and TS families); the fact's language
+			// tag must agree with the file it was scanned from.
 			for _, frameworkRoute := range ExtractFrameworkRoutes(line) {
 				if frameworkRoute.Path == "/" && frameworkRoute.Mechanism != "app_router_handler" {
+					continue
+				}
+				if !frameworkFactInFileLang(frameworkRoute.Language, frameworkRoute.Mechanism, sf.Language) {
 					continue
 				}
 				routes = append(routes, RouteDefinition{
@@ -491,10 +503,20 @@ func resolveAPIEdgesTx(tx *sql.Tx, files []walker.SourceFile, root, emitScope st
 	dedupedRoutes := make([]RouteDefinition, 0, len(routes))
 	routeSeen := make(map[string]int)
 	for _, route := range routes {
-		key := fmt.Sprintf("%s|%s|%d|%s", route.File, route.Path, route.Line, route.Method)
+		// A4: one source line is one route fact. Adapters and legacy patterns
+		// disagree on Method capture (the decorator alternation is
+		// non-capturing), so the key is (file, path, line) and the surviving
+		// def borrows a missing Method from the collapsed one.
+		key := fmt.Sprintf("%s|%s|%d", route.File, route.Path, route.Line)
 		if index, ok := routeSeen[key]; ok {
-			if dedupedRoutes[index].Framework == "" && route.Framework != "" {
+			existing := &dedupedRoutes[index]
+			if existing.Framework == "" && route.Framework != "" {
+				if route.Method == "" {
+					route.Method = existing.Method
+				}
 				dedupedRoutes[index] = route
+			} else if existing.Method == "" {
+				existing.Method = route.Method
 			}
 			continue
 		}
