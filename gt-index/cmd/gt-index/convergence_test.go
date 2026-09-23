@@ -40,7 +40,7 @@ type convergenceFixture struct {
 }
 
 func convergenceFixtures() []convergenceFixture {
-	pyCore := "def helper(x):\n    return x + 1\n\n\ndef compute(a, b):\n    y = helper(a)\n    return y + b\n\n\ndef to_delete(z):\n    return z * 2\n\n\nclass Store:\n    def __init__(self):\n        self.items = []\n\n    def add(self, item):\n        self.items.append(item)\n        return len(self.items)\n"
+	pyCore := "def helper(x):\n    return x + 1\n\n\ndef logged(f):\n    return f\n\n\ndef compute(a, b):\n    y = helper(a)\n    return y + b\n\n\ndef to_delete(z):\n    return z * 2\n\n\nclass Store:\n    def __init__(self):\n        self.items = []\n\n    def add(self, item):\n        self.items.append(item)\n        return len(self.items)\n"
 	pyApp := "from core import helper, compute, to_delete, Store\n\n\ndef main():\n    s = Store()\n    s.add(1)\n    return compute(1, 2) + to_delete(3)\n\n\ndef other():\n    late_bound()\n    return helper(5)\n"
 	pyGone := "from core import helper\n\n\ndef legacy():\n    return helper(9)\n"
 	py := convergenceFixture{
@@ -60,6 +60,12 @@ func convergenceFixtures() []convergenceFixture {
 			{"rename_across", map[string]string{
 				"core.py": strings.Replace(pyCore, "def compute(a, b):", "def compute_total(a, b):", 1),
 				"app.py":  strings.NewReplacer("helper, compute, to_delete", "helper, compute_total, to_delete", "return compute(1, 2)", "return compute_total(1, 2)").Replace(pyApp)}},
+			{"modify_callee_body", map[string]string{
+				"core.py": strings.Replace(pyCore, "def helper(x):\n    return x + 1", "def helper(x):\n    return (x + 1) * 2", 1)}},
+			{"change_import", map[string]string{
+				"gone.py": "import core\n\n\ndef legacy():\n    return core.helper(9)\n"}},
+			{"route_decorator", map[string]string{
+				"core.py": strings.Replace(pyCore, "class Store:", "@logged\nclass Store:", 1)}},
 		},
 	}
 
@@ -83,10 +89,20 @@ func convergenceFixtures() []convergenceFixture {
 			{"rename_across", map[string]string{
 				"core/core.go": strings.Replace(goCore, "func Compute(a, b int) int {", "func ComputeTotal(a, b int) int {", 1),
 				"app/app.go":   strings.Replace(goApp, "core.Compute(1, 2)", "core.ComputeTotal(1, 2)", 1)}},
+			{"modify_callee_body", map[string]string{
+				"core/core.go": strings.Replace(goCore, "func Helper(x int) int {\n\treturn x + 1\n}", "func Helper(x int) int {\n\treturn (x + 1) * 2\n}", 1)}},
+			{"change_import", map[string]string{
+				"app/app.go": strings.NewReplacer(
+					"import \"fx/core\"", "import c \"fx/core\"",
+					"core.Store", "c.Store",
+					"core.Compute", "c.Compute",
+					"core.ToDelete", "c.ToDelete",
+					"core.Helper", "c.Helper").Replace(goApp)}},
+			// Go has no decorator/annotation construct: no route_decorator edit.
 		},
 	}
 
-	tsCore := "export function helper(x: number): number {\n  return x + 1;\n}\n\nexport function compute(a: number, b: number): number {\n  const y = helper(a);\n  return y + b;\n}\n\nexport function toDelete(z: number): number {\n  return z * 2;\n}\n\nexport class Store {\n  items: number[] = [];\n  add(item: number): number {\n    this.items.push(item);\n    return this.items.length;\n  }\n}\n"
+	tsCore := "export function helper(x: number): number {\n  return x + 1;\n}\n\nexport function logged(f: unknown): unknown {\n  return f;\n}\n\nexport function compute(a: number, b: number): number {\n  const y = helper(a);\n  return y + b;\n}\n\nexport function toDelete(z: number): number {\n  return z * 2;\n}\n\nexport class Store {\n  items: number[] = [];\n  add(item: number): number {\n    this.items.push(item);\n    return this.items.length;\n  }\n}\n"
 	tsApp := "import { helper, compute, toDelete, Store } from \"./core\";\nimport { lateBound } from \"./extra\";\n\nexport function main(): number {\n  const s = new Store();\n  s.add(1);\n  return compute(1, 2) + toDelete(3);\n}\n\nexport function other(): number {\n  lateBound();\n  return helper(5);\n}\n"
 	tsGone := "import { helper } from \"./core\";\n\nexport function legacy(): number {\n  return helper(9);\n}\n"
 	ts := convergenceFixture{
@@ -106,9 +122,54 @@ func convergenceFixtures() []convergenceFixture {
 			{"rename_across", map[string]string{
 				"src/core.ts": strings.Replace(tsCore, "export function compute(", "export function computeTotal(", 1),
 				"src/app.ts":  strings.NewReplacer("helper, compute, toDelete", "helper, computeTotal, toDelete", "return compute(1, 2)", "return computeTotal(1, 2)").Replace(tsApp)}},
+			{"modify_callee_body", map[string]string{
+				"src/core.ts": strings.Replace(tsCore, "export function helper(x: number): number {\n  return x + 1;\n}", "export function helper(x: number): number {\n  return (x + 1) * 2;\n}", 1)}},
+			{"change_import", map[string]string{
+				"src/gone.ts": "import * as core from \"./core\";\n\nexport function legacy(): number {\n  return core.helper(9);\n}\n"}},
+			{"route_decorator", map[string]string{
+				"src/core.ts": strings.Replace(tsCore, "export class Store {", "@logged\nexport class Store {", 1)}},
 		},
 	}
-	return []convergenceFixture{py, gof, ts}
+
+	javaCore := "package core;\n\npublic class Core {\n    public static int helper(int x) {\n        return x + 1;\n    }\n\n    public static int compute(int a, int b) {\n        int y = helper(a);\n        return y + b;\n    }\n\n    public static int toDelete(int z) {\n        return z * 2;\n    }\n}\n"
+	javaStore := "package core;\n\npublic class Store {\n    private int items;\n\n    public int add(int item) {\n        items += item;\n        return items;\n    }\n}\n"
+	javaLogged := "package core;\n\npublic @interface Logged {\n}\n"
+	javaApp := "package app;\n\nimport core.Core;\nimport core.Store;\n\npublic class App {\n    public static int main2() {\n        Store s = new Store();\n        s.add(1);\n        return Core.compute(1, 2) + Core.toDelete(3);\n    }\n\n    public static int other() {\n        lateBound();\n        return Core.helper(5);\n    }\n}\n"
+	javaGone := "package gone;\n\nimport core.Core;\n\npublic class Legacy {\n    public static int legacy() {\n        return Core.helper(9);\n    }\n}\n"
+	java := convergenceFixture{
+		lang: "java", comment: "//",
+		files: map[string]string{
+			"core/Core.java": javaCore, "core/Store.java": javaStore, "core/Logged.java": javaLogged,
+			"app/App.java": javaApp, "gone/Legacy.java": javaGone,
+			"app/AppTest.java": "package app;\n\npublic class AppTest {\n    public static void testMain() {\n        if (App.main2() != 10) {\n            throw new AssertionError(\"main\");\n        }\n    }\n}\n",
+		},
+		edits: []convergenceEdit{
+			{"rename_callee", map[string]string{"core/Core.java": strings.NewReplacer(
+				"public static int helper(int x) {\n        return x + 1;\n    }",
+				"public static int helperV2(int x, int scale) {\n        return x * scale;\n    }",
+				"int y = helper(a);", "int y = helperV2(a, 1);").Replace(javaCore)}},
+			{"move_call", map[string]string{
+				"app/App.java":     strings.Replace(javaApp, "return Core.compute(1, 2) + Core.toDelete(3);", "return Core.toDelete(3);", 1),
+				"gone/Legacy.java": strings.Replace(javaGone, "return Core.helper(9);", "return Core.helper(9) + Core.compute(1, 2);", 1)}},
+			{"delete_function", map[string]string{"core/Core.java": strings.Replace(javaCore, "\n    public static int toDelete(int z) {\n        return z * 2;\n    }\n", "", 1)}},
+			{"add_file", map[string]string{"app/Extra.java": "package app;\n\nimport core.Core;\n\npublic class Extra {\n    public static int lateBound() {\n        return Core.compute(0, 0);\n    }\n}\n"}},
+			{"delete_file", map[string]string{"gone/Legacy.java": ""}},
+			{"rename_across", map[string]string{
+				"core/Core.java": strings.Replace(javaCore, "public static int compute(", "public static int computeTotal(", 1),
+				"app/App.java":   strings.Replace(javaApp, "Core.compute(1, 2)", "Core.computeTotal(1, 2)", 1)}},
+			{"modify_callee_body", map[string]string{
+				"core/Core.java": strings.Replace(javaCore, "return x + 1;", "return (x + 1) * 2;", 1)}},
+			{"change_import", map[string]string{
+				"gone/Legacy.java": strings.NewReplacer(
+					"import core.Core;", "import core.Core;\nimport core.Store;",
+					"return Core.helper(9);", "return Core.helper(9) + new Store().add(1);").Replace(javaGone)}},
+			{"route_decorator", map[string]string{
+				"app/App.java": strings.NewReplacer(
+					"import core.Store;", "import core.Store;\nimport core.Logged;",
+					"public class App {", "@Logged\npublic class App {").Replace(javaApp)}},
+		},
+	}
+	return []convergenceFixture{py, gof, ts, java}
 }
 
 const convergenceCommits = 3
