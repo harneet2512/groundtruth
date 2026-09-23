@@ -74,16 +74,16 @@ func TestVTAInterproceduralProofEdgesAreTargetKeyed(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing proof for candidate %d: %+v", target.id, proofs)
 		}
-		receiverEdge := vtaReceiverToThisStableID(call, "runner", target.id, target.recv)
-		argumentEdge := vtaArgumentToFormalStableID(call, "arg", 0, target.id, &target.formal)
+		receiverEdge := vtaReceiverToThisStableID(call, "runner", vtaTargetIdentity(meta, target.id), target.recv)
+		argumentEdge := vtaArgumentToFormalStableID(call, "arg", 0, vtaTargetIdentity(meta, target.id), &target.formal)
 		if !containsVTAString(proof.EdgeStableIDs, receiverEdge) {
 			t.Errorf("candidate %d proof lacks receiver-to-this edge %q: %+v", target.id, receiverEdge, proof.EdgeStableIDs)
 		}
 		if !containsVTAString(proof.EdgeStableIDs, argumentEdge) {
-			t.Errorf("candidate %d proof lacks argument-to-formal edge %q (candidate 4=%q candidate 5=%q receivers=%q/%q): %+v", target.id, argumentEdge, vtaArgumentToFormalStableID(call, "arg", 0, 4, &assignments[3]), vtaArgumentToFormalStableID(call, "arg", 0, 5, &assignments[4]), vtaReceiverToThisStableID(call, "runner", 4, "rA"), vtaReceiverToThisStableID(call, "runner", 5, "rB"), proof.EdgeStableIDs)
+			t.Errorf("candidate %d proof lacks argument-to-formal edge %q (candidate 4=%q candidate 5=%q receivers=%q/%q): %+v", target.id, argumentEdge, vtaArgumentToFormalStableID(call, "arg", 0, vtaTargetIdentity(meta, 4), &assignments[3]), vtaArgumentToFormalStableID(call, "arg", 0, vtaTargetIdentity(meta, 5), &assignments[4]), vtaReceiverToThisStableID(call, "runner", vtaTargetIdentity(meta, 4), "rA"), vtaReceiverToThisStableID(call, "runner", vtaTargetIdentity(meta, 5), "rB"), proof.EdgeStableIDs)
 		}
 	}
-	if containsVTAString(proofs[4].EdgeStableIDs, vtaReceiverToThisStableID(call, "runner", 5, "rB")) || containsVTAString(proofs[5].EdgeStableIDs, vtaReceiverToThisStableID(call, "runner", 4, "rA")) {
+	if containsVTAString(proofs[4].EdgeStableIDs, vtaReceiverToThisStableID(call, "runner", vtaTargetIdentity(meta, 5), "rB")) || containsVTAString(proofs[5].EdgeStableIDs, vtaReceiverToThisStableID(call, "runner", vtaTargetIdentity(meta, 4), "rA")) {
 		t.Fatalf("receiver proof edge leaked across candidates: A=%v B=%v", proofs[4].EdgeStableIDs, proofs[5].EdgeStableIDs)
 	}
 }
@@ -115,11 +115,11 @@ func TestVTAReturnToResultAndBodyConvergenceAreCandidateBound(t *testing.T) {
 	}
 	proof := results[0].FlowProofs[0]
 	returnEdge := vtaStableFactID("edge", "return_to_result", resultAssignment.File, resultAssignment.Scope,
-		resultAssignment.VarName, resultAssignment.TypeName, "8", "4")
+		resultAssignment.VarName, resultAssignment.TypeName, "8", vtaTargetIdentity(meta, 4))
 	if !containsVTAString(proof.EdgeStableIDs, returnEdge) {
 		t.Fatalf("candidate proof lacks return-to-result edge %q: %+v", returnEdge, proof.EdgeStableIDs)
 	}
-	bodyEdge := vtaStableFactID("edge", "body_convergence", call.File, call.CallerScope, "20", "Run", "4")
+	bodyEdge := vtaStableFactID("edge", "body_convergence", call.File, call.CallerScope, "20", "Run", vtaTargetIdentity(meta, 4))
 	if !containsVTAString(proof.EdgeStableIDs, bodyEdge) {
 		t.Fatalf("closed candidate proof lacks body-convergence edge %q: %+v", bodyEdge, proof.EdgeStableIDs)
 	}

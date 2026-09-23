@@ -264,7 +264,11 @@ func main() {
 	buildInfo := flag.Bool("build-info", false, "Print the gt-index.build.v1 binary identity JSON and exit")
 	frameworkValidation := flag.Bool("framework-validation", false, "Print the HAR-70 framework overlay validation report and exit")
 	inspectJSONL := flag.Bool("inspect-jsonl", false, "Parse caller-supplied source bytes as pure JSONL without graph mutation")
+	sourceRevision := flag.String("source-revision", "", "Workspace revision the graph describes; written to project_meta.source_revision on full, -amend-parent and -file builds (absent when not given). Distinct from git_commit, the producer build commit.")
 	flag.Parse()
+	if err := validateSourceRevision(*sourceRevision); err != nil {
+		log.Fatalf("source-revision: %v", err)
+	}
 	if *amendParent != "" && (*file != "" || *rebuildClosure) {
 		log.Fatal("amend-parent cannot be combined with file or rebuild-closure")
 	}
@@ -302,7 +306,7 @@ func main() {
 	// Incremental single-file mode: file-keyed delete-and-replace against an
 	// existing graph.db. Does not rebuild from scratch; expects -output to exist.
 	if *file != "" {
-		if err := runIncremental(*root, *file, *output); err != nil {
+		if err := runIncremental(*root, *file, *output, *sourceRevision); err != nil {
 			log.Fatalf("incremental: %v", err)
 		}
 		return
@@ -669,27 +673,13 @@ func main() {
 		allNodes[i] = *np
 	}
 	nameIndex, fileIndex := resolver.BuildNameIndex(db, allNodes, nodeDBIDs)
-	fileMap := resolver.BuildFileMap(filePaths, fileLangs)
-
-	// Register Go module-prefixed paths for import resolution
-	if goModPath := resolver.FindGoModulePath(*root); goModPath != "" {
-		resolver.RegisterGoModulePaths(fileMap, goModPath)
+	fileMap, goModPath, tsCfg := buildResolverFileMap(*root, filePaths, fileLangs)
+	if goModPath != "" {
 		fmt.Fprintf(os.Stderr, "  Go module: %s\n", goModPath)
 	}
-
-	// Register TypeScript tsconfig.json path aliases
-	if tsCfg := resolver.ParseTSConfig(*root); tsCfg != nil {
-		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
+	if tsCfg != nil {
 		fmt.Fprintf(os.Stderr, "  TS config: baseUrl=%s, %d path aliases\n", tsCfg.BaseURL, len(tsCfg.Paths))
 	}
-	resolver.RegisterJSPackagePaths(fileMap, *root)
-
-	// Register Go package names as fileMap aliases + vendor paths
-	resolver.RegisterGoPackageNames(fileMap, filePaths, fileLangs)
-	resolver.RegisterGoVendorPaths(fileMap)
-
-	// Register Rust crate names from Cargo.toml
-	resolver.RegisterRustCratePaths(fileMap, *root)
 
 	// Rust: build module tree from mod declarations (mod foo;) and register
 	// module paths in fileMap. This bridges the gap between filesystem paths
@@ -1285,6 +1275,15 @@ func main() {
 	requiredMetadata["build_time_utc"] = buildTimeUTC
 	requiredMetadata["go_toolchain"] = goToolchain
 	requiredMetadata["workers"] = fmt.Sprintf("%d", *workers)
+	// A full build and a batch amend run the whole pipeline: clean-equivalent.
+	requiredMetadata[metaGraphConvergence] = convergenceCleanEquivalent
+	requiredMetadata[metaGraphConvergenceGaps] = ""
+	// The indexed workspace revision, when the caller names one. A batch amend
+	// starts from a cleared project_meta (ReplaceParsedStructure), so without
+	// the flag the parent's value cannot survive into the amended graph.
+	if *sourceRevision != "" {
+		requiredMetadata[store.SourceRevisionKey] = *sourceRevision
+	}
 
 	// RC-04: per-repo MIN_CONFIDENCE — write the median (P50) of resolved edge
 	// confidences so downstream readers can stop hardcoding 0.7. Writing to
@@ -1524,7 +1523,7 @@ func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) str
 //  9. INSERT OR REPLACE INTO file_hashes.
 //  10. COMMIT.
 //  11. Print one JSON line to stdout.
-func runIncremental(root, relpath, dbPath string) error {
+func runIncremental(root, relpath, dbPath, sourceRevision string) error {
 	startWall := time.Now()
 	timing := os.Getenv("GT_INCREMENTAL_TIMING") != ""
 	mark := func(label string) {
@@ -1555,17 +1554,35 @@ func runIncremental(root, relpath, dbPath string) error {
 	absPath := filepath.Join(root, relpath)
 	relSlash := filepath.ToSlash(relpath)
 
-	// Step 2 — sha256 of file contents.
+	// Step 2 — sha256 of file contents. A path that no longer exists is a
+	// DELETION: its nodes, their edges and overlay are removed and incoming
+	// references are rebound or recorded unresolved, exactly as for an edit
+	// that emptied the file. (The harness passes deleted dirty paths through
+	// to -file; failing here forced a full recovery rebuild per deletion.)
 	contents, err := os.ReadFile(absPath)
+	deleted := false
 	if err != nil {
-		return fmt.Errorf("read file %s: %w", absPath, err)
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read file %s: %w", absPath, err)
+		}
+		deleted = true
 	}
-	sum := sha256.Sum256(contents)
-	newHash := hex.EncodeToString(sum[:])
+	newHash := ""
+	if !deleted {
+		sum := sha256.Sum256(contents)
+		newHash = hex.EncodeToString(sum[:])
+	}
 
-	// Step 3 — short-circuit if hash matches stored value.
+	// Step 3 — short-circuit if hash matches stored value (or a deleted path
+	// the graph never held).
 	storedHash := db.GetFileHash(relSlash)
-	if storedHash == newHash {
+	if (!deleted && storedHash == newHash) || (deleted && storedHash == "" && !db.FileExists(relSlash)) {
+		// The graph content is unchanged for this path, but the caller is
+		// naming the revision it now describes: rebind (or clear) it.
+		if err := db.BindSourceRevision(sourceRevision); err != nil {
+			return err
+		}
+		db.CheckpointWAL()
 		dur := time.Since(startWall)
 		fmt.Printf(
 			`{"file":%q,"nodes_replaced":0,"edges_replaced":0,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":true}`+"\n",
@@ -1586,12 +1603,15 @@ func runIncremental(root, relpath, dbPath string) error {
 	// is_test so their call edges stay OUT of the fact surface (same as the bulk
 	// parse path above) — the incremental -file reindex must classify identically.
 	isTest := walker.IsTestFile(relSlash) || walker.IsNonSourceFile(relSlash)
-	pr, err := parser.ParseFile(sf, isTest)
-	if err != nil {
-		return fmt.Errorf("parse %s: %w", relSlash, err)
-	}
-	if pr == nil {
-		pr = &parser.ParseResult{}
+	pr := &parser.ParseResult{}
+	if !deleted {
+		parsed, err := parser.ParseFile(sf, isTest)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", relSlash, err)
+		}
+		if parsed != nil {
+			pr = parsed
+		}
 	}
 	mark("parse_file")
 	repositoryRevision := repoCommit(root)
@@ -1694,6 +1714,10 @@ func runIncremental(root, relpath, dbPath string) error {
 	if err != nil {
 		return err
 	}
+	incomingAssertSnap, err := store.SnapshotIncomingAssertionsTx(tx, relSlash)
+	if err != nil {
+		return err
+	}
 
 	mark("snapshot_incoming")
 
@@ -1727,6 +1751,10 @@ func runIncremental(root, relpath, dbPath string) error {
 				}
 			}
 		}
+	}
+	// The full build derives CONTAINS from parent_id; so must the amend.
+	if err := store.BatchInsertEdgesTx(tx, fileContainsEdges(newNodePtrs, parentLocal, newDBIDs)); err != nil {
+		return fmt.Errorf("insert containment edges: %w", err)
 	}
 
 	// Re-resolve outgoing calls. The pre-fetched allNodes/allIDs include the
@@ -1765,11 +1793,16 @@ func runIncremental(root, relpath, dbPath string) error {
 		filteredIDs = append(filteredIDs, newDBIDs[i])
 	}
 	nameIndex, fileIndex := resolver.BuildNameIndex(db, filteredNodes, filteredIDs)
-	fileMap := resolver.BuildFileMap(allFiles, allLangs)
-	if tsCfg := resolver.ParseTSConfig(root); tsCfg != nil {
-		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
+	// Same module-path registration as the full build: without the Go module
+	// and package-name aliases every cross-package call of a reparsed Go file
+	// fell to a 0.2 name_match guess (convergence harness, go/move_call).
+	fileMap, _, _ := buildResolverFileMap(root, allFiles, allLangs)
+	if len(pr.ModDecls) > 0 {
+		resolver.BuildRustModuleTree(fileMap, pr.ModDecls, allFiles, allLangs, root)
 	}
-	resolver.RegisterJSPackagePaths(fileMap, root)
+	if len(pr.ReExports) > 0 {
+		resolver.ChainReExports(fileMap, pr.ReExports, allFiles, allLangs)
+	}
 
 	callerDBIDs := make([]int64, len(pr.Calls))
 	for i, call := range pr.Calls {
@@ -2059,12 +2092,37 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	incomingRest += v2Restored
 	incomingUnres += v2Unres
+	// Other files' assertions into this file: rebind by identity or clear —
+	// never leave target_node_id naming a deleted row.
+	if _, _, err := store.RebindIncomingAssertionsTx(tx, incomingAssertSnap, newNodePtrs, newDBIDs); err != nil {
+		return fmt.Errorf("rebind incoming assertions: %w", err)
+	}
+	// Taxonomy edges resolve by name across files: re-derive them whole-graph.
+	if _, err := rederiveTaxonomyTx(tx); err != nil {
+		return err
+	}
 
 	mark("rebind_v2")
 
-	// Step 9 — record new content hash inside the same tx.
-	if err := store.InsertFileHashTx(tx, relSlash, newHash, spec.Name); err != nil {
+	// Step 9 — record new content hash inside the same tx (drop it for a
+	// deleted path).
+	if deleted {
+		if err := store.DeleteFileHashTx(tx, relSlash); err != nil {
+			return err
+		}
+	} else if err := store.InsertFileHashTx(tx, relSlash, newHash, spec.Name); err != nil {
 		return fmt.Errorf("update file_hashes: %w", err)
+	}
+	// This graph is no longer clean-equivalent: say which layers the per-file
+	// amend did not re-derive.
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO project_meta (key, value) VALUES (?, ?), (?, ?)`,
+		metaGraphConvergence, convergencePerFilePartial,
+		metaGraphConvergenceGaps, strings.Join(perFileConvergenceGaps, ",")); err != nil {
+		return fmt.Errorf("mark per-file convergence: %w", err)
+	}
+	// The revision identity commits atomically with the content it names.
+	if err := store.BindSourceRevisionTx(tx, sourceRevision); err != nil {
+		return err
 	}
 
 	// Step 10 — COMMIT.
@@ -2129,9 +2187,49 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	dur := time.Since(startWall)
 	fmt.Printf(
-		`{"file":%q,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
-		relSlash, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
+		`{"file":%q,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false,"deleted":%t}`+"\n",
+		relSlash, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(), deleted,
 	)
+	return nil
+}
+
+// buildResolverFileMap builds the module-path -> files map and registers every
+// alias that does not depend on parsed facts (Go module and package names,
+// vendor paths, tsconfig paths, JS packages, Rust crates). The full build and
+// the per-file amend must share it, or the same import resolves differently.
+func buildResolverFileMap(root string, filePaths, fileLangs []string) (map[string][]string, string, *resolver.TSConfig) {
+	fileMap := resolver.BuildFileMap(filePaths, fileLangs)
+	goModPath := resolver.FindGoModulePath(root)
+	if goModPath != "" {
+		resolver.RegisterGoModulePaths(fileMap, goModPath)
+	}
+	tsCfg := resolver.ParseTSConfig(root)
+	if tsCfg != nil {
+		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
+	}
+	resolver.RegisterJSPackagePaths(fileMap, root)
+	resolver.RegisterGoPackageNames(fileMap, filePaths, fileLangs)
+	resolver.RegisterGoVendorPaths(fileMap)
+	resolver.RegisterRustCratePaths(fileMap, root)
+	return fileMap, goModPath, tsCfg
+}
+
+// maxSourceRevisionBytes bounds -source-revision: it is an identity token
+// (a commit id or a content digest), never free text.
+const maxSourceRevisionBytes = 256
+
+// validateSourceRevision refuses a revision that is not a single printable
+// token: it is compared byte-for-byte by consumers, so a stray newline or NUL
+// would make two identical revisions compare unequal.
+func validateSourceRevision(revision string) error {
+	if len(revision) > maxSourceRevisionBytes {
+		return fmt.Errorf("longer than %d bytes", maxSourceRevisionBytes)
+	}
+	for _, r := range revision {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("contains control character %q", r)
+		}
+	}
 	return nil
 }
 
