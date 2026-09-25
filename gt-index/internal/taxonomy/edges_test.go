@@ -104,6 +104,120 @@ func TestUniqueNameIsCandidateAmbiguousIsSpeculative(t *testing.T) {
 	}
 }
 
+// TestNameBindingNeverCrossesALanguageFamily pins the polyglot boundary a
+// bare-name resolution must respect: a TypeScript `implements Greeter` can
+// never bind the Go interface named Greeter — the same class of false edge
+// the resolver's IMPLEMENTS pass was caught emitting. Every name-resolving
+// kind obeys it.
+func TestNameBindingNeverCrossesALanguageFamily(t *testing.T) {
+	langNode := func(label, name, file, lang string) *store.Node {
+		n := node(label, name, file)
+		n.Language = lang
+		return n
+	}
+
+	// DECLARED_IMPLEMENTS: a foreign Greeter is not a candidate at all, so
+	// it cannot even inflate the ambiguity count.
+	nodes := []*store.Node{
+		langNode("Class", "Widget", "a.ts", "typescript"),
+		langNode("Interface", "Greeter", "g.go", "go"),
+		langNode("Interface", "Greeter", "b.ts", "typescript"),
+	}
+	props := []parser.PropertyRef{
+		{NodeIdx: 0, Kind: parser.PropImplementsType, Value: "Greeter|" + specs.MechImplementsClause, Line: 1},
+	}
+	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDeclaredImplements)
+	if len(rows) != 1 || rows[0].TargetID != 3 {
+		t.Fatalf("cross-language implements: %d rows, want exactly 1 targeting the TypeScript Greeter", len(rows))
+	}
+	if rows[0].TrustTier != specs.TierCandidate || rows[0].CandidateCount != 1 {
+		t.Errorf("foreign candidate leaked into the count: tier=%s count=%d, want CANDIDATE/1",
+			rows[0].TrustTier, rows[0].CandidateCount)
+	}
+
+	// And with ONLY a foreign declaration carrying the name, the clause
+	// abstains rather than binding across the boundary.
+	rows = edgesByKind(DeriveEdges(nodes[:2], idsFor(2), props), specs.EdgeDeclaredImplements)
+	if len(rows) != 0 {
+		t.Errorf("implements whose only candidate is foreign emitted %d rows, want 0", len(rows))
+	}
+
+	// JVM family members interoperate by name: Java code may implement a
+	// Kotlin interface.
+	nodes = []*store.Node{
+		langNode("Class", "Widget", "A.java", "java"),
+		langNode("Interface", "Greeter", "B.kt", "kotlin"),
+	}
+	rows = edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDeclaredImplements)
+	if len(rows) != 1 || rows[0].TargetID != 2 {
+		t.Fatalf("same-family implements: %d rows, want 1 -> the Kotlin Greeter", len(rows))
+	}
+
+	// PARAM_TYPE: a Python annotation cannot resolve to a same-named Go
+	// struct.
+	nodes = []*store.Node{
+		langNode("Function", "handle", "h.py", "python"),
+		langNode("Struct", "Config", "c.go", "go"),
+	}
+	props = []parser.PropertyRef{
+		{NodeIdx: 0, Kind: propParam, Value: "cfg:Config [required]", Line: 1},
+	}
+	if rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeParamType); len(rows) != 0 {
+		t.Errorf("cross-language PARAM_TYPE emitted %d rows, want 0", len(rows))
+	}
+
+	// RETURNS_TYPE: a Go return type cannot resolve to a same-named TS class.
+	fn := langNode("Function", "build", "x.go", "go")
+	fn.ReturnType = "Result"
+	nodes = []*store.Node{fn, langNode("Class", "Result", "r.ts", "typescript")}
+	if rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), nil), specs.EdgeReturnsType); len(rows) != 0 {
+		t.Errorf("cross-language RETURNS_TYPE emitted %d rows, want 0", len(rows))
+	}
+
+	// DECORATES: a Python decorator name cannot bind a same-named Go
+	// function.
+	nodes = []*store.Node{
+		langNode("Class", "Cfg", "a.py", "python"),
+		langNode("Function", "registry", "d.go", "go"),
+	}
+	props = []parser.PropertyRef{
+		{NodeIdx: 0, Kind: propClassDecorator, Value: "@registry", Line: 1},
+	}
+	if rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDecorates); len(rows) != 0 {
+		t.Errorf("cross-language DECORATES emitted %d rows, want 0", len(rows))
+	}
+
+	// OVERRIDES: a Kotlin method marker cannot claim an override of a
+	// same-named Rust method.
+	nodes = []*store.Node{
+		langNode("Method", "draw", "A.kt", "kotlin"),
+		langNode("Method", "draw", "b.rs", "rust"),
+	}
+	props = []parser.PropertyRef{
+		{NodeIdx: 0, Kind: parser.PropOverrideMarker, Value: specs.MechOverrideMarker, Line: 2},
+	}
+	if rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeMethodOverrides); len(rows) != 0 {
+		t.Errorf("cross-language METHOD_OVERRIDES emitted %d rows, want 0", len(rows))
+	}
+}
+
+// TestUnknownLanguageNeverFilters: a node whose language metadata is missing
+// keeps its historical permissive behavior — the filter may only drop a
+// declaration it KNOWS belongs to another family.
+func TestUnknownLanguageNeverFilters(t *testing.T) {
+	src := node("Class", "Circle", "a.ts")
+	src.Language = "typescript"
+	cand := node("Interface", "Shape", "b.ts") // Language unset
+	nodes := []*store.Node{src, cand}
+	props := []parser.PropertyRef{
+		{NodeIdx: 0, Kind: parser.PropImplementsType, Value: "Shape|" + specs.MechImplementsClause, Line: 1},
+	}
+	rows := edgesByKind(DeriveEdges(nodes, idsFor(len(nodes)), props), specs.EdgeDeclaredImplements)
+	if len(rows) != 1 || rows[0].TargetID != 2 {
+		t.Fatalf("unknown-language candidate filtered: %d rows, want 1", len(rows))
+	}
+}
+
 // TestOverSizedCandidateSetKeepsTheTrueCount: the retained list is capped, but
 // the recorded count is the real one and the truncation is stated, so a reader
 // cannot mistake a capped set for a small one.

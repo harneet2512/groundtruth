@@ -4,28 +4,18 @@ import (
 	"strings"
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
+	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
 )
 
 // maxCallableAliasChainDepth bounds how many `g = f` copy hops the
 // callable-value rung follows before abstaining.
 const maxCallableAliasChainDepth = 8
 
-// langFamily maps a node language onto the family inside which a call can
-// bind a symbol by NAME. Languages that interoperate by name at the source
-// level share a family (JS/TS/Svelte; Java/Kotlin/Scala/Groovy on the JVM;
-// C/C++). "" (unknown) never filters.
+// langFamily delegates to specs.LangFamily, the single authority shared with
+// the taxonomy layer's candidate filtering — a second copy of the family
+// table would drift.
 func langFamily(lang string) string {
-	switch lang {
-	case "":
-		return ""
-	case "javascript", "typescript", "tsx", "jsx", "svelte":
-		return "ecmascript"
-	case "java", "kotlin", "scala", "groovy":
-		return "jvm"
-	case "c", "cpp":
-		return "c"
-	}
-	return lang
+	return specs.LangFamily(lang)
 }
 
 // buildLanguageFamilyViews splits a name index into one view per language
@@ -62,6 +52,16 @@ func buildLanguageFamilyViews(nodeIDs map[string][]int64, meta map[int64]NodeMet
 		}
 	}
 	return views
+}
+
+// familyCompatible reports whether a candidate declaration may be bound by
+// NAME from a caller whose language is callerLang. It mirrors inCallerFamily:
+// an unknown language on either side passes (the filter can only drop a node
+// it KNOWS belongs to another family). Structural edges — implements,
+// extends, injection, route handlers — can never be true across language
+// boundaries, so a known mismatch is a hard reject, not a confidence cut.
+func familyCompatible(candidateLang, callerLang string) bool {
+	return specs.FamilyCompatible(candidateLang, callerLang)
 }
 
 // buildExternalImportNames returns file → imported binding names that resolve

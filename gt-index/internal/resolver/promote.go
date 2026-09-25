@@ -127,6 +127,9 @@ type promoteNodeMeta struct {
 	FilePath string
 	Line     int
 	ParentID int64
+	// Language is the node's declared source language (nodes.language) — the
+	// family boundary a bare-name resolution may never cross (HAR-90).
+	Language string
 	// Signature is the node's declared signature (nodes.signature). PRECEDES
 	// receiver-resolution reads it to recover a Go method's RECEIVER VARIABLE name
 	// (`func (r *T) M()` → "r") so a `r.open(); r.write()` call_order whose receiver
@@ -152,13 +155,14 @@ type promoteIndexes struct {
 	// BuildFieldTypeIndex). PRECEDES receiver-type resolution reads this to turn a
 	// `self.<field>` receiver into the field's declared class.
 	fieldTypes map[int64]map[string]string
-	// classByName: typeName -> classNodeID — the CONTENT-smallest (file_path,
-	// start_line, id) class carrying the name, NOT first-writer on the id-ordered
-	// scan: a batch amend re-enters the edited file's nodes at the top of the
-	// AUTOINCREMENT space, so smallest-id names a different class under an amend
-	// than under a full rebuild. Used to turn a receiver TYPE name into the class
-	// node for PRECEDES receiver-type gating.
-	classByName map[string]int64
+	// classNodesByName: typeName -> every class node carrying the name, in
+	// CONTENT order (file_path, start_line, id) — NOT first-writer on the
+	// id-ordered scan: a batch amend re-enters the edited file's nodes at the
+	// top of the AUTOINCREMENT space, so smallest-id names a different class
+	// under an amend than under a full rebuild. Lookup filters to the
+	// receiver's own language family before taking the content-smallest —
+	// a bare type name must not bind a foreign-language class.
+	classNodesByName map[string][]promoteNodeMeta
 	// stableIDs: nodeID -> the node's published stable identity, when one exists
 	// (nodes.stable_id, else the resolution_symbols sidecar keyed by
 	// native_id = nodes.id — the same fallback join process.go readStableIDs
@@ -386,13 +390,13 @@ func PromotePropertyEdges(db *store.DB) (int, error) {
 // the resolution indexes. Mirrors buildRelationshipIndexes (relationships.go).
 func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 	idx := &promoteIndexes{
-		nameIndex:   make(map[string][]promoteNodeMeta),
-		fnl:         make(map[fnlKey]int64),
-		byID:        make(map[int64]promoteNodeMeta),
-		classFields: make(map[int64]map[string]bool),
-		fieldTypes:  make(map[int64]map[string]string),
-		classByName: make(map[string]int64),
-		stableIDs:   make(map[int64]string),
+		nameIndex:        make(map[string][]promoteNodeMeta),
+		fnl:              make(map[fnlKey]int64),
+		byID:             make(map[int64]promoteNodeMeta),
+		classFields:      make(map[int64]map[string]bool),
+		fieldTypes:       make(map[int64]map[string]string),
+		classNodesByName: make(map[string][]promoteNodeMeta),
+		stableIDs:        make(map[int64]string),
 	}
 
 	tx, err := db.BeginTx()
@@ -401,21 +405,23 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 	}
 	defer tx.Rollback()
 
-	// ORDER BY id: this scan's consumers ASSUME id-order (fnl/classByName
-	// "first writer wins, id-ordered scan"; nameIndex slices feed resolveByName's
-	// "prefer same-file / first match"). Without it SQLite's scan order is not
-	// guaranteed, so a name with multiple matches resolved a run-dependent callee
-	// — measured: textual promote_dataflow_callee 164 vs 139 across re-indexes
-	// (a Step-1 +=+ break). Make the documented assumption real. (Same bug class
-	// as the parser.go receiverCalls map-iteration fix.)
+	// ORDER BY id: this scan's consumers ASSUME id-order (fnl/index-order
+	// consumers document "first writer wins, id-ordered scan"; nameIndex slices
+	// feed resolveByName's "prefer same-file / first match"). Without it
+	// SQLite's scan order is not guaranteed, so a name with multiple matches
+	// resolved a run-dependent callee — measured: textual
+	// promote_dataflow_callee 164 vs 139 across re-indexes (a Step-1 +=+
+	// break). Make the documented assumption real. (Same bug class as the
+	// parser.go receiverCalls map-iteration fix.)
 	rows, err := tx.Query(`SELECT id, label, name, file_path,
-	        COALESCE(start_line, 0), COALESCE(parent_id, 0), COALESCE(signature, '') FROM nodes ORDER BY id`)
+	        COALESCE(start_line, 0), COALESCE(parent_id, 0), COALESCE(signature, ''),
+	        COALESCE(language, '') FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var m promoteNodeMeta
-		if err := rows.Scan(&m.ID, &m.Label, &m.Name, &m.FilePath, &m.Line, &m.ParentID, &m.Signature); err != nil {
+		if err := rows.Scan(&m.ID, &m.Label, &m.Name, &m.FilePath, &m.Line, &m.ParentID, &m.Signature, &m.Language); err != nil {
 			continue
 		}
 		idx.nameIndex[m.Name] = append(idx.nameIndex[m.Name], m)
@@ -426,26 +432,29 @@ func buildPromoteIndexes(db *store.DB) (*promoteIndexes, error) {
 		if _, ok := idx.fnl[k]; !ok {
 			idx.fnl[k] = m.ID
 		}
-		// classByName: a class/struct/enum/interface name -> its node id. Keep the
-		// CONTENT-smallest (file_path, start_line, id) candidate — first-writer on
-		// this id-ordered scan is not stable: a batch amend re-inserts the edited
-		// file's nodes at the top of the AUTOINCREMENT id space, so the named
-		// class flipped between an amend and a full rebuild. (idx.byID already
-		// holds the incumbent — it was populated in its own iteration.)
+		// classNodesByName keeps every class/struct/enum/interface carrying the
+		// name; CONTENT order is established below the scan (first-writer on an
+		// id-ordered scan is not stable under batch amend id renumbering).
 		if classLabels[m.Label] {
-			cur, seen := idx.classByName[m.Name]
-			if !seen {
-				idx.classByName[m.Name] = m.ID
-			} else if pm, ok := idx.byID[cur]; ok &&
-				(m.FilePath < pm.FilePath ||
-					(m.FilePath == pm.FilePath &&
-						(m.Line < pm.Line || (m.Line == pm.Line && m.ID < pm.ID)))) {
-				idx.classByName[m.Name] = m.ID
-			}
+			idx.classNodesByName[m.Name] = append(idx.classNodesByName[m.Name], m)
 		}
 		idx.byID[m.ID] = m
 	}
 	rows.Close()
+
+	// Establish the CONTENT order classNodesByName consumers rely on.
+	for name := range idx.classNodesByName {
+		ents := idx.classNodesByName[name]
+		sort.Slice(ents, func(i, j int) bool {
+			if ents[i].FilePath != ents[j].FilePath {
+				return ents[i].FilePath < ents[j].FilePath
+			}
+			if ents[i].Line != ents[j].Line {
+				return ents[i].Line < ents[j].Line
+			}
+			return ents[i].ID < ents[j].ID
+		})
+	}
 
 	// class_field properties: classNodeID -> {field names}. Value shape: 'name: Type'.
 	cfRows, err := tx.Query(`SELECT node_id, value FROM properties WHERE kind = 'class_field'`)
@@ -596,22 +605,24 @@ func isSimpleIdent(s string) bool {
 // resolveByName resolves a symbol name to a node id, prefer-same-file then global
 // first-match (the relationships.go contract), optionally filtered to a label set.
 // Returns the resolved id and the candidate count (0,id==0 when unresolved). The
-// candidate count drives DATA_FLOW confidence (ambiguity gating).
-func (idx *promoteIndexes) resolveByName(name, curFile string, labels map[string]bool) (int64, int) {
+// candidate count drives DATA_FLOW confidence (ambiguity gating). Candidates
+// outside the caller's language family never bind — a bare name in Python
+// source cannot resolve to a same-named Go declaration.
+func (idx *promoteIndexes) resolveByName(name, curFile, callerLang string, labels map[string]bool) (int64, int) {
 	ents := idx.nameIndex[name]
 	if len(ents) == 0 {
 		return 0, 0
 	}
 	// Filter by label set if requested.
 	var filtered []promoteNodeMeta
-	if labels != nil {
-		for _, e := range ents {
-			if labels[e.Label] {
-				filtered = append(filtered, e)
-			}
+	for _, e := range ents {
+		if labels != nil && !labels[e.Label] {
+			continue
 		}
-	} else {
-		filtered = ents
+		if langFamily(callerLang) != "" && !familyCompatible(e.Language, callerLang) {
+			continue
+		}
+		filtered = append(filtered, e)
 	}
 	if len(filtered) == 0 {
 		return 0, 0
@@ -732,7 +743,7 @@ func (idx *promoteIndexes) fnlAnyFile(name string, line int) int64 {
 
 // accessSiteEntry is one captured field access: the field touched, the
 // statement line it happens on, and the receiver chain it was read/written
-// through (``self``/``this``/named receiver — empty only when the producer
+// through (“self“/“this“/named receiver — empty only when the producer
 // could not name one).
 type accessSiteEntry struct {
 	Field    string `json:"field"`
@@ -965,7 +976,7 @@ func promoteRaises(db *store.DB, idx *promoteIndexes, add addEdgeFunc) error {
 			}
 			// Target resolves against the POLYGLOT class label superset
 			// {Class,Struct,Type,Enum,Interface} so Python and Go are truly 1:1.
-			tgt, cc := idx.resolveByName(etype, src.FilePath, classLabels)
+			tgt, cc := idx.resolveByName(etype, src.FilePath, src.Language, classLabels)
 			if tgt == 0 {
 				return // not an internal class -> stays property
 			}
@@ -1012,7 +1023,7 @@ func forEachDataFlowTarget(db *store.DB, idx *promoteIndexes,
 		for _, seg := range strings.Split(rhs, "|") {
 			for _, cm := range callSegRe.FindAllStringSubmatch(seg, -1) {
 				callee := cm[1]
-				tgt, cc := idx.resolveByName(callee, src.FilePath, funcMethodLabels)
+				tgt, cc := idx.resolveByName(callee, src.FilePath, src.Language, funcMethodLabels)
 				if tgt == 0 || tgt == nodeID {
 					continue
 				}
@@ -1297,8 +1308,17 @@ func (idx *promoteIndexes) resolveReceiverClass(receiver string, src promoteNode
 	if !ok || typeName == "" {
 		return 0, false // field type unknown → abstain
 	}
-	classID, ok := idx.classByName[typeName]
-	if !ok || classID == 0 {
+	// The declared type binds the content-smallest class carrying the name
+	// INSIDE the caller's language family — a `Repo` field in Python must not
+	// type into a same-named Go struct.
+	var classID int64
+	for _, cand := range idx.classNodesByName[typeName] {
+		if langFamily(src.Language) == "" || familyCompatible(cand.Language, src.Language) {
+			classID = cand.ID
+			break
+		}
+	}
+	if classID == 0 {
 		return 0, false // declared type is not an indexed project class → abstain
 	}
 	return classID, true
@@ -1399,7 +1419,7 @@ func promoteUsesAnnotations(db *store.DB, idx *promoteIndexes) (int, error) {
 		if !ok {
 			continue
 		}
-		tgt, _ := idx.resolveByName(callee, src.FilePath, funcMethodLabels)
+		tgt, _ := idx.resolveByName(callee, src.FilePath, src.Language, funcMethodLabels)
 		if tgt == 0 {
 			continue
 		}

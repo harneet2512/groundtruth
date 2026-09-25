@@ -177,6 +177,7 @@ type frameworkIndexes struct {
 	classIndex     map[string][]classNodeEntry
 	interfaceIndex map[string][]classNodeEntry
 	funcFileIndex  map[string]map[string]int64
+	funcLangByID   map[int64]string
 	fileNodeMap    map[string]int64
 	classRanges    map[string][]namedRange
 	entryByID      map[int64]classNodeEntry
@@ -201,6 +202,7 @@ func resolveFrameworkWiringTx(
 	classIndex map[string][]classNodeEntry,
 	interfaceIndex map[string][]classNodeEntry,
 	funcFileIndex map[string]map[string]int64,
+	funcLangByID map[int64]string,
 	fileNodeMap map[string]int64,
 	inFlight []*store.Edge,
 	emit edgeEmitFunc,
@@ -209,6 +211,7 @@ func resolveFrameworkWiringTx(
 		classIndex:     classIndex,
 		interfaceIndex: interfaceIndex,
 		funcFileIndex:  funcFileIndex,
+		funcLangByID:   funcLangByID,
 		fileNodeMap:    fileNodeMap,
 		classRanges:    buildClassRangeIndexTx(tx),
 		fileSet:        make(map[string]bool, len(files)),
@@ -227,7 +230,7 @@ func resolveFrameworkWiringTx(
 
 	for _, sf := range files {
 		facts := scanFrameworkWiringFile(sf, root, idx, emit)
-		emitDIFacts(facts, idx, emit)
+		emitDIFacts(facts, sf.Language, idx, emit)
 	}
 }
 
@@ -393,7 +396,7 @@ func scanFrameworkWiringFile(sf walker.SourceFile, root string, idx frameworkInd
 				}
 				for _, a := range args[start:] {
 					if tok := cleanRouteHandler(strings.TrimSpace(a)); tok != "" {
-						if id := resolveRouteHandler(tok, sf.Path, idx.funcFileIndex, idx.classIndex); id != 0 {
+						if id := resolveRouteHandlerInLang(tok, sf.Path, sf.Language, idx.funcFileIndex, idx.classIndex, idx.funcLangByID); id != 0 {
 							emit(id, idx.fileNodeMap[sf.Path], EdgeTypeMiddlewareOn, sf.Path, lineNum,
 								mechExpressUse, 0.9, middlewareEdgeMetadata(mechExpressUse, route), 1)
 						}
@@ -450,7 +453,7 @@ func scanFrameworkWiringFile(sf walker.SourceFile, root string, idx frameworkInd
 				var ids []int64
 				for _, a := range args {
 					if tok := cleanRouteHandler(strings.TrimSpace(a)); tok != "" {
-						if id := resolveRouteHandler(tok, sf.Path, idx.funcFileIndex, idx.classIndex); id != 0 {
+						if id := resolveRouteHandlerInLang(tok, sf.Path, sf.Language, idx.funcFileIndex, idx.classIndex, idx.funcLangByID); id != 0 {
 							ids = append(ids, id)
 						}
 					}
@@ -482,7 +485,7 @@ func scanFrameworkWiringFile(sf walker.SourceFile, root string, idx frameworkInd
 		case "java", "kotlin":
 			// Spring interceptor registration: registry.addInterceptor(new X()).
 			if m := springAddInterceptorRe.FindStringSubmatch(line); m != nil {
-				if id := resolveClassNodeSameFileOrUnique(m[1], sf.Path, idx.classIndex); id != 0 {
+				if id := resolveClassNodeSameFileOrUniqueInLang(m[1], sf.Path, sf.Language, idx.classIndex); id != 0 {
 					target := idx.fileNodeMap[sf.Path]
 					if cls, ok := enclosingClass(idx.classRanges[sf.Path], lineNum); ok {
 						target = cls.ID // the WebMvcConfigurer owns the registry
@@ -545,7 +548,7 @@ func emitDjangoMiddleware(dotted string, sf walker.SourceFile, line int, idx fra
 		}
 	}
 	if id == 0 {
-		id = resolveClassNodeSameFileOrUnique(className, sf.Path, idx.classIndex)
+		id = resolveClassNodeSameFileOrUniqueInLang(className, sf.Path, sf.Language, idx.classIndex)
 	}
 	if id != 0 {
 		emit(id, idx.fileNodeMap[sf.Path], EdgeTypeMiddlewareOn, sf.Path, line,
@@ -612,9 +615,9 @@ func factsForTypes(types []string, consumerID int64, file string, line int) []di
 // several -> one 0.4 candidate edge each, ambiguous=true in metadata and the
 // true candidate count on the edge; none -> the edge lands on the interface
 // itself (the injection contract is still the declared fact).
-func emitDIFacts(facts []diFact, idx frameworkIndexes, emit edgeEmitFunc) {
+func emitDIFacts(facts []diFact, callerLang string, idx frameworkIndexes, emit edgeEmitFunc) {
 	for _, f := range facts {
-		id, name, isIface := resolveDeclaredType(f.declaredType, f.file, idx.classIndex, idx.interfaceIndex)
+		id, name, isIface := resolveDeclaredTypeInLang(f.declaredType, f.file, callerLang, idx.classIndex, idx.interfaceIndex)
 		if id == 0 {
 			continue // declared type unresolvable or ambiguous — abstain
 		}
@@ -624,6 +627,18 @@ func emitDIFacts(facts []diFact, idx frameworkIndexes, emit edgeEmitFunc) {
 			continue
 		}
 		impls := idx.implsByIface[id]
+		// A persisted edge from a pre-scope build can still pair an interface
+		// with a foreign-language implementor — the hop stays inside the
+		// interface's own family.
+		if ie, ok := idx.entryByID[id]; ok && langFamily(ie.Language) != "" {
+			scoped := make([]classNodeEntry, 0, len(impls))
+			for _, im := range impls {
+				if familyCompatible(im.Language, ie.Language) {
+					scoped = append(scoped, im)
+				}
+			}
+			impls = scoped
+		}
 		switch len(impls) {
 		case 0:
 			emit(f.consumerID, id, "INJECTS", f.file, f.line, f.mechanism, 0.9,
@@ -645,10 +660,21 @@ func emitDIFacts(facts []diFact, idx frameworkIndexes, emit edgeEmitFunc) {
 // globally unique across both kinds. Returns (id, nodeName, isInterface);
 // id==0 means unresolved OR ambiguous — the caller abstains either way.
 func resolveDeclaredType(name, file string, classIndex, interfaceIndex map[string][]classNodeEntry) (int64, string, bool) {
+	return resolveDeclaredTypeInLang(name, file, "", classIndex, interfaceIndex)
+}
+
+// resolveDeclaredTypeInLang scopes both indexes to the injection site's
+// language family: an `@Autowired private UserService s` in a Java file must
+// not bind a same-named Go type.
+func resolveDeclaredTypeInLang(name, file, callerLang string, classIndex, interfaceIndex map[string][]classNodeEntry) (int64, string, bool) {
+	familyOK := langFamily(callerLang) != ""
 	sameFile := make(map[int64]classNodeEntry)
 	all := make(map[int64]classNodeEntry)
 	isIfaceID := make(map[int64]bool)
 	for _, e := range interfaceIndex[name] {
+		if familyOK && !familyCompatible(e.Language, callerLang) {
+			continue
+		}
 		all[e.ID] = e
 		isIfaceID[e.ID] = true
 		if e.FilePath == file {
@@ -656,6 +682,9 @@ func resolveDeclaredType(name, file string, classIndex, interfaceIndex map[strin
 		}
 	}
 	for _, e := range classIndex[name] {
+		if familyOK && !familyCompatible(e.Language, callerLang) {
+			continue
+		}
 		all[e.ID] = e
 		if e.FilePath == file {
 			sameFile[e.ID] = e

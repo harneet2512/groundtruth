@@ -343,3 +343,54 @@ func sortedTaxonomyNames() []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestLangFamilyAndCompatibility pin the shared name-binding boundary the
+// resolver and taxonomy layers both enforce through this table.
+func TestLangFamilyAndCompatibility(t *testing.T) {
+	cases := []struct {
+		lang, want string
+	}{
+		{"typescript", "ecmascript"},
+		{"javascript", "ecmascript"},
+		{"tsx", "ecmascript"},
+		{"jsx", "ecmascript"},
+		{"svelte", "ecmascript"},
+		{"java", "jvm"},
+		{"kotlin", "jvm"},
+		{"scala", "jvm"},
+		{"groovy", "jvm"},
+		{"c", "c"},
+		{"cpp", "c"},
+		{"go", "go"},
+		{"python", "python"},
+		{"rust", "rust"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := LangFamily(c.lang); got != c.want {
+			t.Errorf("LangFamily(%q) = %q, want %q", c.lang, got, c.want)
+		}
+	}
+
+	compat := []struct {
+		candidate, caller string
+		want              bool
+	}{
+		{"typescript", "typescript", true},
+		{"javascript", "typescript", true},
+		{"kotlin", "java", true},
+		{"go", "typescript", false},
+		{"typescript", "go", false},
+		{"python", "rust", false},
+		{"cpp", "c", true},
+		{"", "go", true}, // unknown candidate passes
+		{"go", "", true}, // unknown caller passes
+		{"", "", true},
+	}
+	for _, c := range compat {
+		if got := FamilyCompatible(c.candidate, c.caller); got != c.want {
+			t.Errorf("FamilyCompatible(%q, %q) = %v, want %v",
+				c.candidate, c.caller, got, c.want)
+		}
+	}
+}

@@ -126,6 +126,39 @@ const (
 	MechConstructorParam = "syntactic_constructor_parameter"
 )
 
+// LangFamily maps a node language onto the family inside which a bare name
+// can bind a declaration. Languages that interoperate by name at the source
+// level share a family (JS/TS/Svelte; Java/Kotlin/Scala/Groovy on the JVM;
+// C/C++). "" (unknown) never filters. This is the single authority both the
+// resolver's callsite scoping and the taxonomy's candidate filtering share —
+// a second copy of this table would drift.
+func LangFamily(lang string) string {
+	switch lang {
+	case "":
+		return ""
+	case "javascript", "typescript", "tsx", "jsx", "svelte":
+		return "ecmascript"
+	case "java", "kotlin", "scala", "groovy":
+		return "jvm"
+	case "c", "cpp":
+		return "c"
+	}
+	return lang
+}
+
+// FamilyCompatible reports whether a candidate declaration may be bound by
+// NAME from a caller whose language is callerLang: an unknown language on
+// either side passes, a known mismatch is a hard reject — a structural edge
+// can never be true across language boundaries.
+func FamilyCompatible(candidateLang, callerLang string) bool {
+	f := LangFamily(callerLang)
+	if f == "" {
+		return true
+	}
+	c := LangFamily(candidateLang)
+	return c == "" || c == f
+}
+
 // TaxonomyEdgeMechanisms maps each taxonomy edge kind to the mechanisms that
 // may produce it. A row with any other mechanism is a bug, not a weaker fact.
 var TaxonomyEdgeMechanisms = map[string][]string{

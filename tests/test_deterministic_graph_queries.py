@@ -563,3 +563,58 @@ def test_graph_revision_ignores_build_commit(tmp_path):
     )
     assert "graph_revision_unavailable" in artifact.omissions
     assert artifact.semantics is EvidenceSemantics.INCOMPLETE
+
+
+def test_literal_search_never_scans_vcs_internals(tmp_path):
+    """A repo-wide exact_literal_search must not report .git blobs as
+    evidence, and the snapshot comparison must not trip over files the
+    snapshot can never contain."""
+    src = tmp_path / "src" / "a.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("needle = 1\n", encoding="utf-8")
+    git_obj = tmp_path / ".git" / "objects" / "ab" / "cdef"
+    git_obj.parent.mkdir(parents=True)
+    git_obj.write_text("needle in a git object\n", encoding="utf-8")
+
+    src_bytes = src.read_bytes()
+    src_sha = __import__("hashlib").sha256(src_bytes).hexdigest()
+    ctx = DeterministicQueryContext(
+        repository_root=tmp_path,
+        repository_content_revision=CONTENT_REVISION,
+        working_tree_sha256=WORKING_TREE,
+        snapshot_files=(("src/a.py", src_sha),),
+        snapshot_complete=True,
+    )
+    artifact = execute_query(
+        _request(ActionKind.EXACT_LITERAL_SEARCH, {"literal": "needle", "paths": ["."]}),
+        ctx,
+    )
+    answer = _answer(artifact)
+    paths = {m["path"] for m in answer["matches"]}
+    assert paths == {"src/a.py"}, paths
+    assert all(not f["path"].startswith(".git/") for f in answer["files_observed"])
+    assert "snapshot_scope_content_mismatch" not in artifact.omissions
+    assert artifact.semantics is EvidenceSemantics.EXACT, artifact.omissions
+
+
+def test_literal_search_explicit_vcs_scope_reports_honestly(tmp_path):
+    """An explicit .git scope is walked — the caller asked for it by name —
+    but the snapshot mismatch it provokes stays an omission, never EXACT."""
+    git_obj = tmp_path / ".git" / "config"
+    git_obj.parent.mkdir(parents=True)
+    git_obj.write_text("needle\n", encoding="utf-8")
+    ctx = DeterministicQueryContext(
+        repository_root=tmp_path,
+        repository_content_revision=CONTENT_REVISION,
+        working_tree_sha256=WORKING_TREE,
+        snapshot_files=(),
+        snapshot_complete=True,
+    )
+    artifact = execute_query(
+        _request(ActionKind.EXACT_LITERAL_SEARCH, {"literal": "needle", "paths": [".git"]}),
+        ctx,
+    )
+    answer = _answer(artifact)
+    assert any(m["path"] == ".git/config" for m in answer["matches"])
+    assert "snapshot_scope_content_mismatch" in artifact.omissions
+    assert artifact.semantics is EvidenceSemantics.INCOMPLETE

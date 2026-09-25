@@ -88,6 +88,25 @@ func buildIndex(nodes []*store.Node, ids []int64, labels map[string]bool) index 
 	return out
 }
 
+// familyScoped drops name-binding candidates whose language family provably
+// differs from the source's. A syntactic mechanism states that source TEXT
+// names something; a Go declaration can never be the referent of a name
+// written in TypeScript. Unknown languages pass — the filter only removes a
+// node it KNOWS belongs to another family.
+func familyScoped(candidates []int64, srcLang string, nodesByID map[int64]*store.Node) []int64 {
+	if specs.LangFamily(srcLang) == "" {
+		return candidates
+	}
+	scoped := make([]int64, 0, len(candidates))
+	for _, tid := range candidates {
+		cand := nodesByID[tid]
+		if cand == nil || specs.FamilyCompatible(cand.Language, srcLang) {
+			scoped = append(scoped, tid)
+		}
+	}
+	return scoped
+}
+
 // edgeKey deduplicates: one taxonomy edge per (source, target, kind).
 type edgeKey struct {
 	source, target int64
@@ -229,7 +248,11 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			if name == "" || !isTaxonomyMechanism(specs.EdgeDeclaredImplements, mechanism) {
 				continue
 			}
-			b.emit(specs.EdgeDeclaredImplements, mechanism, id, types[name], node.FilePath, p.Line)
+			// A bare type name binds only within the source's language
+			// family: a Go interface named Greeter is not a candidate for a
+			// TypeScript `implements Greeter`.
+			b.emit(specs.EdgeDeclaredImplements, mechanism, id,
+				familyScoped(types[name], node.Language, nodesByID), node.FilePath, p.Line)
 
 		case parser.PropOverrideMarker:
 			// The marker states that this declaration overrides a supertype
@@ -237,9 +260,9 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			// same name is a candidate, and the set size says how uncertain
 			// that is.
 			b.emit(specs.EdgeOverrides, specs.MechOverrideMarker, id,
-				withoutSelf(methods[node.Name], id), node.FilePath, p.Line)
+				withoutSelf(familyScoped(methods[node.Name], node.Language, nodesByID), id), node.FilePath, p.Line)
 			b.emit(specs.EdgeMethodOverrides, specs.MechOverrideMarker, id,
-				withoutSelf(methods[node.Name], id), node.FilePath, p.Line)
+				withoutSelf(familyScoped(methods[node.Name], node.Language, nodesByID), id), node.FilePath, p.Line)
 
 		case propClassDecorator, propFunctionDecorator:
 			// `@dataclass` / `@pytest.fixture(scope="module")` -> `dataclass`.
@@ -248,8 +271,9 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 				continue
 			}
 			// Direction: the decorator decorates the declaration, so the
-			// decorator is the source.
-			sources := callables[name]
+			// decorator is the source. The name still binds only inside the
+			// decorated node's language family.
+			sources := familyScoped(callables[name], node.Language, nodesByID)
 			if len(sources) == 0 {
 				// External decorator: no in-repo callable carries this name.
 				// The parser minted a `Decorator` occurrence node parented to
@@ -273,10 +297,10 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 				continue
 			}
 			b.emit(specs.EdgeParamType, specs.MechParamAnnotation, id,
-				types[name], node.FilePath, p.Line)
+				familyScoped(types[name], node.Language, nodesByID), node.FilePath, p.Line)
 			if isConstructorDeclaration(node) {
 				b.emit(specs.EdgeInjects, specs.MechConstructorParam, id,
-					types[name], node.FilePath, p.Line)
+					familyScoped(types[name], node.Language, nodesByID), node.FilePath, p.Line)
 			}
 
 		case propFieldRead:
@@ -310,7 +334,7 @@ func DeriveEdges(nodes []*store.Node, ids []int64, props []parser.PropertyRef) [
 			continue
 		}
 		b.emit(specs.EdgeReturnsType, specs.MechReturnAnnotation, id,
-			types[name], n.FilePath, n.StartLine)
+			familyScoped(types[name], n.Language, nodesByID), n.FilePath, n.StartLine)
 	}
 	return b.rows
 }

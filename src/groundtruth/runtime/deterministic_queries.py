@@ -188,6 +188,13 @@ def _safe_scope(root: Path, raw_path: object) -> Path | None:
     return resolved
 
 
+# Version-control internals are never repository content: they cannot appear
+# in the snapshot manifest (so any file found under one would trip a false
+# ``snapshot_scope_content_mismatch``) and an ``.git`` object blob is never
+# evidence of anything the source says.
+_VCS_INTERNAL_DIRS = frozenset({".git", ".hg", ".svn"})
+
+
 def _iter_scope(root: Path, scopes: Sequence[Path]) -> tuple[list[Path], list[str]]:
     files: dict[str, Path] = {}
     omissions: set[str] = set()
@@ -199,13 +206,16 @@ def _iter_scope(root: Path, scopes: Sequence[Path]) -> tuple[list[Path], list[st
             omissions.add(f"symlink:{_rel(root, scope)}")
             continue
         if scope.is_file():
-            files[_rel(root, scope)] = scope
+            if scope.name not in _VCS_INTERNAL_DIRS:
+                files[_rel(root, scope)] = scope
             continue
         for dirpath, dirnames, filenames in os.walk(scope, followlinks=False):
             directory = Path(dirpath)
             kept_dirs: list[str] = []
             for name in sorted(dirnames):
                 child = directory / name
+                if name in _VCS_INTERNAL_DIRS:
+                    continue
                 if child.is_symlink():
                     omissions.add(f"symlink:{_rel(root, child)}")
                 else:

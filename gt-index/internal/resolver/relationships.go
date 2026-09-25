@@ -139,7 +139,7 @@ func ResolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 
 func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitScope string, scopeNodes map[int64]bool) (int, error) {
 	// Pre-build indexes from the DB: name -> []nodeID with label filter.
-	classIndex, interfaceIndex, funcFileIndex, funcRangeIndex := buildRelationshipIndexesTx(tx)
+	classIndex, interfaceIndex, funcFileIndex, funcRangeIndex, funcLangByID := buildRelationshipIndexesTx(tx)
 
 	// File-path -> File-anchor node ID (for file-level anchoring of edges)
 	fileNodeMap := buildFileNodeMapTx(tx, files)
@@ -249,7 +249,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 				if m := pyClassRe.FindStringSubmatch(line); m != nil {
 					childName := m[1]
 					baseList := m[2]
-					childID := resolveClassNode(childName, sf.Path, classIndex)
+					childID := resolveClassNodeInLang(childName, sf.Path, sf.Language, classIndex)
 					for _, base := range splitAndTrim(baseList) {
 						// Skip known non-class bases
 						if base == "" || base == "object" || base == "type" {
@@ -259,7 +259,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 						if idx := strings.Index(base, "["); idx > 0 {
 							base = base[:idx]
 						}
-						baseID := resolveClassNode(base, sf.Path, classIndex)
+						baseID := resolveClassNodeInLang(base, sf.Path, sf.Language, classIndex)
 						if baseID != 0 && childID != 0 {
 							addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 						}
@@ -305,8 +305,8 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 				if m := jsExtendsRe.FindStringSubmatch(line); m != nil {
 					childName := m[1]
 					baseName := m[2]
-					childID := resolveClassNode(childName, sf.Path, classIndex)
-					baseID := resolveClassNode(baseName, sf.Path, classIndex)
+					childID := resolveClassNodeInLang(childName, sf.Path, sf.Language, classIndex)
+					baseID := resolveClassNodeInLang(baseName, sf.Path, sf.Language, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -316,7 +316,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 				if m := implementsRe.FindStringSubmatch(line); m != nil {
 					childName := m[1]
 					implList := m[2]
-					childID := resolveClassNode(childName, sf.Path, classIndex)
+					childID := resolveClassNodeInLang(childName, sf.Path, sf.Language, classIndex)
 					for _, iface := range splitAndTrim(implList) {
 						if iface == "" {
 							continue
@@ -325,7 +325,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 						if idx := strings.Index(iface, "<"); idx > 0 {
 							iface = iface[:idx]
 						}
-						ifaceID := resolveInterfaceOrClassNode(iface, sf.Path, interfaceIndex, classIndex)
+						ifaceID := resolveInterfaceOrClassNodeInLang(iface, sf.Path, sf.Language, interfaceIndex, classIndex)
 						if childID != 0 && ifaceID != 0 {
 							addEdge(childID, ifaceID, "IMPLEMENTS", sf.Path, lineNum, "implements", 1.0)
 						}
@@ -351,7 +351,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 						if isHTMLElement(componentName) {
 							continue
 						}
-						targetID := resolveClassOrFuncNode(componentName, sf.Path, classIndex, funcFileIndex)
+						targetID := resolveClassOrFuncNodeInLang(componentName, sf.Path, sf.Language, classIndex, funcFileIndex, funcLangByID)
 						if targetID != 0 {
 							addEdge(sourceID, targetID, "COMPOSES", sf.Path, lineNum, "jsx_component", 0.9)
 						}
@@ -426,7 +426,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 					// literal; abstain when it is not a resolvable named
 					// reference (inline function, arrow, unresolvable name).
 					if tok := routeHandlerArg(line); tok != "" {
-						if handlerID := resolveRouteHandler(tok, sf.Path, funcFileIndex, classIndex); handlerID != 0 {
+						if handlerID := resolveRouteHandlerInLang(tok, sf.Path, sf.Language, funcFileIndex, classIndex, funcLangByID); handlerID != 0 {
 							addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
 								"framework_route", 0.7, routeEdgeMetadata(routeBinding{
 									Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
@@ -439,8 +439,8 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 				if m := javaExtendsRe.FindStringSubmatch(line); m != nil {
 					childName := m[1]
 					baseName := m[2]
-					childID := resolveClassNode(childName, sf.Path, classIndex)
-					baseID := resolveClassNode(baseName, sf.Path, classIndex)
+					childID := resolveClassNodeInLang(childName, sf.Path, sf.Language, classIndex)
+					baseID := resolveClassNodeInLang(baseName, sf.Path, sf.Language, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -450,7 +450,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 				if m := implementsRe.FindStringSubmatch(line); m != nil {
 					childName := m[1]
 					implList := m[2]
-					childID := resolveClassNode(childName, sf.Path, classIndex)
+					childID := resolveClassNodeInLang(childName, sf.Path, sf.Language, classIndex)
 					for _, iface := range splitAndTrim(implList) {
 						if iface == "" {
 							continue
@@ -458,7 +458,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 						if idx := strings.Index(iface, "<"); idx > 0 {
 							iface = iface[:idx]
 						}
-						ifaceID := resolveInterfaceOrClassNode(iface, sf.Path, interfaceIndex, classIndex)
+						ifaceID := resolveInterfaceOrClassNodeInLang(iface, sf.Path, sf.Language, interfaceIndex, classIndex)
 						if childID != 0 && ifaceID != 0 {
 							addEdge(childID, ifaceID, "IMPLEMENTS", sf.Path, lineNum, "implements", 1.0)
 						}
@@ -588,11 +588,11 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 					if structDepth == 1 {
 						if m := goEmbedRe.FindStringSubmatch(line); m != nil && currentStructName != "" {
 							embeddedType := m[2]
-							childID := resolveClassNode(currentStructName, sf.Path, classIndex)
+							childID := resolveClassNodeInLang(currentStructName, sf.Path, sf.Language, classIndex)
 							// P2-7: resolve the embedded base SAME-FILE-FIRST; abstain on a
 							// cross-file name that is ambiguous (>1 same-named class in other
 							// files) rather than picking an arbitrary global first-match.
-							baseID := resolveClassNodeSameFileOrUnique(embeddedType, sf.Path, classIndex)
+							baseID := resolveClassNodeSameFileOrUniqueInLang(embeddedType, sf.Path, sf.Language, classIndex)
 							if childID != 0 && baseID != 0 {
 								addEdge(childID, baseID, "EXTENDS", sf.Path, currentStructLine, "inheritance", 1.0)
 							}
@@ -632,7 +632,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 						continue
 					}
 					if tok := routeHandlerArg(line); tok != "" {
-						if handlerID := resolveRouteHandler(tok, sf.Path, funcFileIndex, classIndex); handlerID != 0 {
+						if handlerID := resolveRouteHandlerInLang(tok, sf.Path, sf.Language, funcFileIndex, classIndex, funcLangByID); handlerID != 0 {
 							addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
 								"framework_route", 0.7, routeEdgeMetadata(routeBinding{
 									Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
@@ -641,7 +641,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 				}
 				if m := goHandleRoutePat.FindStringSubmatch(line); m != nil {
 					if tok := routeHandlerArg(line); tok != "" {
-						if handlerID := resolveRouteHandler(tok, sf.Path, funcFileIndex, classIndex); handlerID != 0 {
+						if handlerID := resolveRouteHandlerInLang(tok, sf.Path, sf.Language, funcFileIndex, classIndex, funcLangByID); handlerID != 0 {
 							if norm := normalizePath(m[2]); isAPIPath(norm) {
 								addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
 									"framework_route", 0.7, routeEdgeMetadata(routeBinding{
@@ -659,8 +659,8 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 					traitName := rustLastSegment(m[1])
 					structName := rustLastSegment(m[2])
 					if traitName != "" && structName != "" {
-						structID := resolveClassNode(structName, sf.Path, classIndex)
-						traitID := resolveInterfaceOrClassNode(traitName, sf.Path, interfaceIndex, classIndex)
+						structID := resolveClassNodeInLang(structName, sf.Path, sf.Language, classIndex)
+						traitID := resolveInterfaceOrClassNodeInLang(traitName, sf.Path, sf.Language, interfaceIndex, classIndex)
 						if structID != 0 && traitID != 0 {
 							addEdge(structID, traitID, "IMPLEMENTS", sf.Path, lineNum, "implements", 1.0)
 						}
@@ -710,7 +710,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 				srcFunc := findEnclosingFunc(sf.Path, lineNum, funcRangeIndex)
 				if srcFunc != 0 {
 					if m := pyDependsRe.FindStringSubmatch(line); m != nil {
-						if tgt := resolveClassOrFuncNode(m[1], sf.Path, classIndex, funcFileIndex); tgt != 0 {
+						if tgt := resolveClassOrFuncNodeInLang(m[1], sf.Path, sf.Language, classIndex, funcFileIndex, funcLangByID); tgt != 0 {
 							// HAR-90 item 3: carry the DI provenance metadata
 							// ({mechanism,declared_type,resolved_to}). The declared
 							// type is the parameter annotation in `x: T = Depends(f)`
@@ -724,18 +724,18 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 						}
 					}
 					if m := injectAnnoRe.FindStringSubmatch(line); m != nil && m[1] != "" {
-						if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+						if tgt := resolveClassNodeInLang(m[1], sf.Path, sf.Language, classIndex); tgt != 0 {
 							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "annotation_injection", 0.8)
 						}
 					}
 					if m := tsCtorInjectRe.FindStringSubmatch(line); m != nil {
-						if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+						if tgt := resolveClassNodeInLang(m[1], sf.Path, sf.Language, classIndex); tgt != 0 {
 							addEdge(srcFunc, tgt, "INJECTS", sf.Path, lineNum, "ctor_injection", 0.85)
 						}
 					}
 					for _, re := range []*regexp.Regexp{ormQueryRe, ormQuery2Re, ormARRe} {
 						for _, m := range re.FindAllStringSubmatch(line, -1) {
-							if tgt := resolveClassNode(m[1], sf.Path, classIndex); tgt != 0 {
+							if tgt := resolveClassNodeInLang(m[1], sf.Path, sf.Language, classIndex); tgt != 0 {
 								addEdge(srcFunc, tgt, "QUERIES", sf.Path, lineNum, "orm_data_access", 0.85)
 							}
 						}
@@ -762,7 +762,7 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 	// DECLARED_IMPLEMENTS rows already persisted. `edges` is passed by value for
 	// the impl-index build; new edges still append through addEdgeCounted.
 	resolveFrameworkWiringTx(tx, files, root, classIndex, interfaceIndex,
-		funcFileIndex, fileNodeMap, edges, addEdgeCounted)
+		funcFileIndex, funcLangByID, fileNodeMap, edges, addEdgeCounted)
 
 	if len(edges) == 0 {
 		return 0, nil
@@ -787,7 +787,11 @@ type classNodeEntry struct {
 	// (file_path, start_line, id) that disambiguates same-named classes without
 	// riding the AUTOINCREMENT id space a batch amend renumbers.
 	Line int
-	ID   int64
+	// Language is the node's declared source language (nodes.language) — the
+	// same family the callsite resolver scopes by, so an `implements` edge can
+	// never bind a bare name to a foreign-language declaration.
+	Language string
+	ID       int64
 }
 
 // funcRange carries a function/method node's source line span so an enclosing-scope
@@ -1011,7 +1015,7 @@ func resolveGoImplementsTx(
 		if len(req.methods) == 0 {
 			continue // empty interface — satisfied by everything; not a useful edge
 		}
-		ifaceID := resolveInterfaceOrClassNode(iface.Name, iface.FilePath, interfaceIndex, classIndex)
+		ifaceID := resolveInterfaceOrClassNodeInLang(iface.Name, iface.FilePath, "go", interfaceIndex, classIndex)
 		if ifaceID == 0 {
 			continue
 		}
@@ -1153,27 +1157,29 @@ func buildRelationshipIndexesTx(tx *sql.Tx) (
 	interfaceIndex map[string][]classNodeEntry,
 	funcFileIndex map[string]map[string]int64,
 	funcRangeIndex map[string][]funcRange,
+	funcLangByID map[int64]string,
 ) {
 	classIndex = make(map[string][]classNodeEntry)
 	interfaceIndex = make(map[string][]classNodeEntry)
 	funcFileIndex = make(map[string]map[string]int64) // file -> funcName -> nodeID
 	funcRangeIndex = make(map[string][]funcRange)     // file -> []{id,start,end}
+	funcLangByID = make(map[int64]string)
 
 	// Class/Struct nodes — start_line rides along so same-name picks can be made
 	// on the CONTENT key (file_path, start_line, id), not the AUTOINCREMENT id
 	// space a batch amend renumbers.
-	rows, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line, 0), label FROM nodes WHERE label IN ('Class', 'Struct', 'Interface', 'Enum', 'Type')`)
+	rows, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line, 0), label, COALESCE(language,'') FROM nodes WHERE label IN ('Class', 'Struct', 'Interface', 'Enum', 'Type')`)
 	if err != nil {
 		return
 	}
 	for rows.Next() {
 		var id int64
-		var name, filePath, label string
+		var name, filePath, label, lang string
 		var line int
-		if err := rows.Scan(&id, &name, &filePath, &line, &label); err != nil {
+		if err := rows.Scan(&id, &name, &filePath, &line, &label, &lang); err != nil {
 			continue
 		}
-		entry := classNodeEntry{Name: name, FilePath: filePath, Line: line, ID: id}
+		entry := classNodeEntry{Name: name, FilePath: filePath, Line: line, Language: lang, ID: id}
 		if label == "Interface" {
 			interfaceIndex[name] = append(interfaceIndex[name], entry)
 		} else {
@@ -1183,21 +1189,22 @@ func buildRelationshipIndexesTx(tx *sql.Tx) (
 	rows.Close()
 
 	// Function/Method nodes for file-level lookup + line-range enclosing lookup.
-	rows2, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line,0), COALESCE(end_line,0) FROM nodes WHERE label IN ('Function', 'Method')`)
+	rows2, err := tx.Query(`SELECT id, name, file_path, COALESCE(start_line,0), COALESCE(end_line,0), COALESCE(language,'') FROM nodes WHERE label IN ('Function', 'Method')`)
 	if err != nil {
 		return
 	}
 	for rows2.Next() {
 		var id int64
-		var name, filePath string
+		var name, filePath, lang string
 		var start, end int
-		if err := rows2.Scan(&id, &name, &filePath, &start, &end); err != nil {
+		if err := rows2.Scan(&id, &name, &filePath, &start, &end, &lang); err != nil {
 			continue
 		}
 		if funcFileIndex[filePath] == nil {
 			funcFileIndex[filePath] = make(map[string]int64)
 		}
 		funcFileIndex[filePath][name] = id
+		funcLangByID[id] = lang
 		// Only index a usable span (start>0 and end>=start) for enclosing-scope lookup.
 		if start > 0 && end >= start {
 			funcRangeIndex[filePath] = append(funcRangeIndex[filePath], funcRange{ID: id, Start: start, End: end})
@@ -1258,6 +1265,16 @@ func sameFileMinEntry(entries []classNodeEntry, file string) (classNodeEntry, bo
 
 // resolveClassNode finds a Class/Struct node by name, preferring same-file.
 func resolveClassNode(name, currentFile string, classIndex map[string][]classNodeEntry) int64 {
+	return resolveClassNodeInLang(name, currentFile, "", classIndex)
+}
+
+// resolveClassNodeInLang is resolveClassNode scoped to the caller's language
+// family: the cross-file fallback only considers declarations whose known
+// language family is compatible with callerLang (an unknown language on
+// either side passes). A bare name must not bind a foreign-language class —
+// a TypeScript `implements Greeter` that picked up a Go interface was the
+// HAR-90 cross-language defect.
+func resolveClassNodeInLang(name, currentFile, callerLang string, classIndex map[string][]classNodeEntry) int64 {
 	entries := classIndex[name]
 	if len(entries) == 0 {
 		return 0
@@ -1265,6 +1282,18 @@ func resolveClassNode(name, currentFile string, classIndex map[string][]classNod
 	// Prefer a same-file match — the content-smallest (start_line, id) one.
 	if e, ok := sameFileMinEntry(entries, currentFile); ok {
 		return e.ID
+	}
+	if f := langFamily(callerLang); f != "" {
+		scoped := make([]classNodeEntry, 0, len(entries))
+		for _, e := range entries {
+			if familyCompatible(e.Language, callerLang) {
+				scoped = append(scoped, e)
+			}
+		}
+		if len(scoped) == 0 {
+			return 0
+		}
+		return minClassEntry(scoped).ID
 	}
 	// Cross-file fallback: the content-smallest (file_path, start_line, id)
 	// match, not entries[0] — a scan-order pick rides the unordered index scan
@@ -1280,7 +1309,24 @@ func resolveClassNode(name, currentFile string, classIndex map[string][]classNod
 // Go struct-embed EXTENDS path (P2-7): an embedded base type names a real type, but a
 // bare embed in file A must not be wired to an arbitrary same-named type in file B.
 func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[string][]classNodeEntry) int64 {
+	return resolveClassNodeSameFileOrUniqueInLang(name, currentFile, "", classIndex)
+}
+
+// resolveClassNodeSameFileOrUniqueInLang applies the same rule inside the
+// caller's language family: a cross-file match counts only when it is unique
+// among family-compatible declarations — a foreign-language same-named class
+// can neither satisfy the edge nor manufacture ambiguity.
+func resolveClassNodeSameFileOrUniqueInLang(name, currentFile, callerLang string, classIndex map[string][]classNodeEntry) int64 {
 	entries := classIndex[name]
+	if langFamily(callerLang) != "" {
+		scoped := make([]classNodeEntry, 0, len(entries))
+		for _, e := range entries {
+			if familyCompatible(e.Language, callerLang) {
+				scoped = append(scoped, e)
+			}
+		}
+		entries = scoped
+	}
 	if len(entries) == 0 {
 		return 0
 	}
@@ -1295,12 +1341,30 @@ func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[s
 
 // resolveInterfaceNode finds an Interface node by name.
 func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]classNodeEntry) int64 {
+	return resolveInterfaceNodeInLang(name, currentFile, "", interfaceIndex)
+}
+
+// resolveInterfaceNodeInLang is resolveInterfaceNode scoped to the caller's
+// language family on the cross-file fallback — see resolveClassNodeInLang.
+func resolveInterfaceNodeInLang(name, currentFile, callerLang string, interfaceIndex map[string][]classNodeEntry) int64 {
 	entries := interfaceIndex[name]
 	if len(entries) == 0 {
 		return 0
 	}
 	if e, ok := sameFileMinEntry(entries, currentFile); ok {
 		return e.ID
+	}
+	if f := langFamily(callerLang); f != "" {
+		scoped := make([]classNodeEntry, 0, len(entries))
+		for _, e := range entries {
+			if familyCompatible(e.Language, callerLang) {
+				scoped = append(scoped, e)
+			}
+		}
+		if len(scoped) == 0 {
+			return 0
+		}
+		return minClassEntry(scoped).ID
 	}
 	// Cross-file fallback: content-smallest (file_path, start_line, id), not
 	// entries[0] — same batch-amend id renumbering hazard as resolveClassNode.
@@ -1309,10 +1373,16 @@ func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]
 
 // resolveInterfaceOrClassNode tries interface first, then class.
 func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, classIndex map[string][]classNodeEntry) int64 {
-	if id := resolveInterfaceNode(name, currentFile, interfaceIndex); id != 0 {
+	return resolveInterfaceOrClassNodeInLang(name, currentFile, "", interfaceIndex, classIndex)
+}
+
+// resolveInterfaceOrClassNodeInLang is resolveInterfaceOrClassNode scoped to
+// the caller's language family — the shape_check/IMPLEMENTS defect fix.
+func resolveInterfaceOrClassNodeInLang(name, currentFile, callerLang string, interfaceIndex, classIndex map[string][]classNodeEntry) int64 {
+	if id := resolveInterfaceNodeInLang(name, currentFile, callerLang, interfaceIndex); id != 0 {
 		return id
 	}
-	return resolveClassNode(name, currentFile, classIndex)
+	return resolveClassNodeInLang(name, currentFile, callerLang, classIndex)
 }
 
 // resolveClassOrFuncNode resolves a JSX component name across the union of
@@ -1322,9 +1392,22 @@ func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, class
 // cannot justify preferring a class over a function (or vice versa), so every
 // mixed-kind ambiguity fails closed.
 func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]classNodeEntry, funcFileIndex map[string]map[string]int64) int64 {
+	return resolveClassOrFuncNodeInLang(name, currentFile, "", classIndex, funcFileIndex, nil)
+}
+
+// resolveClassOrFuncNodeInLang scopes both candidate kinds to the caller's
+// language family before applying the same-file/unique rules — a sole
+// foreign-language function must not win a JSX component name any more than
+// a foreign class may. ``langOf`` maps func node id → language; with a nil
+// map every function is treated as unknown-language (passes the filter).
+func resolveClassOrFuncNodeInLang(name, currentFile, callerLang string, classIndex map[string][]classNodeEntry, funcFileIndex map[string]map[string]int64, langOf map[int64]string) int64 {
+	familyOK := langFamily(callerLang) != ""
 	sameFile := make(map[int64]struct{})
 	all := make(map[int64]struct{})
 	for _, entry := range classIndex[name] {
+		if familyOK && !familyCompatible(entry.Language, callerLang) {
+			continue
+		}
 		all[entry.ID] = struct{}{}
 		if entry.FilePath == currentFile {
 			sameFile[entry.ID] = struct{}{}
@@ -1333,6 +1416,9 @@ func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]cl
 	for file, funcs := range funcFileIndex {
 		id, ok := funcs[name]
 		if !ok {
+			continue
+		}
+		if familyOK && !familyCompatible(langOf[id], callerLang) {
 			continue
 		}
 		all[id] = struct{}{}
@@ -1693,6 +1779,13 @@ func cleanRouteHandler(arg string) string {
 // `controllers.GetUser`) is resolved same-file-first, then cross-file only
 // when globally unique — ambiguity abstains (returns 0), never guesses.
 func resolveRouteHandler(token, file string, funcFileIndex map[string]map[string]int64, classIndex map[string][]classNodeEntry) int64 {
+	return resolveRouteHandlerInLang(token, file, "", funcFileIndex, classIndex, nil)
+}
+
+// resolveRouteHandlerInLang is resolveRouteHandler scoped to the route file's
+// language family — a `use fooHandler` token in a TypeScript file must not
+// bind a same-named Go function.
+func resolveRouteHandlerInLang(token, file, callerLang string, funcFileIndex map[string]map[string]int64, classIndex map[string][]classNodeEntry, langOf map[int64]string) int64 {
 	token = strings.TrimSpace(token)
 	token = strings.TrimLeft(token, "&*")
 	if i := strings.LastIndex(token, "."); i >= 0 {
@@ -1701,7 +1794,7 @@ func resolveRouteHandler(token, file string, funcFileIndex map[string]map[string
 	if token == "" || !identLikeRe.MatchString(token) {
 		return 0
 	}
-	return resolveClassOrFuncNode(token, file, classIndex, funcFileIndex)
+	return resolveClassOrFuncNodeInLang(token, file, callerLang, classIndex, funcFileIndex, langOf)
 }
 
 // nextAppRoutePath derives the route path of a Next.js app-router file from
