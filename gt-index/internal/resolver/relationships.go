@@ -153,7 +153,12 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 	// framework-wiring pass (HAR-90 item 3) needs >1 for ambiguous DI impl
 	// candidate edges; single-resolution edges pass 1.
 	addEdgeCounted := func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64, metadata string, candidateCount int) {
-		if sourceID == 0 || targetID == 0 || sourceID == targetID {
+		// An inline-handler route is file-anchored by construction (file ->
+		// its own file node); it is the one relationship allowed to be a
+		// self-edge. Route edges feed route_map/api_impact only, never the
+		// CALLS-based flow and community passes.
+		inlineRoute := edgeType == "HANDLES_ROUTE" && method == "framework_route_inline"
+		if sourceID == 0 || targetID == 0 || (sourceID == targetID && !inlineRoute) {
 			return
 		}
 		if emitScope != "" && sourceFile != emitScope &&
