@@ -786,6 +786,65 @@ func extractDeclaratorIdentifier(node *sitter.Node, src []byte) string {
 	return ""
 }
 
+// nestedDefinitionLanguages are the languages where a named function declared
+// inside another function is an ordinary, callable definition (closures,
+// factories: awilix's createContainer declares isReady inside itself).
+var nestedDefinitionLanguages = map[string]bool{
+	"python": true, "javascript": true, "typescript": true, "tsx": true, "rust": true,
+}
+
+// emitNestedDefinitions records every NAMED function declared inside a
+// function body as a Function definition qualified by its enclosing callable.
+// walkNode stops at the outer function (its calls, including the nested
+// bodies', are extracted from the whole body under the outer scope), so these
+// were never definitions: `def outer(): def inner()` left `inner` resolvable
+// only as a callsite. Only definitions are added here - call attribution is
+// unchanged - and an unnamed lambda/callback is skipped, never named by guess.
+func emitNestedDefinitions(body *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, isTest bool, outerQual string) {
+	spec := sf.Spec
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		child := body.NamedChild(i)
+		if child == nil || spec.IsClassNode(child.Type()) {
+			continue
+		}
+		if !spec.IsFunctionNode(child.Type()) {
+			emitNestedDefinitions(child, sf, src, result, isTest, outerQual)
+			continue
+		}
+		name := extractFieldText(child, spec.NameField, src)
+		if name == "" && child.Type() == "arrow_function" {
+			if parent := child.Parent(); parent != nil && parent.Type() == "variable_declarator" {
+				name = extractFieldText(parent, "name", src)
+			}
+		}
+		innerBody := child.ChildByFieldName(spec.BodyField)
+		if name == "" {
+			if innerBody != nil {
+				emitNestedDefinitions(innerBody, sf, src, result, isTest, outerQual)
+			}
+			continue
+		}
+		qualName := outerQual + "." + name
+		result.Nodes = append(result.Nodes, store.Node{
+			Label:         "Function",
+			Name:          name,
+			QualifiedName: qualName,
+			FilePath:      sf.Path,
+			StartLine:     int(child.StartPoint().Row) + 1,
+			EndLine:       int(child.EndPoint().Row) + 1,
+			Signature:     extractSignature(child, src, spec.BodyField),
+			ReturnType:    extractFieldText(child, spec.ReturnTypeField, src),
+			IsTest:        isTest,
+			Language:      sf.Language,
+			ByteStart:     uint64(child.StartByte()),
+			ByteEnd:       uint64(child.EndByte()),
+		})
+		if innerBody != nil {
+			emitNestedDefinitions(innerBody, sf, src, result, isTest, qualName)
+		}
+	}
+}
+
 func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
 	spec := sf.Spec
 	nodeType := node.Type()
@@ -898,6 +957,9 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				extractAssignments(bodyNode, sf, src, result, scopeName, objectScope)
 				// HAR-90 items 5-8: statement-level CFG for this function body
 				extractCFG(node, bodyNode, sf, src, result, idx)
+				if nestedDefinitionLanguages[sf.Language] {
+					emitNestedDefinitions(bodyNode, sf, src, result, isTest, qualName)
+				}
 			}
 
 			// Extract properties (guard clauses, exception types, return shape)
