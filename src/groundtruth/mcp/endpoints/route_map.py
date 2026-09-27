@@ -216,7 +216,7 @@ def _collect_routes(
             "SELECT e.id, e.source_id, e.target_id, e.source_line, e.source_file, "
             f"e.confidence, {meta_expr} AS metadata, "
             "n.name AS handler_name, n.file_path AS handler_file, "
-            "n.start_line AS handler_line "
+            "n.start_line AS handler_line, n.label AS handler_label "
             "FROM edges e JOIN nodes n ON n.id = e.source_id "
             "WHERE e.type = 'HANDLES_ROUTE' "
             "ORDER BY e.source_file, e.source_line, e.id",
@@ -247,13 +247,17 @@ def _collect_routes(
         if parsed is None:
             route_source = "unknown"
         name, method = parsed if parsed is not None else (_UNKNOWN_ROUTE, None)
+        # A file-anchored edge is an inline handler: report the registration
+        # line, never the file node's name as if it were a function.
+        inline = row["handler_label"] == "File"
         routes.append(
             {
                 "name": name,
                 "method": method,
-                "handler": row["handler_name"],
+                "handler": None if inline else row["handler_name"],
+                "handler_kind": "inline" if inline else "named",
                 "handler_file": row["handler_file"],
-                "handler_line": row["handler_line"],
+                "handler_line": row["source_line"] if inline else row["handler_line"],
                 "route_source": route_source,
                 "middleware": [],
                 "injections": [],

@@ -425,10 +425,24 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 					// Registration-shaped — the handler token follows the path
 					// literal; abstain when it is not a resolvable named
 					// reference (inline function, arrow, unresolvable name).
+					bound := false
 					if tok := routeHandlerArg(line); tok != "" {
 						if handlerID := resolveRouteHandlerInLang(tok, sf.Path, sf.Language, funcFileIndex, classIndex, funcLangByID); handlerID != 0 {
 							addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
 								"framework_route", 0.7, routeEdgeMetadata(routeBinding{
+									Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
+							bound = true
+						}
+					}
+					if !bound && r.Path != "" {
+						// Inline handler (`app.get("/x", (req, res) => {...})`,
+						// Koa `router.get("/m", (ctx) => ...)`): no named
+						// function to bind, but the route is real. Anchor it on
+						// the file at the registration line, marked inline, so
+						// it is surfaced without inventing a handler name.
+						if fileID, ok := fileNodeMap[sf.Path]; ok {
+							addEdgeMeta(fileID, fileID, "HANDLES_ROUTE", sf.Path, lineNum,
+								"framework_route_inline", 0.6, routeEdgeMetadataInline(routeBinding{
 									Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
 						}
 					}
@@ -1841,6 +1855,20 @@ func nextAppRoutePath(filePath string) (string, bool) {
 // routeEdgeMetadata serializes the route fact carried by a HANDLES_ROUTE edge
 // so consumers do not have to re-parse the source line (the Python path stores
 // no route and route_map re-reads source_line — non-Python edges carry it).
+// routeEdgeMetadataInline is routeEdgeMetadata for a route whose handler is an
+// inline function: the edge is anchored on the file, and "handler":"inline"
+// tells readers there is no named handler node behind it.
+func routeEdgeMetadataInline(b routeBinding, language string) string {
+	md, err := json.Marshal(map[string]string{
+		"route": b.Path, "method": b.Method, "framework": b.Framework,
+		"mechanism": b.Mechanism, "language": language, "handler": "inline",
+	})
+	if err != nil {
+		return ""
+	}
+	return string(md)
+}
+
 func routeEdgeMetadata(b routeBinding, language string) string {
 	md, err := json.Marshal(map[string]string{
 		"route": b.Path, "method": b.Method, "framework": b.Framework,
