@@ -187,9 +187,23 @@ app.delete("/api/missing", missingHandler);
 		t.Error("auth (middleware arg) bound as handler — last-arg rule broken")
 	}
 
-	// Abstentions: inline arrow handler and unresolvable name mint no edge.
-	if len(edges) != 2 {
-		t.Errorf("got %d HANDLES_ROUTE edges, want exactly 2 (inline + missing handler must abstain)", len(edges))
+	// app.put("/api/inline", (req, res) => ...) -> the route is surfaced,
+	// anchored on the file at the registration line and marked inline; no
+	// handler name is invented.
+	inline, ok := oneEdge(t, edges, 5, 5)
+	if !ok {
+		t.Fatal("missing file-anchored HANDLES_ROUTE for the inline handler")
+	}
+	if inline.ResolutionMethod != "framework_route_inline" || inline.SourceLine != 10 {
+		t.Errorf("inline edge = %+v, want framework_route_inline at line 10", inline)
+	}
+	if mi := routeMeta(t, inline); mi["route"] != "/api/inline" || mi["method"] != "PUT" || mi["handler"] != "inline" {
+		t.Errorf("inline metadata = %v, want route=/api/inline method=PUT handler=inline", mi)
+	}
+
+	// Abstention: a named handler that does not resolve mints no edge.
+	if len(edges) != 3 {
+		t.Errorf("got %d HANDLES_ROUTE edges, want exactly 3 (the unresolvable named handler must abstain)", len(edges))
 	}
 }
 

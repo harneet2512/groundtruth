@@ -430,21 +430,20 @@ func resolveRelationshipsTx(tx *sql.Tx, files []walker.SourceFile, root, emitSco
 					// Registration-shaped — the handler token follows the path
 					// literal; abstain when it is not a resolvable named
 					// reference (inline function, arrow, unresolvable name).
-					bound := false
-					if tok := routeHandlerArg(line); tok != "" {
+					tok := routeHandlerArg(line)
+					if tok != "" {
 						if handlerID := resolveRouteHandlerInLang(tok, sf.Path, sf.Language, funcFileIndex, classIndex, funcLangByID); handlerID != 0 {
 							addEdgeMeta(handlerID, fileNodeMap[sf.Path], "HANDLES_ROUTE", sf.Path, lineNum,
 								"framework_route", 0.7, routeEdgeMetadata(routeBinding{
 									Path: r.Path, Method: r.Method, Framework: r.Framework, Mechanism: r.Mechanism}, sf.Language))
-							bound = true
 						}
-					}
-					if !bound && r.Path != "" {
+					} else if r.Path != "" {
 						// Inline handler (`app.get("/x", (req, res) => {...})`,
 						// Koa `router.get("/m", (ctx) => ...)`): no named
 						// function to bind, but the route is real. Anchor it on
 						// the file at the registration line, marked inline, so
-						// it is surfaced without inventing a handler name.
+						// it is surfaced without inventing a handler name. A
+						// NAMED handler that does not resolve still abstains.
 						if fileID, ok := fileNodeMap[sf.Path]; ok {
 							addEdgeMeta(fileID, fileID, "HANDLES_ROUTE", sf.Path, lineNum,
 								"framework_route_inline", 0.6, routeEdgeMetadataInline(routeBinding{
