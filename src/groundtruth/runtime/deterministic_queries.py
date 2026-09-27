@@ -1284,7 +1284,9 @@ def _route_omissions(
     anchors: list[tuple[str, int]] = []
     for route in routes:
         name = str(route.get("name") or route.get("route") or "")
-        if not route.get("handler"):
+        # An inline handler is bound (its body is the registration site); only
+        # a route with no handler of either kind is unresolved.
+        if not route.get("handler") and route.get("handler_kind") != "inline":
             omissions.append(f"route_handler_unresolved:{name}")
         if name == "unknown":
             omissions.append("route_path_unknown")
@@ -1336,6 +1338,7 @@ def _route_map(request: ActionRequest, context: DeterministicQueryContext) -> _P
                 "route": r.get("name"),
                 "method": r.get("method"),
                 "handler": r.get("handler"),
+                "handler_kind": r.get("handler_kind"),
                 "handler_file": r.get("handler_file"),
                 "handler_line": r.get("handler_line"),
                 "route_source": r.get("route_source"),

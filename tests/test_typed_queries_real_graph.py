@@ -341,10 +341,32 @@ def test_symbol_context_truncation_recorded(gt_index, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_route_map_api_call_only_route_does_not_null_the_answer(gt_index, tmp_path):
-    """An inline-handler route (API_CALL, no HANDLES_ROUTE) has no handler
-    line: it must not become anchor line 0 and crash the artifact."""
+def test_route_map_inline_handler_binds_at_the_registration_line(gt_index, tmp_path):
+    """An inline handler has no named definition: the route is bound, anchored
+    at its registration line, and not reported as unresolved."""
     root, db = _graph(gt_index, tmp_path, _XLANG_REPO)
+    artifact, answer = _run(root, db, ActionKind.ROUTE_MAP, {})
+    by_route = {r["route"]: r for r in answer["routes"]}
+    orders = by_route["/orders"]
+    assert orders["handler"] is None
+    assert orders["handler_kind"] == "inline"
+    assert orders["discovered_via"] == "handles_route"
+    assert (orders["handler_file"], orders["handler_line"]) == ("web/server.js", 15)
+    assert not any(o.startswith("route_handler_unresolved") for o in artifact.omissions)
+    assert ("web/server.js", 15) in {(a.path, a.line) for a in artifact.anchors}
+    assert by_route["/users"]["handler_kind"] == "named"
+
+
+def test_route_map_api_call_only_route_does_not_null_the_answer(gt_index, tmp_path):
+    """A route whose named handler cannot be resolved has no HANDLES_ROUTE,
+    only client API_CALLs: it must not become anchor line 0 and crash the
+    artifact, and it stays a named unknown."""
+    files = dict(_XLANG_REPO)
+    files["web/server.js"] = files["web/server.js"].replace(
+        "app.get('/orders', (req, res) => { res.send([]); });",
+        "app.get('/orders', ordersHandler);",
+    )
+    root, db = _graph(gt_index, tmp_path, files)
     artifact, answer = _run(root, db, ActionKind.ROUTE_MAP, {})
     by_route = {r["route"]: r for r in answer["routes"]}
     assert by_route["/orders"]["handler"] is None
