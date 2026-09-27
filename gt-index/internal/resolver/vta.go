@@ -180,6 +180,75 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 		}
 		return changed
 	}
+	// addValueSets is addValue for evidence that is already a set: the worklist
+	// merges one value's facts into another, and set union needs no ordering.
+	// Sorting a growing provenance set on every propagation was 42% of the
+	// producer's CPU on aiomonitor; output order is fixed at serialization.
+	addValueSets := func(key vtaValueKey, types, sources, edges map[string]struct{}, extraEdge string) bool {
+		if key.Name == "" || len(types) == 0 {
+			return false
+		}
+		evidence := valueTypes[key]
+		if evidence == nil {
+			evidence = &vtaValueEvidence{Types: make(map[string]struct{}), Sources: make(map[string]struct{}), Edges: make(map[string]struct{})}
+			valueTypes[key] = evidence
+		}
+		changed := false
+		for name := range types {
+			name = normalizedTypeName(name)
+			if name == "" {
+				continue
+			}
+			if _, exists := evidence.Types[name]; !exists {
+				evidence.Types[name] = struct{}{}
+				changed = true
+			}
+		}
+		for source := range sources {
+			if source == "" {
+				continue
+			}
+			if _, exists := evidence.Sources[source]; !exists {
+				evidence.Sources[source] = struct{}{}
+				changed = true
+			}
+		}
+		for edge := range edges {
+			if edge == "" {
+				continue
+			}
+			if _, exists := evidence.Edges[edge]; !exists {
+				evidence.Edges[edge] = struct{}{}
+				changed = true
+			}
+		}
+		if extraEdge != "" {
+			if _, exists := evidence.Edges[extraEdge]; !exists {
+				evidence.Edges[extraEdge] = struct{}{}
+				changed = true
+			}
+		}
+		return changed
+	}
+	// Value facts only ever grow, so a source whose three sets have the same
+	// cardinality as at its last merge into a target is the same set and the
+	// merge would add nothing. Re-merging every source into every target on
+	// every round was the rest of the fixed point's cost (aiomonitor).
+	type mergeKey struct {
+		target vtaValueKey
+		source string
+	}
+	type mergeSizes struct{ types, sources, edges int }
+	lastMerge := make(map[mergeKey]mergeSizes)
+	mergeFrom := func(key vtaValueKey, source string, evidence *vtaValueEvidence, extraEdge string) bool {
+		memo := mergeKey{target: key, source: source}
+		sizes := mergeSizes{len(evidence.Types), len(evidence.Sources), len(evidence.Edges)}
+		if previous, seen := lastMerge[memo]; seen && previous == sizes {
+			return false
+		}
+		lastMerge[memo] = sizes
+		return addValueSets(key, evidence.Types, evidence.Sources, evidence.Edges, extraEdge)
+	}
 	assignmentNames := func(assignment parser.AssignmentRef) []string {
 		if !assignment.ViaReturn {
 			return []string{assignment.TypeName, assignment.TypeQualified}
@@ -348,6 +417,66 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 		}
 		return out
 	}
+	// Formal-parameter indexes. parameterMatches and the target formal lookup
+	// each compared every call argument against EVERY assignment on EVERY
+	// iteration - calls x arguments x assignments per round (aiomonitor: 9,726
+	// calls x 4,846 assignments), which no iteration budget bounds. The keys
+	// below are exactly the predicates those scans evaluate, and candidates
+	// keep assignment order, so the fixed point is unchanged.
+	type formalKey struct {
+		index int
+		scope string
+	}
+	formalsByScope := make(map[formalKey][]int)
+	formalsBySuffix := make(map[formalKey][]int)
+	formalsByOwner := make(map[formalKey][]int)
+	for i := range assignments {
+		assignment := &assignments[i]
+		if !assignment.IsParameter {
+			continue
+		}
+		scope := normalizedTypeName(assignment.Owner)
+		if scope == "" {
+			scope = normalizedTypeName(assignment.Scope)
+		}
+		formalsByScope[formalKey{assignment.ParameterIndex, scope}] = append(formalsByScope[formalKey{assignment.ParameterIndex, scope}], i)
+		for pos := 0; pos < len(scope); pos++ {
+			if scope[pos] == '.' {
+				key := formalKey{assignment.ParameterIndex, scope[pos+1:]}
+				formalsBySuffix[key] = append(formalsBySuffix[key], i)
+			}
+		}
+		owner := assignment.Owner
+		if owner == "" {
+			owner = assignment.Scope
+		}
+		ownerKey := formalKey{assignment.ParameterIndex, strings.TrimSpace(owner)}
+		formalsByOwner[ownerKey] = append(formalsByOwner[ownerKey], i)
+	}
+	matchingFormals := func(call parser.CallRef, index int) []int {
+		if call.CalleeScope != "" {
+			return formalsByScope[formalKey{index, normalizedTypeName(call.CalleeScope)}]
+		}
+		callee := normalizedTypeName(call.CalleeName)
+		exact := formalsByScope[formalKey{index, callee}]
+		suffix := formalsBySuffix[formalKey{index, callee}]
+		if len(suffix) == 0 {
+			return exact
+		}
+		if len(exact) == 0 {
+			return suffix
+		}
+		merged := make([]int, 0, len(exact)+len(suffix))
+		seen := make(map[int]struct{}, len(exact)+len(suffix))
+		for _, i := range append(append([]int(nil), exact...), suffix...) {
+			if _, dup := seen[i]; !dup {
+				seen[i] = struct{}{}
+				merged = append(merged, i)
+			}
+		}
+		sort.Ints(merged)
+		return merged
+	}
 	// Monotone worklist: every iteration only adds a value fact, so finite
 	// type/name facts guarantee termination even for cyclic calls. In addition
 	// to ordinary argument/formal flow, each viable target receives a distinct
@@ -363,17 +492,14 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 		changed = false
 		for ordinal, call := range calls {
 			for index, argument := range call.ArgumentNames {
-				for _, parameter := range assignments {
+				for _, formalIndex := range matchingFormals(call, index) {
+					parameter := assignments[formalIndex]
 					if !parameterMatches(parameter, call, index) {
 						continue
 					}
 					evidence := callValue(call, argument)
-					edges := sortedStringSet(evidence.Edges)
-					edges = append(edges, vtaCallEdgeStableID(call, argument, index, parameter))
-					for typ := range evidence.Types {
-						if addValue(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, []string{typ}, sortedStringSet(evidence.Sources), edges) {
-							changed = true
-						}
+					if mergeFrom(vtaValueKey{File: parameter.File, Scope: parameter.Scope, Object: parameter.ObjectScope, Name: parameter.VarName, Line: parameter.Line}, "arg:"+strconv.Itoa(ordinal)+":"+strconv.Itoa(index)+":"+argument, evidence, vtaCallEdgeStableID(call, argument, index, parameter)) {
+						changed = true
 					}
 				}
 			}
@@ -388,7 +514,7 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 						object = meta[method.ParentID].Name
 					}
 					thisKey := vtaValueKey{File: method.File, Scope: methodScope(methodID), Object: object, Name: thisName, Line: method.StartLine}
-					if addValue(thisKey, sortedStringSet(receiverEvidence.Types), sortedStringSet(receiverEvidence.Sources), append(sortedStringSet(receiverEvidence.Edges), vtaReceiverToThisStableID(call, receiver, vtaTargetIdentity(meta, methodID), thisName))) {
+					if mergeFrom(thisKey, "recv:"+strconv.Itoa(ordinal)+":"+receiver, receiverEvidence, vtaReceiverToThisStableID(call, receiver, vtaTargetIdentity(meta, methodID), thisName)) {
 						changed = true
 					}
 					// The source set is filtered again at result construction by the
@@ -402,19 +528,11 @@ func AnalyzeVTAWithBudget(calls []parser.CallRef, meta map[int64]NodeMeta, imple
 							continue
 						}
 						var formal *parser.AssignmentRef
-						for i := range assignments {
-							candidate := &assignments[i]
-							owner := candidate.Owner
-							if owner == "" {
-								owner = candidate.Scope
-							}
-							if candidate.IsParameter && candidate.ParameterIndex == index && strings.TrimSpace(owner) == strings.TrimSpace(methodScope(methodID)) {
-								formal = candidate
-								break
-							}
+						if owned := formalsByOwner[formalKey{index, strings.TrimSpace(methodScope(methodID))}]; len(owned) > 0 {
+							formal = &assignments[owned[0]]
 						}
 						edge := vtaArgumentToFormalStableID(call, argument, index, vtaTargetIdentity(meta, methodID), formal)
-						if formal != nil && addValue(vtaValueKey{File: formal.File, Scope: formal.Scope, Object: formal.ObjectScope, Name: formal.VarName, Line: formal.Line}, sortedStringSet(argumentEvidence.Types), sortedStringSet(argumentEvidence.Sources), append(sortedStringSet(argumentEvidence.Edges), edge)) {
+						if formal != nil && mergeFrom(vtaValueKey{File: formal.File, Scope: formal.Scope, Object: formal.ObjectScope, Name: formal.VarName, Line: formal.Line}, "targ:"+strconv.Itoa(ordinal)+":"+strconv.Itoa(index)+":"+argument, argumentEvidence, edge) {
 							changed = true
 						}
 						addCandidateEvidence(ordinal, methodID, nil, edge)
